@@ -1652,7 +1652,7 @@ func TestAddLoomGenerationIsReproducible(t *testing.T) {
 // TestAddLoomIsNotAutoInstalled guards that no other capability pulls Loom in.
 func TestAddLoomIsNotAutoInstalled(t *testing.T) {
 	catalog := newCatalog()
-	for _, name := range []string{"base", "http", "web", "api", "db"} {
+	for _, name := range []string{"base", "http", "web", "api", "db", "redis"} {
 		capability, err := catalog.Get(name)
 		if err != nil {
 			t.Fatalf("Get %s: %v", name, err)
@@ -2251,7 +2251,9 @@ func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
 		{name: "http", caps: []string{"http"}},
 		{name: "api", caps: []string{"api"}, needsAPI: true},
 		{name: "db", caps: []string{"db"}},
+		{name: "redis", caps: []string{"redis"}},
 		{name: "loom", caps: []string{"loom"}, needsLoom: true},
+		{name: "redis+loom", caps: []string{"redis", "loom"}, needsLoom: true},
 		{name: "api+db", caps: []string{"api", "db"}, needsAPI: true},
 		{name: "db+loom", caps: []string{"db", "loom"}, needsLoom: true},
 		{name: "api+db+loom", caps: []string{"api", "db", "loom"}, needsAPI: true, needsLoom: true},
@@ -2277,5 +2279,500 @@ func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
 				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 			}
 		})
+	}
+}
+
+// --- redis capability -------------------------------------------------------
+
+// redisSectionKeys maps a capability to the YAML section it appends, so an
+// order test can assert both sections landed without hard-coding per order.
+var redisSectionKeys = map[string]string{"http": "http:", "db": "database:", "redis": "redis:"}
+
+func TestAddRedisInstallsAlone(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+
+	result := add(t, dir, "redis")
+	if got, want := strings.Join(result.Installed, ","), "config,redis"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
+	}
+	for _, path := range []string{
+		"internal/config/config.go",
+		"internal/config/redis.go",
+		"internal/config/redis_test.go",
+		"internal/redisclient/redisclient.go",
+		"internal/redisclient/redisclient_test.go",
+		"internal/redisclient/README.md",
+		"config.yml",
+		"config.example.yml",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
+			t.Errorf("expected %s: %v", path, err)
+		}
+	}
+	// redis requires config only: it never pulls http, db, api or loom.
+	for _, path := range []string{"internal/httpserver", "internal/data", "internal/api", "internal/di", "internal/web"} {
+		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
+			t.Errorf("add redis created %s", path)
+		}
+	}
+
+	// The config struct gained the field through the extension point and the
+	// loader calls the redis environment and defaults hooks.
+	configGo := readFile(t, filepath.Join(dir, "internal/config/config.go"))
+	for _, want := range []string{
+		"weld:redis:installed",
+		"Redis Redis `yaml:\"redis\"`",
+		"cfg.applyRedisEnv(l.lookupEnv)",
+		"cfg.applyRedisDefaults()",
+	} {
+		if !strings.Contains(configGo, want) {
+			t.Errorf("config.go is missing %q:\n%s", want, configGo)
+		}
+	}
+	// The client imports go-redis but no HTTP, JSON or data surface.
+	clientGo := readFile(t, filepath.Join(dir, "internal/redisclient/redisclient.go"))
+	if !strings.Contains(clientGo, "github.com/redis/go-redis/v9") {
+		t.Errorf("redisclient.go does not import go-redis:\n%s", clientGo)
+	}
+	for _, forbidden := range []string{"\"net/http\"", "\"encoding/json\"", "internal/data"} {
+		if strings.Contains(clientGo, forbidden) {
+			t.Errorf("redisclient.go imports %s", forbidden)
+		}
+	}
+
+	cfg := readFile(t, filepath.Join(dir, "config.yml"))
+	if !strings.Contains(cfg, "redis:") || !strings.Contains(cfg, "weld:redis:installed") {
+		t.Errorf("config.yml has no redis section:\n%s", cfg)
+	}
+	goMod := readFile(t, filepath.Join(dir, "go.mod"))
+	for _, want := range []string{"github.com/redis/go-redis/v9", "github.com/alicebob/miniredis/v2", "weld:redis:installed"} {
+		if !strings.Contains(goMod, want) {
+			t.Errorf("go.mod is missing %q:\n%s", want, goMod)
+		}
+	}
+	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after add redis: %+v", drift)
+	}
+	gofmtCheck(t, dir)
+}
+
+func TestAddRedisGeneratedProjectBuildsAndTests(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "redis")
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's redis dependencies (network/module cache unavailable)")
+	}
+}
+
+func TestAddRedisIsIdempotent(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "redis")
+
+	before := map[string]string{}
+	for _, path := range []string{"internal/config/config.go", "config.yml", "config.example.yml", "go.mod", project.ManifestName} {
+		before[path] = readFile(t, filepath.Join(dir, path))
+	}
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "redis")
+	if err != nil {
+		t.Fatalf("second Add: %v", err)
+	}
+	if len(result.Operations) != 0 || len(result.Installed) != 0 {
+		t.Fatalf("second Add planned %d operations and installed %v, want none", len(result.Operations), result.Installed)
+	}
+	if len(result.Notes) == 0 {
+		t.Fatal("second Add produced no explanation")
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	for path, want := range before {
+		if readFile(t, filepath.Join(dir, path)) != want {
+			t.Errorf("%s changed on repeat add", path)
+		}
+	}
+}
+
+func TestAddRedisIsDryRunnable(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+
+	configPath := filepath.Join(dir, "config.yml")
+	examplePath := filepath.Join(dir, "config.example.yml")
+	goModBefore := readFile(t, filepath.Join(dir, "go.mod"))
+
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "redis")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if len(result.Operations) == 0 {
+		t.Fatal("expected a non-empty plan")
+	}
+	if readFile(t, filepath.Join(dir, "go.mod")) != goModBefore {
+		t.Fatal("planning wrote go.mod")
+	}
+	for _, path := range []string{configPath, examplePath, filepath.Join(dir, "internal/redisclient"), filepath.Join(dir, "internal/config/redis.go")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("planning wrote %s", path)
+		}
+	}
+}
+
+// TestAddRedisConfigMergesInBothOrders proves the redis section lands in the
+// local config.yml and the committed example whichever capability is added
+// first, exactly once, and that the other capability's section is untouched.
+func TestAddRedisConfigMergesInBothOrders(t *testing.T) {
+	orders := []struct {
+		name          string
+		first, second string
+	}{
+		{"http then redis", "http", "redis"},
+		{"redis then http", "redis", "http"},
+		{"db then redis", "db", "redis"},
+		{"redis then db", "redis", "db"},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			add(t, dir, order.first)
+			add(t, dir, order.second)
+
+			for _, name := range []string{"config.yml", "config.example.yml"} {
+				content := readFile(t, filepath.Join(dir, name))
+				for _, key := range []string{redisSectionKeys[order.first], redisSectionKeys[order.second]} {
+					if !strings.Contains(content, key) {
+						t.Errorf("%s is missing section %q:\n%s", name, key, content)
+					}
+				}
+				if count := strings.Count(content, "weld:redis:installed"); count != 1 {
+					t.Errorf("%s has %d redis sections, want 1:\n%s", name, count, content)
+				}
+			}
+			if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+				t.Fatalf("drift: %+v", drift)
+			}
+		})
+	}
+}
+
+// TestAddRedisPreservesEditedConfig proves a late add merges its section without
+// clobbering a user's edits to the local file.
+func TestAddRedisPreservesEditedConfig(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "http")
+
+	path := filepath.Join(dir, "config.yml")
+	edited := strings.Replace(readFile(t, path), `  addr: ":8080"`, "  # keep my address\n  addr: \":9000\"", 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "redis")
+	after := readFile(t, path)
+	for _, want := range []string{"# keep my address", `addr: ":9000"`, "redis:"} {
+		if !strings.Contains(after, want) {
+			t.Errorf("add redis did not preserve/merge %q:\n%s", want, after)
+		}
+	}
+}
+
+// TestAddRedisPreservesConfigPassword proves a user's local Redis password in
+// config.yml survives later adds, including an idempotent repeat of redis.
+func TestAddRedisPreservesConfigPassword(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "redis")
+
+	path := filepath.Join(dir, "config.yml")
+	edited := strings.Replace(readFile(t, path), `  password: ""`, `  password: "sentinel-password"`, 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "http")
+	add(t, dir, "redis")
+	if !strings.Contains(readFile(t, path), `password: "sentinel-password"`) {
+		t.Fatalf("the redis password was clobbered:\n%s", readFile(t, path))
+	}
+}
+
+// TestAddRedisRestoresGitIgnoredConfig proves a fresh clone can continue:
+// config.yml is git-ignored, so it is absent after checkout while the manifest
+// records it and the tracked config.example.yml remains. Adding another
+// capability restores the local file from the example and merges its section.
+func TestAddRedisRestoresGitIgnoredConfig(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "redis")
+
+	if err := os.Remove(filepath.Join(dir, "config.yml")); err != nil {
+		t.Fatal(err)
+	}
+	add(t, dir, "db")
+
+	for _, name := range []string{"config.yml", "config.example.yml"} {
+		content := readFile(t, filepath.Join(dir, name))
+		for _, want := range []string{"redis:", "database:"} {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s is missing %q after the restore:\n%s", name, want, content)
+			}
+		}
+		if count := strings.Count(content, "weld:redis:installed"); count != 1 {
+			t.Errorf("%s has %d redis sections, want 1", name, count)
+		}
+	}
+	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after restoring the config: %+v", drift)
+	}
+}
+
+// TestAddRedisRejectsConfigWithoutExtensionPoints proves backward compatibility:
+// a config.go generated before the redis extension points existed has no marker
+// region, so `weld add redis` fails clearly instead of rewriting the file. The
+// project keeps its hand-written config and no redis files are written.
+func TestAddRedisRejectsConfigWithoutExtensionPoints(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "db")
+
+	path := filepath.Join(dir, "internal/config/config.go")
+	content := readFile(t, path)
+	content = strings.ReplaceAll(content, "\t// weld:configfields:begin\n", "")
+	content = strings.ReplaceAll(content, "\t// weld:configfields:end\n", "")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "redis")
+	if err == nil {
+		t.Fatal("expected an error when the config extension point is missing")
+	}
+	if !strings.Contains(err.Error(), "extension point") {
+		t.Fatalf("error = %v, want it to name the missing extension point", err)
+	}
+	for _, unchanged := range []string{path} {
+		if readFile(t, unchanged) != content {
+			t.Errorf("%s was rewritten on the failed add", unchanged)
+		}
+	}
+	for _, absent := range []string{"internal/redisclient", "internal/config/redis.go"} {
+		if _, statErr := os.Stat(filepath.Join(dir, absent)); !os.IsNotExist(statErr) {
+			t.Errorf("a failed plan wrote %s", absent)
+		}
+	}
+}
+
+// TestRedisGeneratedProjectRaceAndVet runs the generated project's tests under
+// the race detector and vets it for redis with and without Loom, proving the
+// idle client and the composed graph are race-clean with no Redis server.
+func TestRedisGeneratedProjectRaceAndVet(t *testing.T) {
+	cases := []struct {
+		name      string
+		caps      []string
+		needsLoom bool
+	}{
+		{name: "redis", caps: []string{"redis"}},
+		{name: "redis+loom", caps: []string{"redis", "loom"}, needsLoom: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsLoom {
+				loomToolAvailable(t)
+			}
+			root := t.TempDir()
+			dir := create(t, root)
+			for _, capability := range tc.caps {
+				add(t, dir, capability)
+			}
+			if !goModTidy(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+			gofmtCheck(t, dir)
+			runGo(t, dir, "vet", "./...")
+			runGo(t, dir, "test", "-race", "./...")
+		})
+	}
+}
+
+// TestAddRedisLoomPrunesUnconsumedClient proves the install != wire contract:
+// with redis and loom installed the graph declares NewRedisClient but nothing
+// depends on *redis.Client, so the generated initializer never constructs it and
+// no Redis setting is needed. The provider lives in the stable redis_provider.go
+// seam, not in the regenerated graph.
+func TestAddRedisLoomPrunesUnconsumedClient(t *testing.T) {
+	loomToolAvailable(t)
+	orders := []struct {
+		name string
+		caps []string
+	}{
+		{"redis then loom", []string{"redis", "loom"}},
+		{"loom then redis", []string{"loom", "redis"}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			for _, capability := range order.caps {
+				add(t, dir, capability)
+			}
+			provider := readFile(t, filepath.Join(dir, "internal/di/redis_provider.go"))
+			if !strings.Contains(provider, "func NewRedisClient") {
+				t.Errorf("redis_provider.go is missing NewRedisClient:\n%s", provider)
+			}
+			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+			if !strings.Contains(di, "loom.Provide(NewRedisClient)") {
+				t.Errorf("di.go does not declare the Redis client binding:\n%s", di)
+			}
+			gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
+			if strings.Contains(gen, "NewRedisClient") {
+				t.Errorf("loom_gen.go constructs the unused Redis client; the default composition must not wire redis:\n%s", gen)
+			}
+			if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+				t.Fatalf("drift after add: %+v", drift)
+			}
+			gofmtCheck(t, dir)
+			if !buildAndTestGeneratedProject(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+		})
+	}
+}
+
+// TestAddRedisLoomProviderSeamIsStable proves the durable seam: a user edit to
+// redis_provider.go survives a later capability add that regenerates the graph,
+// and the graph still follows the installed capabilities.
+func TestAddRedisLoomProviderSeamIsStable(t *testing.T) {
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	for _, capability := range []string{"redis", "loom"} {
+		add(t, dir, capability)
+	}
+
+	path := filepath.Join(dir, "internal/di/redis_provider.go")
+	edited := readFile(t, path) + "\n// user wiring, must survive a later add\n"
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "web")
+
+	if got := readFile(t, path); got != edited {
+		t.Fatalf("the later add rewrote the user's redis_provider.go:\n%s", got)
+	}
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	if !strings.Contains(di, "internal/web") {
+		t.Errorf("di.go was not regenerated for web:\n%s", di)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
+
+// TestAddRedisLoomConsumesWhenProviderAsks proves explicit consumption end to
+// end: after api+redis+loom a user edits the stable api_provider.go to consume
+// *redis.Client; a later `weld add web` regenerates the graph and loom_gen.go so
+// the initializer constructs NewRedisClient, while redis_provider.go and the
+// edited api_provider.go stay byte for byte intact. api needs the unpublished
+// go-validate Spec API, so it uses the same test-only local replace as the other
+// api integration tests and skips visibly when that working copy is absent.
+func TestAddRedisLoomConsumesWhenProviderAsks(t *testing.T) {
+	goValidate := goValidateDir(t)
+	if goValidate == "" {
+		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
+	}
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	useLocalGoValidate(t, dir, goValidate)
+	for _, capability := range []string{"api", "redis", "loom"} {
+		add(t, dir, capability)
+	}
+
+	providerPath := filepath.Join(dir, "internal/di/redis_provider.go")
+	providerBefore := readFile(t, providerPath)
+
+	const edited = `package di
+
+import (
+	"example.com/demo/internal/api"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// NewAPIService is wired by hand onto the Redis client.
+func NewAPIService(client *redis.Client) api.Service {
+	_ = client
+	return api.NewService()
+}
+`
+	apiPath := filepath.Join(dir, "internal/di/api_provider.go")
+	if err := os.WriteFile(apiPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "web")
+
+	if got := readFile(t, apiPath); got != edited {
+		t.Fatalf("the later add rewrote the user's api_provider.go:\n%s", got)
+	}
+	if got := readFile(t, providerPath); got != providerBefore {
+		t.Fatalf("the later add rewrote redis_provider.go:\n%s", got)
+	}
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	if !strings.Contains(di, "example.com/demo/internal/web") {
+		t.Errorf("di.go was not regenerated for web:\n%s", di)
+	}
+	gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
+	if !strings.Contains(gen, "NewRedisClient") {
+		t.Errorf("loom_gen.go did not follow the edited provider to construct NewRedisClient:\n%s", gen)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
+
+// TestRedisProviderSeamGuardsInstallOnce proves the conditional install that
+// makes redis_provider.go durable: each declaration requires the other
+// capability, so it fires only for the capability installed second (redis then
+// loom, or loom then redis) and never for a project that has only one of them.
+// It exercises the guard directly, so it needs no generator or network.
+func TestRedisProviderSeamGuardsInstallOnce(t *testing.T) {
+	const path = "internal/di/redis_provider.go"
+	fileEntry := func(capability string) template.File {
+		t.Helper()
+		got, err := newCatalog().Get(capability)
+		if err != nil {
+			t.Fatalf("Get %s: %v", capability, err)
+		}
+		for _, file := range got.Files {
+			if file.Path == path {
+				return file
+			}
+		}
+		t.Fatalf("%s does not declare %s", capability, path)
+		return template.File{}
+	}
+	redisFile := fileEntry("redis")
+	loomFile := fileEntry("loom")
+
+	if !entryApplies(map[string]bool{"base": true, "loom": true}, redisFile.When, redisFile.WhenAbsent) {
+		t.Error("redis does not write redis_provider.go when loom is already installed")
+	}
+	if !entryApplies(map[string]bool{"base": true, "redis": true}, loomFile.When, loomFile.WhenAbsent) {
+		t.Error("loom does not write redis_provider.go when redis is already installed")
+	}
+	if entryApplies(map[string]bool{"base": true}, redisFile.When, redisFile.WhenAbsent) {
+		t.Error("redis writes redis_provider.go without loom")
+	}
+	if entryApplies(map[string]bool{"base": true}, loomFile.When, loomFile.WhenAbsent) {
+		t.Error("loom writes redis_provider.go without redis")
+	}
+	if entryApplies(map[string]bool{"base": true, "api": true}, redisFile.When, redisFile.WhenAbsent) {
+		t.Error("redis writes redis_provider.go before loom is present in a combined plan")
 	}
 }

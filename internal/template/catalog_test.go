@@ -11,7 +11,7 @@ func TestCatalogListsBaseAndWeb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Names: %v", err)
 	}
-	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "api": false, "db": false}
+	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "api": false, "db": false, "loom": false, "redis": false}
 	for _, name := range names {
 		if _, ok := want[name]; ok {
 			want[name] = true
@@ -178,6 +178,66 @@ func TestDBCapabilityLoads(t *testing.T) {
 	}
 }
 
+// TestRedisCapabilityLoads pins the redis capability's shape: it requires only
+// base and config (never http, db, api or loom), ships the client package and
+// the config extension, and declares its Loom provider seam guarded on loom.
+func TestRedisCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("redis")
+	if err != nil {
+		t.Fatalf("Get redis: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
+	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+		t.Errorf("requires = %v, want %q", capability.Requires, want)
+	}
+	for _, forbidden := range []string{"http", "db", "api", "loom"} {
+		for _, required := range capability.Requires {
+			if required == forbidden {
+				t.Errorf("redis requires %q", forbidden)
+			}
+		}
+	}
+	paths := map[string]bool{}
+	for _, file := range capability.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/config/redis.go",
+		"internal/redisclient/redisclient.go",
+		"internal/redisclient/redisclient_test.go",
+		"internal/di/redis_provider.go",
+	} {
+		if !paths[want] {
+			t.Errorf("redis capability does not ship %s", want)
+		}
+	}
+	var providerSeam bool
+	for _, file := range capability.Files {
+		if file.Path == "internal/di/redis_provider.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom"
+		}
+	}
+	if !providerSeam {
+		t.Errorf("redis redis_provider.go is not guarded by when: [loom]: %+v", capability.Files)
+	}
+	markers := map[string]bool{}
+	for _, patch := range capability.Patches {
+		if patch.Path == "internal/config/config.go" {
+			markers[patch.Marker] = true
+		}
+		if patch.Path == "config.yml" && patch.Marker == "config" && patch.Bootstrap != "config.example.yml" {
+			t.Errorf("redis config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+		}
+	}
+	for _, want := range []string{"configfields", "configenv", "configdefaults"} {
+		if !markers[want] {
+			t.Errorf("redis does not patch the config.go %s extension point: %+v", want, capability.Patches)
+		}
+	}
+}
+
 func TestUnknownCapabilityErrors(t *testing.T) {
 	if _, err := Load().Get("nope"); err == nil {
 		t.Fatal("expected error for unknown capability")
@@ -292,6 +352,22 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	// serve.
 	if count := strings.Count(string(withDB), "ValidateDatabase()"); count != 1 {
 		t.Errorf("ValidateDatabase is called %d times in the db+api graph, want 1 (in NewPool):\n%s", count, withDB)
+	}
+
+	// Installing redis declares the client as an available binding, but the
+	// default composition never depends on it: the provider lives in the stable
+	// redis_provider.go seam, and the graph binds it only when a consumer asks
+	// for *redis.Client.
+	vars.Caps["redis"] = true
+	withRedis, err := capability.RenderDIGraph(vars)
+	if err != nil {
+		t.Fatalf("RenderDIGraph(redis): %v", err)
+	}
+	if !strings.Contains(string(withRedis), "loom.Provide(NewRedisClient)") {
+		t.Errorf("redis graph does not declare the Redis client binding:\n%s", withRedis)
+	}
+	if strings.Contains(string(withRedis), "func NewRedisClient") {
+		t.Errorf("redis graph defines NewRedisClient in di.go; the provider must live in redis_provider.go:\n%s", withRedis)
 	}
 }
 

@@ -61,10 +61,12 @@ Capabilities:
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository. Requires `base` and
   `config`.
+- `redis` (add) — an opt-in Redis client with typed connection configuration.
+  Requires `base` and `config`; installing it never connects Redis to a service.
 - `loom` (add) — a compile-time [Loom](https://github.com/Xwudao/loom)
   dependency-injection graph that wires the HTTP server, the JSON API service and
   the PostgreSQL repository with lifecycle start/stop. Requires `http` and is
-  **opt-in**: `web`, `api` and `db` never install it.
+  **opt-in**: `web`, `api`, `db` and `redis` never install it.
 
 `http` and `db` each require `config`, so the first of them installs it
 automatically: `weld add http` or `weld add db` on a fresh project adds the
@@ -80,9 +82,12 @@ instead of a silent default.
 `weld add api` can be run in either order and both are served by the one `serve`
 command. `db` requires `base` and `config`: it is independent of the HTTP
 capabilities, so it can be added to a CLI-only project and composes with
-`http`/`web`/`api` in any order. `loom` is opt-in and requires `http`: it wires
-whatever of `db` and `api` is installed, and regenerates its graph when they are
-added, in either order.
+`http`/`web`/`api` in any order. `redis` likewise requires only `base` and
+`config`; it installs a lazy client the caller owns and never wires Redis into a
+service, so it composes with `db` and the HTTP capabilities in any order. `loom`
+is opt-in and requires `http`: it wires whatever of `db`, `api` and `redis` is
+installed, prunes the Redis client until a provider asks for it, and regenerates
+its graph when they are added, in either order.
 
 ## Staged architecture
 
@@ -91,7 +96,8 @@ new ──▶ base project ──▶ add capability ──▶ add capability ─
          (go.mod, main.go,   (http: internal/httpserver,   (web: internal/web + internal/httpserver/web_route.go,
           internal/app,       internal/app/serve.go)        api: internal/api + internal/httpserver/api_route.go)
           Makefile)                                             db: db/migrations, db/query, db/tools,
-                                                                  internal/data + generated internal/data/sqlc)
+                                                                  internal/data + generated internal/data/sqlc,
+                                                                  redis: internal/redisclient + internal/config/redis.go)
 ```
 
 Every file `weld` writes is recorded in `weld.json` with the capability and
@@ -99,12 +105,12 @@ version that produced it. Capabilities are **one-way additive**: later
 capabilities extend the project; nothing removes a capability.
 
 Capabilities are also **independent and dependency-resolved**. `weld new`
-produces a CLI that builds and runs with no HTTP server, no database and no
-frontend. `web` and `api` each require `http`; `weld add web` or `weld add api`
-installs `http` first automatically, so the user never has to know the order.
-`web` and `api` can be added in either order and share the one serve command.
-`db` requires only `base`, so it never pulls in an HTTP server and can be added
-to a CLI-only project.
+produces a CLI that builds and runs with no HTTP server, no database, no Redis
+and no frontend. `web` and `api` each require `http`; `weld add web` or
+`weld add api` installs `http` first automatically, so the user never has to know
+the order. `web` and `api` can be added in either order and share the one serve
+command. `db` and `redis` require only `base` (and `config`), so they never pull
+in an HTTP server and can be added to a CLI-only project.
 
 ## How capabilities integrate (owned extension points, not replacement)
 

@@ -142,6 +142,48 @@ func TestAddDBInstallsWithoutHTTP(t *testing.T) {
 	}
 }
 
+func TestAddRedisInstallsConfigOnly(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err := run(t, "add", "redis", "--dir", dir)
+	if err != nil {
+		t.Fatalf("add redis: %v", err)
+	}
+	if !strings.Contains(out, "internal/redisclient/redisclient.go") {
+		t.Fatalf("add redis output = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "redisclient", "redisclient.go")); err != nil {
+		t.Fatalf("add redis did not write the client: %v", err)
+	}
+	// redis is independent of the HTTP and database capabilities.
+	for _, path := range []string{"internal/httpserver", "internal/api", "internal/data", "internal/di", "internal/web"} {
+		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
+			t.Errorf("add redis created %s", path)
+		}
+	}
+
+	// Repeating add is a no-op that still succeeds.
+	out, err = run(t, "add", "redis", "--dir", dir)
+	if err != nil {
+		t.Fatalf("repeat add: %v", err)
+	}
+	if !strings.Contains(out, "already installed") {
+		t.Fatalf("repeat add output = %q", out)
+	}
+
+	listOut, err := run(t, "list", "--dir", dir)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(listOut, "* redis") {
+		t.Errorf("redis not marked installed in list output: %q", listOut)
+	}
+}
+
 func TestNewDryRunWritesNothing(t *testing.T) {
 	root := t.TempDir()
 	out, err := run(t, "new", "demo", "--dir", root, "--dry-run")

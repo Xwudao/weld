@@ -67,9 +67,11 @@ Capabilities:
   api    (add)      JSON API, go-validate rules and an OpenAPI 3.1 document
   db     (add)      PostgreSQL: SQL migrations, sqlc queries, an injectable pool
                     and repository
+  redis  (add)      Opt-in Redis client with typed connection config; installing
+                    it never connects Redis to a service (requires base, config)
   loom   (add)      Loom dependency-injection graph wiring the HTTP server, the
                     JSON API service and the PostgreSQL repository (requires
-                    http; opt-in, never installed by web, api or db)
+                    http; opt-in, never installed by web, api, db or redis)
 
 http and db each install the config capability, so the first of them adds the
 shared typed configuration loader and generates a local, git-ignored config.yml
@@ -77,8 +79,9 @@ from config.example.yml; adding the other only appends its section to that file.
 web and api are independent and both require http: each can be added first and
 both share the one serve command. db requires only base (and config), so it can
 be added to a CLI-only project and composes with the HTTP capabilities in any
-order. loom is
-opt-in: it requires http and regenerates its graph when web, api or db is
+order. redis likewise requires only base (and config): it installs a lazy client
+the caller owns and never wires Redis into a service on its own. loom is
+opt-in: it requires http and regenerates its graph when web, api, db or redis is
 installed, and it raises the project's Go floor to 1.25.
 
 Every file weld writes is recorded in the project manifest (weld.json) with the
