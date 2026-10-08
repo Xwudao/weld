@@ -1,6 +1,7 @@
 package scaffold
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1418,6 +1419,46 @@ func TestAddLoomDBWithoutDSNNeedsNoDatabase(t *testing.T) {
 	}
 }
 
+// TestAddLoomDBMalformedDSNLogsNoCredential is the regression for the credential
+// leak: with db and loom installed, a malformed DATABASE_URL fails the graph's
+// pool constructor, and the base CLI structured-logs that error. The logged
+// record must name the problem without echoing the dsn or its password, so the
+// top-level error path cannot leak a credential.
+func TestAddLoomDBMalformedDSNLogsNoCredential(t *testing.T) {
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "db")
+	add(t, dir, "loom")
+
+	clean := envWithout("DATABASE_URL")
+	if !goModTidy(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	binary := filepath.Join(t.TempDir(), "app")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	build.Dir = dir
+	build.Env = append(clean, "GOPROXY=off", "GOWORK=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+
+	const password = "sentinel-do-not-log"
+	run := exec.Command(binary, "serve")
+	run.Dir = dir
+	run.Env = append(clean, "DATABASE_URL=postgres://user:"+password+":extra@host:notaport/db")
+	out, err := run.CombinedOutput()
+	if err == nil {
+		t.Fatalf("serve succeeded with a malformed DATABASE_URL:\n%s", out)
+	}
+	if strings.Contains(string(out), password) {
+		t.Fatalf("serve logged the database credential:\n%s", out)
+	}
+	if !strings.Contains(string(out), "invalid PostgreSQL dsn") {
+		t.Fatalf("serve error does not report the malformed dsn:\n%s", out)
+	}
+}
+
 // TestAddLoomGenerationIsReproducible runs the pinned generator in dry-run and
 // requires it to report no change, so the committed initializer cannot drift
 // from the graph.
@@ -1501,6 +1542,134 @@ func TestAddLoomLinksAPIServiceToRepository(t *testing.T) {
 				}
 			}
 			gofmtCheck(t, dir)
+			if !buildAndTestGeneratedProject(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+		})
+	}
+}
+
+// --- logging milestone -----------------------------------------------------
+
+// assertInjectedLogger fails when a generated project does not ship the base
+// logging factory or reaches for the process default logger instead of an
+// injected *slog.Logger.
+func assertInjectedLogger(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, "internal", "logging", "logging.go")); err != nil {
+		t.Fatalf("generated project is missing the base logging factory: %v", err)
+	}
+	if di, err := os.ReadFile(filepath.Join(dir, "internal", "di", "di.go")); err == nil {
+		if !strings.Contains(string(di), "loom.Provide(NewLogger)") {
+			t.Errorf("internal/di/di.go does not provide the logger to the graph")
+		}
+	}
+	if gen, err := os.ReadFile(filepath.Join(dir, "internal", "di", "loom_gen.go")); err == nil {
+		if !strings.Contains(string(gen), "NewLogger") {
+			t.Errorf("internal/di/loom_gen.go does not construct the injected logger")
+		}
+	}
+	forbidden := []string{"slog.SetDefault", "slog.Default(", "slog.Info(", "slog.Error(", "slog.Warn(", "slog.Debug("}
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			rel = path
+		}
+		src := string(raw)
+		for _, pattern := range forbidden {
+			if strings.Contains(src, pattern) {
+				t.Errorf("%s uses the process default logger (%s); the logger must be injected", rel, pattern)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk generated project: %v", err)
+	}
+}
+
+// TestBaseGeneratedProjectLogsErrorsThroughSlog proves the base CLI's top-level
+// error path is structured logging: an unknown command exits non-zero and the
+// failure is a slog record rather than a fmt.Fprintln line, and the logger is
+// built by the base factory with no process default logger.
+func TestBaseGeneratedProjectLogsErrorsThroughSlog(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	assertInjectedLogger(t, dir)
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+
+	binary := filepath.Join(t.TempDir(), "app")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	build.Dir = dir
+	build.Env = append(os.Environ(), "GOPROXY=off", "GOWORK=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	run := exec.Command(binary, "bogus")
+	run.Dir = dir
+	out, err := run.CombinedOutput()
+	if err == nil {
+		t.Fatalf("an unknown command unexpectedly succeeded:\n%s", out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "level=ERROR") || !strings.Contains(text, "bogus") {
+		t.Fatalf("the failed command was not logged through slog:\n%s", text)
+	}
+	if strings.Contains(text, "error:") {
+		t.Fatalf("the base CLI still uses the fmt error path:\n%s", text)
+	}
+}
+
+// TestLoggingMilestoneCombinationMatrix proves the logging milestone composes
+// with every capability combination: the base logging factory is present, no
+// generated file reaches for the process default logger, and the composed
+// project gofmt/builds/vets/tests.
+func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
+	goValidate := goValidateDir(t)
+	cases := []struct {
+		name      string
+		caps      []string
+		needsAPI  bool
+		needsLoom bool
+	}{
+		{name: "base"},
+		{name: "http", caps: []string{"http"}},
+		{name: "api", caps: []string{"api"}, needsAPI: true},
+		{name: "db", caps: []string{"db"}},
+		{name: "loom", caps: []string{"loom"}, needsLoom: true},
+		{name: "api+db", caps: []string{"api", "db"}, needsAPI: true},
+		{name: "db+loom", caps: []string{"db", "loom"}, needsLoom: true},
+		{name: "api+db+loom", caps: []string{"api", "db", "loom"}, needsAPI: true, needsLoom: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsAPI && goValidate == "" {
+				t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
+			}
+			if tc.needsLoom {
+				loomToolAvailable(t)
+			}
+			root := t.TempDir()
+			dir := create(t, root)
+			if tc.needsAPI {
+				useLocalGoValidate(t, dir, goValidate)
+			}
+			for _, capability := range tc.caps {
+				add(t, dir, capability)
+			}
+			assertInjectedLogger(t, dir)
 			if !buildAndTestGeneratedProject(t, dir) {
 				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 			}

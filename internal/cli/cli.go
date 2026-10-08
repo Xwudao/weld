@@ -59,7 +59,7 @@ Usage:
   %s help
 
 Capabilities:
-  base   (scaffold) minimal, dependency-free Go CLI
+  base   (scaffold) minimal, dependency-free Go CLI with a log/slog factory
   http   (add)      HTTP lifecycle, composable mux and a serve command
   web    (add)      React + TypeScript + Vite frontend (requires http)
   api    (add)      JSON API, go-validate rules and an OpenAPI 3.1 document

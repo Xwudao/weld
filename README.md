@@ -46,9 +46,10 @@ weld help
 
 Capabilities:
 
-- `base` (scaffold) — minimal, dependency-free Go CLI.
+- `base` (scaffold) — minimal, dependency-free Go CLI with a `log/slog`
+  logging factory (`internal/logging`) whose sink is an injected `io.Writer`.
 - `http` (add) — HTTP server lifecycle, a composable handler builder, and the
-  single `serve` command.
+  single `serve` command. Its `Serve` takes the injected `*slog.Logger`.
 - `web` (add) — React + TypeScript + Vite frontend, served by `http`.
 - `api` (add) — JSON HTTP API: typed DTOs, `go-validate` rules and an OpenAPI
   3.1 document built from the same contract, served by `http`.
@@ -206,6 +207,10 @@ What Loom binds, and why it is not ceremonial:
   `DATABASE_URL` is **required**: there is no invented default dsn, so a
   database-backed serve cannot silently reach a local database, and an error
   never echoes the dsn.
+- `*slog.Logger` — provided by the graph (`NewLogger`) from the base
+  `log/slog` factory and injected into the managed server, so startup, a serve
+  failure and a graceful shutdown are recorded through one logging protocol
+  with no process default logger and no custom logger interface.
 - `*pgxpool.Pool` and `data.Repository` (`db`) — the pool parses the dsn lazily
   and is **not** connected at build, test or startup, so no database is needed;
   the constructor returns a cleanup that Loom runs exactly once, whether
@@ -246,9 +251,18 @@ Test conventions:
   (`httpserver.NewHandler`, and `web.Handler` over an `fstest.MapFS`). The
   generated graph tests bind an ephemeral loopback socket only to prove that an
   occupied port fails `Start` and that a serve failure is reported, and close it
-  immediately.
+  immediately. The generated `internal/httpserver` test occupies a loopback port
+  with `httptest` to prove `Serve` reports the bind failure without logging a
+  listening line, and closes the occupying server.
 - The generated `serve` command is exercised through flag parsing and the
   command registry (`internal/app/serve_test.go`) rather than by listening.
+- The base CLI logs a failed command through its injected `log/slog` logger, and
+  a generated `internal/logging` test covers text/JSON formatting, handler
+  level filtering and an error record against a fake writer. A scaffold matrix
+  test proves the logging wiring composes with `base`, `http`, `api`, `db` and
+  `loom` (including `api+db` and `api+db+loom`): the factory is present, no
+  generated file reaches for `slog.Default` or the `slog.Info`/`Error` globals,
+  and each composed project gofmt/builds/vets/tests.
 - The scaffold tests generate a real project, run `gofmt`, `go build`, `go vet`
   and the generated `go test ./...`, so the composed files are compiled rather
   than only string-matched.
@@ -275,7 +289,10 @@ Test conventions:
   A regression test proves a `db`+`loom` project with `DATABASE_URL` unset still
   builds and tests (the graph tests inject a fake environment) and only
   resolving the graph fails, naming `DATABASE_URL` without inventing or echoing
-  a dsn. Combination tests cover `http`+`loom`, `db`↔`loom`, `api`↔`loom` and
+  a dsn. A second regression runs `serve` with a malformed `DATABASE_URL`
+  carrying a sentinel password and asserts the structured log names the problem
+  (`invalid PostgreSQL dsn`) without echoing the credential. Combination tests
+  cover `http`+`loom`, `db`↔`loom`, `api`↔`loom` and
   `api`+`db`+`loom` in either order, and assert the initializer really constructs
   `NewPool`/`NewRepository`/`NewAPIService` and registers the pool cleanup. Loom
   integration tests skip visibly when the pinned generator cannot be built.
