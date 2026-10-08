@@ -139,3 +139,73 @@ func TestRenderLeavesBracesUntouched(t *testing.T) {
 		t.Fatalf("Render changed brace-heavy content: %q", out)
 	}
 }
+
+// TestLoomCapabilityLoads pins the loom capability's shape: it requires http,
+// declares a capability-aware DI graph, and replaces the go directive region.
+func TestLoomCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("loom")
+	if err != nil {
+		t.Fatalf("Get loom: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
+	if len(capability.Requires) != 1 || capability.Requires[0] != "http" {
+		t.Errorf("requires = %v, want [http]", capability.Requires)
+	}
+	if capability.DI == nil || capability.DI.Dir != "internal/di" || capability.DI.Source == "" {
+		t.Fatalf("loom DI spec = %+v", capability.DI)
+	}
+	var goversion, serve bool
+	for _, patch := range capability.Patches {
+		switch {
+		case patch.Path == "go.mod" && patch.Marker == "goversion":
+			goversion = patch.Mode == "replace"
+		case patch.Path == "internal/app/serve.go" && patch.Marker == "serve":
+			serve = patch.Mode == "replace"
+		}
+	}
+	if !goversion {
+		t.Error("loom does not replace the go.mod goversion region")
+	}
+	if !serve {
+		t.Error("loom does not replace the serve registration region")
+	}
+}
+
+// TestRenderDIGraphIsCapabilityAware checks that the same template produces a
+// different, gofmt-clean graph for different installed capability sets.
+func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
+	capability, err := Load().Get("loom")
+	if err != nil {
+		t.Fatalf("Get loom: %v", err)
+	}
+	vars := DITemplateVars{
+		Name:    "demo",
+		Module:  "example.com/demo",
+		Version: "0.1.0",
+		Caps:    CapabilitySet{"base": true, "http": true, "loom": true},
+	}
+	httpOnly, err := capability.RenderDIGraph(vars)
+	if err != nil {
+		t.Fatalf("RenderDIGraph(http): %v", err)
+	}
+	if !strings.Contains(string(httpOnly), "NewServer") {
+		t.Errorf("http-only graph has no server:\n%s", httpOnly)
+	}
+	if strings.Contains(string(httpOnly), "NewPool") || strings.Contains(string(httpOnly), "NewAPIService") {
+		t.Errorf("http-only graph binds db/api:\n%s", httpOnly)
+	}
+
+	vars.Caps["db"] = true
+	vars.Caps["api"] = true
+	withDB, err := capability.RenderDIGraph(vars)
+	if err != nil {
+		t.Fatalf("RenderDIGraph(db,api): %v", err)
+	}
+	for _, want := range []string{"NewPool", "NewRepository", "NewAPIService", "data.Repository", "repositoryService"} {
+		if !strings.Contains(string(withDB), want) {
+			t.Errorf("db+api graph is missing %q:\n%s", want, withDB)
+		}
+	}
+}

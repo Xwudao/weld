@@ -120,6 +120,43 @@ func isMarkerLine(line, token string) bool {
 	return strings.TrimSpace(trimmed) == token
 }
 
+// ReplaceMarker rewrites the content of a marker region with snippet.
+//
+// Unlike PatchMarker it neither appends nor records a sentinel: the region is
+// owned and rewritten wholesale, which is how a capability sets a value the
+// base scaffold cannot know in advance (for example the go directive). The
+// begin and end marker lines are preserved, so repeated applications are
+// idempotent and every byte outside the region is untouched.
+func ReplaceMarker(original []byte, marker string, snippet []byte) ([]byte, error) {
+	lines := strings.Split(string(original), "\n")
+	begin := -1
+	for i, line := range lines {
+		if isMarkerLine(line, markerToken(marker, "begin")) {
+			begin = i
+			break
+		}
+	}
+	if begin < 0 {
+		return nil, fmt.Errorf("extension point %q not found", markerToken(marker, "begin"))
+	}
+	end := -1
+	for i := begin + 1; i < len(lines); i++ {
+		if isMarkerLine(lines[i], markerToken(marker, "end")) {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return nil, fmt.Errorf("extension point %q is not closed", markerToken(marker, "begin"))
+	}
+	inserted := strings.Split(strings.TrimRight(string(snippet), "\n"), "\n")
+	merged := make([]string, 0, len(lines)-(end-begin-1)+len(inserted))
+	merged = append(merged, lines[:begin+1]...)
+	merged = append(merged, inserted...)
+	merged = append(merged, lines[end:]...)
+	return []byte(strings.Join(merged, "\n")), nil
+}
+
 // PatchMarker inserts snippet into the named extension point of original.
 //
 // An extension point is a begin/end marker pair placed by the capability that

@@ -26,6 +26,11 @@ const (
 type File struct {
 	Path   string `json:"path"`
 	Source string `json:"source"`
+	// When lists capabilities that must all be installed for the file to apply;
+	// WhenAbsent lists capabilities that must all be absent. They let a payload
+	// vary deterministically with the installed capability set.
+	When       []string `json:"when,omitempty"`
+	WhenAbsent []string `json:"whenAbsent,omitempty"`
 }
 
 // Patch is a snippet inserted at a named extension point in an existing file.
@@ -33,6 +38,11 @@ type Patch struct {
 	Path   string `json:"path"`
 	Marker string `json:"marker"`
 	Source string `json:"source"`
+	// Mode selects how the snippet joins the region: "" or "append" appends it
+	// (the default), "replace" rewrites the region's content.
+	Mode       string   `json:"mode,omitempty"`
+	When       []string `json:"when,omitempty"`
+	WhenAbsent []string `json:"whenAbsent,omitempty"`
 }
 
 // Capability is a declarative scaffold payload.
@@ -44,8 +54,23 @@ type Capability struct {
 	Requires []string `json:"requires"`
 	Files    []File   `json:"files"`
 	Patches  []Patch  `json:"patches"`
+	// DI declares a capability's Loom dependency-graph contribution. It is
+	// rendered per installed capability set when the capability is installed, so
+	// the composed application follows the installed capabilities without a
+	// runtime registry.
+	DI *DISpec `json:"di,omitempty"`
 
 	fsys fs.FS
+}
+
+// DISpec is a capability's Loom dependency-graph contribution.
+type DISpec struct {
+	// Dir is the package directory the rendered sources are written to.
+	Dir string `json:"dir"`
+	// Source is the graph source template.
+	Source string `json:"source"`
+	// Test is an optional capability-aware test template.
+	Test string `json:"test,omitempty"`
 }
 
 // Catalog is the set of capabilities bundled by the template module.
@@ -124,8 +149,26 @@ func (c *Capability) validate() error {
 		if patch.Path == "" || patch.Marker == "" || patch.Source == "" {
 			return fmt.Errorf("capability %q: patch entry needs path, marker and source", c.Name)
 		}
+		switch patch.Mode {
+		case "", "append", "replace":
+		default:
+			return fmt.Errorf("capability %q: unknown patch mode %q", c.Name, patch.Mode)
+		}
 		if err := c.requireSource(patch.Source); err != nil {
 			return err
+		}
+	}
+	if c.DI != nil {
+		if c.DI.Dir == "" || c.DI.Source == "" {
+			return fmt.Errorf("capability %q: di entry needs dir and source", c.Name)
+		}
+		if err := c.requireSource(c.DI.Source); err != nil {
+			return err
+		}
+		if c.DI.Test != "" {
+			if err := c.requireSource(c.DI.Test); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

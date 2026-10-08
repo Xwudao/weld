@@ -65,10 +65,15 @@ Capabilities:
   api    (add)      JSON API, go-validate rules and an OpenAPI 3.1 document
   db     (add)      PostgreSQL: SQL migrations, sqlc queries, an injectable pool
                     and repository
+  loom   (add)      Loom dependency-injection graph wiring the HTTP server, the
+                    JSON API service and the PostgreSQL repository (requires
+                    http; opt-in, never installed by web, api or db)
 
 web and api are independent and both require http: each can be added first and
 both share the one serve command. db requires only base, so it can be added to a
-CLI-only project and composes with the HTTP capabilities in any order.
+CLI-only project and composes with the HTTP capabilities in any order. loom is
+opt-in: it requires http and regenerates its graph when web, api or db is
+installed, and it raises the project's Go floor to 1.25.
 
 Every file weld writes is recorded in the project manifest (weld.json) with the
 capability and version that produced it.

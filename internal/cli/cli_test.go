@@ -155,3 +155,13 @@ func TestNewDryRunWritesNothing(t *testing.T) {
 		t.Fatal("dry run created the project")
 	}
 }
+
+func TestHelpMentionsLoomCapability(t *testing.T) {
+	out, err := run(t, "help")
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	if !strings.Contains(out, "loom") {
+		t.Fatalf("help does not mention the loom capability:\n%s", out)
+	}
+}

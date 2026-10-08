@@ -6,12 +6,15 @@
 package scaffold
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/Xwudao/weld/internal/loomgen"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/template"
 )
@@ -35,14 +38,55 @@ type Result struct {
 	Installed []string
 	// Notes carries human-readable observations such as "already installed".
 	Notes []string
+	// GenerateLoom requests a Loom regeneration after the plan is written,
+	// because an installed capability changed the dependency graph.
+	GenerateLoom bool
+	// DIPackage is the package directory to regenerate, relative to Dir.
+	DIPackage string
 }
 
-// Apply writes the planned result.
+// Apply writes the planned result. When the plan changes the dependency graph it
+// also regenerates the Loom initializer; if generation fails the whole plan is
+// rolled back, so a project is never left with a graph that does not match its
+// generated code.
 func (r *Result) Apply() error {
-	if len(r.Operations) == 0 {
+	if len(r.Operations) == 0 && !r.GenerateLoom {
 		return nil
 	}
-	return project.Apply(r.Dir, r.Operations)
+	if !r.GenerateLoom {
+		return project.Apply(r.Dir, r.Operations)
+	}
+	return r.applyAndGenerate()
+}
+
+func (r *Result) applyAndGenerate() error {
+	paths := make([]string, 0, len(r.Operations)+3)
+	for _, operation := range r.Operations {
+		paths = append(paths, operation.Path)
+	}
+	paths = append(paths, filepath.Join(r.DIPackage, "loom_gen.go"), "go.mod", "go.sum")
+	snapshot, err := project.TakeSnapshot(r.Dir, paths)
+	if err != nil {
+		return err
+	}
+	if err := project.Apply(r.Dir, r.Operations); err != nil {
+		return err
+	}
+	if err := loomgen.Generate(r.Dir, r.DIPackage); err != nil {
+		if restoreErr := snapshot.Restore(r.Dir); restoreErr != nil {
+			return fmt.Errorf("%w (rollback also failed: %v)", err, restoreErr)
+		}
+		return fmt.Errorf("%w (changes rolled back)", err)
+	}
+	// The generator runs with -mod=mod, so it may rewrite go.mod as it resolves
+	// the module graph. Record what it wrote rather than reporting it as drift.
+	if err := project.RefreshManifest(r.Dir); err != nil {
+		if restoreErr := snapshot.Restore(r.Dir); restoreErr != nil {
+			return fmt.Errorf("refresh manifest: %w (rollback also failed: %v)", err, restoreErr)
+		}
+		return fmt.Errorf("refresh manifest: %w (changes rolled back)", err)
+	}
+	return nil
 }
 
 // Create plans a new project from the base capability.
@@ -140,9 +184,19 @@ func Add(req Request, name string) (*Result, error) {
 		result.Operations = append(result.Operations, operation)
 	}
 
+	// present is the installed capability set guards and the DI graph are
+	// rendered against. It starts from the manifest and grows as dependencies
+	// are planned, so a capability's conditional payload follows the set that
+	// will exist once the plan is applied.
+	present := installedSet(manifest)
+
 	for _, capability := range order {
+		present[capability.Name] = true
 		vars := template.Vars{Name: manifest.Name, Module: manifest.Module, Version: capability.Version}
 		for _, file := range capability.Files {
+			if !entryApplies(present, file.When, file.WhenAbsent) {
+				continue
+			}
 			if _, exists := planned[file.Path]; exists {
 				return nil, &project.ConflictError{Path: file.Path, Reason: "planned by another capability"}
 			}
@@ -162,6 +216,9 @@ func Add(req Request, name string) (*Result, error) {
 		}
 
 		for _, patch := range capability.Patches {
+			if !entryApplies(present, patch.When, patch.WhenAbsent) {
+				continue
+			}
 			original, err := patchTarget(req.Dir, patch.Path, planned, manifest)
 			if err != nil {
 				return nil, err
@@ -170,7 +227,14 @@ func Add(req Request, name string) (*Result, error) {
 			if err != nil {
 				return nil, err
 			}
-			updated, already, err := project.PatchMarker(original, patch.Marker, capability.Name, template.Render(snippet, vars))
+			rendered := template.Render(snippet, vars)
+			var updated []byte
+			var already bool
+			if patch.Mode == "replace" {
+				updated, err = project.ReplaceMarker(original, patch.Marker, rendered)
+			} else {
+				updated, already, err = project.PatchMarker(original, patch.Marker, capability.Name, rendered)
+			}
 			if err != nil {
 				return nil, &project.ConflictError{Path: patch.Path, Reason: err.Error()}
 			}
@@ -183,6 +247,10 @@ func Add(req Request, name string) (*Result, error) {
 		}
 		manifest.AddCapability(project.CapabilityRef{Name: capability.Name, Version: capability.Version})
 		result.Installed = append(result.Installed, capability.Name)
+	}
+
+	if err := reconcileDI(req, manifest, present, planned, upsert, result); err != nil {
+		return nil, err
 	}
 
 	encoded, err := manifest.Encode()
@@ -259,4 +327,116 @@ func alreadyInstalledNotes(root string, manifest *project.Manifest, capability *
 		notes = append(notes, fmt.Sprintf("  %s (%s)", item.Path, item.Reason))
 	}
 	return notes
+}
+
+// installedSet returns the capabilities already recorded in the manifest.
+func installedSet(manifest *project.Manifest) map[string]bool {
+	present := map[string]bool{manifest.Base.Name: true}
+	for _, capability := range manifest.Capabilities {
+		present[capability.Name] = true
+	}
+	return present
+}
+
+// entryApplies reports whether a conditional payload entry applies to the
+// installed capability set. An empty guard always applies.
+func entryApplies(present map[string]bool, when, whenAbsent []string) bool {
+	for _, name := range when {
+		if !present[name] {
+			return false
+		}
+	}
+	for _, name := range whenAbsent {
+		if present[name] {
+			return false
+		}
+	}
+	return true
+}
+
+// reconcileDI renders the dependency graph of every installed capability that
+// declares one, against the installed capability set.
+//
+// It runs whenever a plan is built, so adding a capability that feeds the graph
+// (for example db) regenerates the graph deterministically instead of appending
+// an order-dependent fragment. When the rendered source is unchanged it plans
+// nothing, so a repeat add is a no-op.
+func reconcileDI(req Request, manifest *project.Manifest, present map[string]bool, planned map[string][]byte, upsert func(project.Operation), result *Result) error {
+	names, err := req.Catalog.Names()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if !present[name] {
+			continue
+		}
+		capability, err := req.Catalog.Get(name)
+		if err != nil {
+			return err
+		}
+		if capability.DI == nil {
+			continue
+		}
+		vars := template.DITemplateVars{
+			Name:    manifest.Name,
+			Module:  manifest.Module,
+			Version: capability.Version,
+			Caps:    template.CapabilitySet(present),
+		}
+		graph, err := capability.RenderDIGraph(vars)
+		if err != nil {
+			return err
+		}
+		test, err := capability.RenderDITest(vars)
+		if err != nil {
+			return err
+		}
+		sources := []struct {
+			path    string
+			content []byte
+		}{
+			{path.Join(capability.DI.Dir, "di.go"), graph},
+			{path.Join(capability.DI.Dir, "di_test.go"), test},
+		}
+		for _, source := range sources {
+			if source.content == nil {
+				continue
+			}
+			current, managed, err := currentContent(req.Dir, source.path, planned, manifest)
+			if err != nil {
+				return err
+			}
+			if !managed {
+				return &project.ConflictError{Path: source.path, Reason: "unmanaged file already exists"}
+			}
+			if bytes.Equal(current, source.content) {
+				continue
+			}
+			_, statErr := os.Stat(filepath.Join(req.Dir, source.path))
+			planned[source.path] = source.content
+			upsert(project.Operation{Path: source.path, Content: source.content, Overwrite: statErr == nil})
+			manifest.SetFile(source.path, capability.Name, source.content)
+			result.GenerateLoom = true
+			result.DIPackage = capability.DI.Dir
+		}
+	}
+	return nil
+}
+
+// currentContent returns the content path will have once this plan is applied.
+// managed reports whether weld may write it: a file already planned, a file that
+// does not exist, or a file the manifest records as weld-owned.
+func currentContent(root, path string, planned map[string][]byte, manifest *project.Manifest) (content []byte, managed bool, err error) {
+	if content, ok := planned[path]; ok {
+		return content, true, nil
+	}
+	raw, readErr := os.ReadFile(filepath.Join(root, path))
+	switch {
+	case readErr == nil:
+		return raw, manifest.Owns(path), nil
+	case errors.Is(readErr, os.ErrNotExist):
+		return nil, true, nil
+	default:
+		return nil, false, readErr
+	}
 }

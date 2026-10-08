@@ -54,12 +54,18 @@ Capabilities:
   3.1 document built from the same contract, served by `http`.
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository. Requires only `base`.
+- `loom` (add) — a compile-time [Loom](https://github.com/Xwudao/loom)
+  dependency-injection graph that wires the HTTP server, the JSON API service and
+  the PostgreSQL repository with lifecycle start/stop. Requires `http` and is
+  **opt-in**: `web`, `api` and `db` never install it.
 
 `web` and `api` are independent and both require `http`, so `weld add web` and
 `weld add api` can be run in either order and both are served by the one `serve`
 command. `db` requires only `base`: it is independent of the HTTP capabilities,
 so it can be added to a CLI-only project and composes with `http`/`web`/`api` in
-any order.
+any order. `loom` is opt-in and requires `http`: it wires whatever of `db` and
+`api` is installed, and regenerates its graph when they are added, in either
+order.
 
 ## Staged architecture
 
@@ -185,6 +191,47 @@ floor; no local path or credential is committed.
 imports `net/http` or `internal/api`, so the capability can be added to a
 CLI-only project and composes with the HTTP capabilities in any order.
 
+## `weld add loom` (stage 4)
+
+`weld add loom` is an **opt-in** capability that requires `http` and is never
+installed by `web`, `api` or `db`. It adds `internal/di`, a
+[Loom](https://github.com/Xwudao/loom) dependency graph, and rewires the single
+`serve` command to run `InitApp`.
+
+What Loom binds, and why it is not ceremonial:
+
+- `*Config` — an immutable config built by an injected `EnvLookup` (never
+  scattered `os.Getenv`), exposing the listen address for `http` and the
+  database URL for `db`, with defaults and validation. When `db` is installed
+  `DATABASE_URL` is **required**: there is no invented default dsn, so a
+  database-backed serve cannot silently reach a local database, and an error
+  never echoes the dsn.
+- `*pgxpool.Pool` and `data.Repository` (`db`) — the pool parses the dsn lazily
+  and is **not** connected at build, test or startup, so no database is needed;
+  the constructor returns a cleanup that Loom runs exactly once, whether
+  construction later fails or the lifecycle stops normally.
+- `api.Service` (`api`) — bound to the repository through a generated adapter
+  when `db` is installed, otherwise the default in-memory service.
+- `*httpserver.Server` — the composed mux plus its `loom.Hook` start/stop
+  lifecycle. `OnStart` binds the listen address synchronously, so a port already
+  in use fails `Start`; the serve command waits for a signal or a reported serve
+  failure, then stops gracefully.
+- `*App` — the graph root, holding every bound service.
+
+The graph is capability aware and order independent. `weld add loom` renders
+`internal/di/di.go` for the installed set and generates `internal/di/loom_gen.go`
+with the real pinned generator; adding `web`, `api` or `db` afterwards
+regenerates both. Generation runs at add time with the generator pinned in the
+nested `tools/loom` module, not in the application `go.mod`, and a generation
+failure rolls the whole plan back so a project is never left with a graph that
+does not match `loom_gen.go`. Installed capabilities other than `loom` stay
+Loom-free: only the `serve` registration region and the `go.mod` go-directive
+region gain a generic extension point.
+
+Because the generated initializer imports `github.com/Xwudao/loom`, installing
+`loom` raises the project's Go directive to `go 1.25.0`. The generator's
+`x/tools` dependency stays in `tools/loom`.
+
 ## Tests
 
 ```sh
@@ -194,9 +241,12 @@ go vet ./...
 
 Test conventions:
 
-- No test opens a network socket. HTTP behavior is asserted with
+- No test opens a socket to a service. HTTP behavior is asserted with
   `net/http/httptest` against handlers built from injected routes/fixtures
-  (`httpserver.NewHandler`, and `web.Handler` over an `fstest.MapFS`).
+  (`httpserver.NewHandler`, and `web.Handler` over an `fstest.MapFS`). The
+  generated graph tests bind an ephemeral loopback socket only to prove that an
+  occupied port fails `Start` and that a serve failure is reported, and close it
+  immediately.
 - The generated `serve` command is exercised through flag parsing and the
   command registry (`internal/app/serve_test.go`) rather than by listening.
 - The scaffold tests generate a real project, run `gofmt`, `go build`, `go vet`
@@ -217,6 +267,18 @@ Test conventions:
   build`, `go vet`, the generated `go test ./...`, and a sqlc regeneration that
   must produce no diff. Combination tests cover `base`→`db`, `web`→`db` and
   `api`→`db` in either order.
+- The scaffold tests for `loom` generate a real project, run the pinned
+  generator, and assert the committed `internal/di/loom_gen.go` is generator
+  output and reproduces byte for byte (`generate -dry-run`). The generated
+  `internal/di/di_test.go` exercises the composed graph with an injected
+  `EnvLookup` and an in-memory repository: no database and no `DATABASE_URL`.
+  A regression test proves a `db`+`loom` project with `DATABASE_URL` unset still
+  builds and tests (the graph tests inject a fake environment) and only
+  resolving the graph fails, naming `DATABASE_URL` without inventing or echoing
+  a dsn. Combination tests cover `http`+`loom`, `db`↔`loom`, `api`↔`loom` and
+  `api`+`db`+`loom` in either order, and assert the initializer really constructs
+  `NewPool`/`NewRepository`/`NewAPIService` and registers the pool cleanup. Loom
+  integration tests skip visibly when the pinned generator cannot be built.
 - The API integration tests are **skipped with a reason** when the sibling
   `go-validate` working copy (or the test dependencies) is unavailable, because
   the `Spec`/`Constraint` API is not published yet (newest tag v0.1.1). The

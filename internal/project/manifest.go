@@ -138,6 +138,34 @@ func HashContent(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// RefreshManifest reloads the manifest, recomputes the hash of every managed
+// file that still exists, and rewrites it.
+//
+// It is used after a post-apply code generator updates a managed file (for
+// example the go directive or indirect requires in go.mod), so the manifest
+// records what weld's own tooling wrote rather than reporting it as user drift.
+func RefreshManifest(root string) error {
+	manifest, err := Load(root)
+	if err != nil {
+		return err
+	}
+	for i := range manifest.Files {
+		raw, err := os.ReadFile(filepath.Join(root, manifest.Files[i].Path))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		manifest.Files[i].SHA256 = HashContent(raw)
+	}
+	encoded, err := manifest.Encode()
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(root, ManifestName), encoded)
+}
+
 // Owns reports whether path is a file weld manages in this project.
 func (m *Manifest) Owns(path string) bool {
 	for _, file := range m.Files {
