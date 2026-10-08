@@ -1,7 +1,12 @@
 package scaffold
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"io/fs"
+	"net"
+	nethttp "net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/template"
@@ -1339,8 +1345,10 @@ func TestAddLoomIsIdempotent(t *testing.T) {
 }
 
 // TestAddLoomGraphFollowsInstalledCapabilities proves the graph is regenerated
-// for the installed set in either order: db installed before or after loom both
-// end with the pool and repository wired into the initializer.
+// for the installed set in either order, and that installing db only declares
+// the pool and repository as available bindings: the generated initializer must
+// not construct them, because the default composition never depends on
+// data.Repository.
 func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 	loomToolAvailable(t)
 	orders := []struct {
@@ -1358,19 +1366,16 @@ func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 				add(t, dir, capability)
 			}
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-			if !strings.Contains(di, "data.Repository") || !strings.Contains(di, "NewPool") {
-				t.Errorf("di.go does not bind the repository:\n%s", di)
-			}
-			gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
-			for _, want := range []string{"NewPool", "NewRepository"} {
-				if !strings.Contains(gen, want) {
-					t.Errorf("loom_gen.go does not construct %s; db is not wired:\n%s", want, gen)
+			for _, want := range []string{"loom.Provide(NewPool)", "loom.As[data.Repository](NewRepository)"} {
+				if !strings.Contains(di, want) {
+					t.Errorf("di.go does not declare the available binding %q:\n%s", want, di)
 				}
 			}
-			// The pool's constructor cleanup must reach the lifecycle, so the pool
-			// cannot leak on construction failure or normal stop.
-			if !strings.Contains(gen, "AddCleanup") {
-				t.Errorf("loom_gen.go does not register the pool cleanup:\n%s", gen)
+			gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
+			for _, forbidden := range []string{"NewPool", "NewRepository", "data.Repository"} {
+				if strings.Contains(gen, forbidden) {
+					t.Errorf("loom_gen.go constructs the unused %s; the default composition must not wire db:\n%s", forbidden, gen)
+				}
 			}
 			manifest := mustLoad(t, dir)
 			if len(manifest.Drift(dir)) != 0 {
@@ -1384,89 +1389,245 @@ func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 	}
 }
 
-// TestAddLoomDBWithoutDSNNeedsNoDatabase is the regression for the implicit
-// production dsn: with db and loom installed and DATABASE_URL unset, the
-// generated project must still build and test (the graph tests inject a fake
-// environment), and only resolving the graph may fail. The failure must name
-// DATABASE_URL and never invent or echo a dsn.
-func TestAddLoomDBWithoutDSNNeedsNoDatabase(t *testing.T) {
-	loomToolAvailable(t)
-	root := t.TempDir()
-	dir := create(t, root)
-	add(t, dir, "db")
-	add(t, dir, "loom")
+// TestAPIDBMatrixServesInMemoryWithoutDatabase proves api+db has the same
+// development-demo semantics with and without Loom: serve starts with no
+// database credentials and no reachable database, answers the JSON API over
+// HTTP, keeps items in memory, and loses them on restart. Installing db must not
+// switch the API to PostgreSQL, require a credential, or read the dsn.
+func TestAPIDBMatrixServesInMemoryWithoutDatabase(t *testing.T) {
+	goValidate := goValidateDir(t)
+	if goValidate == "" {
+		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR). Publishing and pinning go-validate is required before release.")
+	}
+	cases := []struct {
+		name      string
+		caps      []string
+		needsLoom bool
+		extraEnv  []string
+		forbidden string
+	}{
+		{name: "api+db+loom", caps: []string{"api", "db", "loom"}, needsLoom: true},
+		{name: "api+db", caps: []string{"api", "db"}},
+		{
+			name:      "api+db+loom ignores a malformed DATABASE_URL",
+			caps:      []string{"api", "db", "loom"},
+			needsLoom: true,
+			extraEnv:  []string{"DATABASE_URL=postgres://user:sentinel-do-not-log:extra@host:notaport/db"},
+			forbidden: "sentinel-do-not-log",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsLoom {
+				loomToolAvailable(t)
+			}
+			root := t.TempDir()
+			dir := create(t, root)
+			useLocalGoValidate(t, dir, goValidate)
+			for _, capability := range tc.caps {
+				add(t, dir, capability)
+			}
+			if !goModTidy(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+			clean := envWithout("DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME")
+			env := append(clean, tc.extraEnv...)
+			binary := buildAppBinary(t, dir, env)
 
-	clean := envWithout("DATABASE_URL")
-	gofmtCheck(t, dir)
-	if !goModTidy(t, dir) {
-		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
-	}
-	runGoWithEnv(t, dir, clean, "build", "./...")
-	runGoWithEnv(t, dir, clean, "vet", "./...")
-	runGoWithEnv(t, dir, clean, "test", "./...")
+			// First run: the API is reachable and keeps an item in memory.
+			first, base, stderr := serveProbe(t, binary, dir, env)
+			if tc.forbidden != "" && strings.Contains(stderr.String(), tc.forbidden) {
+				t.Fatalf("serve logged a database credential:\n%s", stderr.String())
+			}
+			created := postItem(t, base, `{"name":"widget","quantity":2,"status":"active"}`)
+			id, _ := created["id"].(string)
+			if id == "" {
+				t.Fatalf("POST /api/items returned no id: %v", created)
+			}
+			if got := getItem(t, base, id); got["id"] != id {
+				t.Fatalf("GET /api/items/%s = %v", id, got)
+			}
 
-	// The serve command resolves the graph, and that is the only step that needs
-	// DATABASE_URL. Running it without the variable must fail with a message that
-	// names the variable and no dsn.
-	binary := filepath.Join(t.TempDir(), "app")
-	build := exec.Command("go", "build", "-o", binary, ".")
-	build.Dir = dir
-	build.Env = append(clean, "GOPROXY=off", "GOWORK=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
-	run := exec.Command(binary, "serve")
-	run.Dir = dir
-	run.Env = clean
-	out, err := run.CombinedOutput()
-	if err == nil {
-		t.Fatalf("serve succeeded without DATABASE_URL:\n%s", out)
-	}
-	if !strings.Contains(string(out), "DATABASE_URL") {
-		t.Fatalf("serve error does not name DATABASE_URL:\n%s", out)
-	}
-	if strings.Contains(string(out), "postgres://") {
-		t.Fatalf("serve error invents or echoes a dsn:\n%s", out)
+			// Restart: the in-memory demo starts empty, so the item is gone.
+			if err := first.Process.Kill(); err != nil {
+				t.Fatalf("kill serve: %v", err)
+			}
+			_ = first.Wait()
+			_, base, _ = serveProbe(t, binary, dir, env)
+			if status, body := getRaw(t, base+"/api/items/"+id); status != nethttp.StatusNotFound {
+				t.Fatalf("after restart GET /api/items/%s = %d, want 404 (in-memory data is lost on restart): %s", id, status, body)
+			}
+		})
 	}
 }
 
-// TestAddLoomDBMalformedDSNLogsNoCredential is the regression for the credential
-// leak: with db and loom installed, a malformed DATABASE_URL fails the graph's
-// pool constructor, and the base CLI structured-logs that error. The logged
-// record must name the problem without echoing the dsn or its password, so the
-// top-level error path cannot leak a credential.
-func TestAddLoomDBMalformedDSNLogsNoCredential(t *testing.T) {
-	loomToolAvailable(t)
-	root := t.TempDir()
-	dir := create(t, root)
-	add(t, dir, "db")
-	add(t, dir, "loom")
-
-	clean := envWithout("DATABASE_URL")
-	if !goModTidy(t, dir) {
-		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
-	}
+// buildAppBinary builds the generated project's binary with GOPROXY=off, so it
+// proves the module graph already resolved by go mod tidy is complete.
+func buildAppBinary(t *testing.T, dir string, env []string) string {
+	t.Helper()
 	binary := filepath.Join(t.TempDir(), "app")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	build.Dir = dir
-	build.Env = append(clean, "GOPROXY=off", "GOWORK=off")
+	build.Env = append(env, "GOPROXY=off", "GOWORK=off")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
+	return binary
+}
 
-	const password = "sentinel-do-not-log"
-	run := exec.Command(binary, "serve")
-	run.Dir = dir
-	run.Env = append(clean, "DATABASE_URL=postgres://user:"+password+":extra@host:notaport/db")
-	out, err := run.CombinedOutput()
-	if err == nil {
-		t.Fatalf("serve succeeded with a malformed DATABASE_URL:\n%s", out)
+// freeAddr returns an available loopback address. The short race between closing
+// the probe listener and the server binding is acceptable for a test; a lost
+// race fails the probe loudly.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
 	}
-	if strings.Contains(string(out), password) {
-		t.Fatalf("serve logged the database credential:\n%s", out)
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close probe listener: %v", err)
 	}
-	if !strings.Contains(string(out), "invalid PostgreSQL dsn") {
-		t.Fatalf("serve error does not report the malformed dsn:\n%s", out)
+	return addr
+}
+
+// syncBuffer is a concurrency-safe writer for a subprocess's stderr: the
+// process writes from its own goroutine while the test reads the captured
+// output, so access must be synchronized.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// serveProbe starts the generated serve command on a fresh loopback address,
+// waits until it answers, and returns the process, its base URL and its captured
+// stderr. The process is killed when the test finishes.
+func serveProbe(t *testing.T, binary, dir string, env []string) (*exec.Cmd, string, *syncBuffer) {
+	t.Helper()
+	addr := freeAddr(t)
+	cmd := exec.Command(binary, "serve", "--addr", addr)
+	cmd.Dir = dir
+	cmd.Env = env
+	stderr := &syncBuffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start serve: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	base := "http://" + addr
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := nethttp.Get(base + "/api/openapi.json")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == nethttp.StatusOK {
+				return cmd, base, stderr
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("serve did not become ready on %s:\n%s", addr, stderr.String())
+	return nil, "", stderr
+}
+
+func postItem(t *testing.T, base, body string) map[string]any {
+	t.Helper()
+	resp, err := nethttp.Post(base+"/api/items", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /api/items: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read POST /api/items: %v", err)
+	}
+	if resp.StatusCode != nethttp.StatusCreated {
+		t.Fatalf("POST /api/items = %d: %s", resp.StatusCode, raw)
+	}
+	var item map[string]any
+	if err := json.Unmarshal(raw, &item); err != nil {
+		t.Fatalf("decode POST /api/items: %v", err)
+	}
+	return item
+}
+
+func getItem(t *testing.T, base, id string) map[string]any {
+	t.Helper()
+	status, raw := getRaw(t, base+"/api/items/"+id)
+	if status != nethttp.StatusOK {
+		t.Fatalf("GET /api/items/%s = %d: %s", id, status, raw)
+	}
+	var item map[string]any
+	if err := json.Unmarshal(raw, &item); err != nil {
+		t.Fatalf("decode GET /api/items/%s: %v", id, err)
+	}
+	return item
+}
+
+func getRaw(t *testing.T, url string) (int, []byte) {
+	t.Helper()
+	resp, err := nethttp.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read GET %s: %v", url, err)
+	}
+	return resp.StatusCode, raw
+}
+
+// TestGeneratedProjectRaceAndVet runs the generated project's tests under the
+// race detector and vets it for the relevant API/db combinations, with and
+// without Loom, so the in-memory API and its HTTP composition are race-clean
+// without PostgreSQL.
+func TestGeneratedProjectRaceAndVet(t *testing.T) {
+	goValidate := goValidateDir(t)
+	if goValidate == "" {
+		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
+	}
+	cases := []struct {
+		name      string
+		caps      []string
+		needsLoom bool
+	}{
+		{name: "api+db", caps: []string{"api", "db"}},
+		{name: "api+db+loom", caps: []string{"api", "db", "loom"}, needsLoom: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsLoom {
+				loomToolAvailable(t)
+			}
+			root := t.TempDir()
+			dir := create(t, root)
+			useLocalGoValidate(t, dir, goValidate)
+			for _, capability := range tc.caps {
+				add(t, dir, capability)
+			}
+			if !goModTidy(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+			gofmtCheck(t, dir)
+			runGo(t, dir, "vet", "./...")
+			runGo(t, dir, "test", "-race", "./...")
+		})
 	}
 }
 
@@ -1513,13 +1674,15 @@ func mustLoad(t *testing.T, dir string) *project.Manifest {
 	return manifest
 }
 
-// TestAddLoomLinksAPIServiceToRepository proves the graph wires the JSON API
-// service to the PostgreSQL repository through the generated adapter, in either
-// install order. api needs the unpublished go-validate Spec API, so it uses the
-// same test-only local replace as the other api integration tests and skips
-// visibly when that working copy is absent. The generated di_test.go exercises
-// the adapter with an injected in-memory repository, so no PostgreSQL is needed.
-func TestAddLoomLinksAPIServiceToRepository(t *testing.T) {
+// TestAddLoomKeepsAPIInMemory proves installing api+db+loom leaves the API on
+// the in-memory development service, in either install order: the graph declares
+// the pool and repository as available bindings but does not bind them to
+// api.Service, so the generated initializer constructs neither. api needs the
+// unpublished go-validate Spec API, so it uses the same test-only local replace
+// as the other api integration tests and skips visibly when that working copy is
+// absent. The generated di_test.go serves the API over a real socket with no
+// PostgreSQL.
+func TestAddLoomKeepsAPIInMemory(t *testing.T) {
 	goValidate := goValidateDir(t)
 	if goValidate == "" {
 		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR). Publishing and pinning go-validate is required before release.")
@@ -1541,15 +1704,31 @@ func TestAddLoomLinksAPIServiceToRepository(t *testing.T) {
 				add(t, dir, capability)
 			}
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-			for _, want := range []string{"NewAPIService", "repositoryService", "data.Repository"} {
+			for _, want := range []string{"loom.Provide(NewAPIService)", "loom.Provide(NewPool)", "loom.As[data.Repository](NewRepository)"} {
 				if !strings.Contains(di, want) {
 					t.Errorf("di.go is missing %q:\n%s", want, di)
 				}
 			}
+			for _, forbidden := range []string{"repositoryService", "func NewAPIService"} {
+				if strings.Contains(di, forbidden) {
+					t.Errorf("di.go still defines the API wiring itself (%q); the provider belongs in api_provider.go:\n%s", forbidden, di)
+				}
+			}
+			// The provider lives in the stable seam and is the in-memory demo by
+			// default.
+			provider := readFile(t, filepath.Join(dir, "internal/di/api_provider.go"))
+			for _, want := range []string{"func NewAPIService() api.Service", "return api.NewService()"} {
+				if !strings.Contains(provider, want) {
+					t.Errorf("api_provider.go is missing %q:\n%s", want, provider)
+				}
+			}
 			gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
-			for _, want := range []string{"NewAPIService", "NewRepository"} {
-				if !strings.Contains(gen, want) {
-					t.Errorf("loom_gen.go does not wire %s into the graph:\n%s", want, gen)
+			if !strings.Contains(gen, "NewAPIService") {
+				t.Errorf("loom_gen.go does not bind the API service:\n%s", gen)
+			}
+			for _, forbidden := range []string{"NewPool", "NewRepository"} {
+				if strings.Contains(gen, forbidden) {
+					t.Errorf("loom_gen.go constructs the unused %s; the default graph must not wire db:\n%s", forbidden, gen)
 				}
 			}
 			gofmtCheck(t, dir)
@@ -1557,6 +1736,120 @@ func TestAddLoomLinksAPIServiceToRepository(t *testing.T) {
 				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 			}
 		})
+	}
+}
+
+// TestAPIProviderSeamGuardsInstallOnce proves the conditional install that makes
+// api_provider.go durable: each declaration requires the other capability, so it
+// fires only for the capability installed second (api then loom, or loom then
+// api) and never for a project that has only one of them. It exercises the guard
+// directly, so it needs no generator or network.
+func TestAPIProviderSeamGuardsInstallOnce(t *testing.T) {
+	const path = "internal/di/api_provider.go"
+	fileEntry := func(capability string) template.File {
+		t.Helper()
+		got, err := newCatalog().Get(capability)
+		if err != nil {
+			t.Fatalf("Get %s: %v", capability, err)
+		}
+		for _, file := range got.Files {
+			if file.Path == path {
+				return file
+			}
+		}
+		t.Fatalf("%s does not declare %s", capability, path)
+		return template.File{}
+	}
+	apiFile := fileEntry("api")
+	loomFile := fileEntry("loom")
+
+	// The capability installed second writes the file: api's guard needs loom
+	// present, loom's needs api present.
+	if !entryApplies(map[string]bool{"base": true, "loom": true}, apiFile.When, apiFile.WhenAbsent) {
+		t.Error("api does not write api_provider.go when loom is already installed")
+	}
+	if !entryApplies(map[string]bool{"base": true, "api": true}, loomFile.When, loomFile.WhenAbsent) {
+		t.Error("loom does not write api_provider.go when api is already installed")
+	}
+	// The capability installed first stays quiet because the other is absent, so
+	// a project with only one of api/loom never gets the file.
+	if entryApplies(map[string]bool{"base": true}, apiFile.When, apiFile.WhenAbsent) {
+		t.Error("api writes api_provider.go without loom")
+	}
+	if entryApplies(map[string]bool{"base": true}, loomFile.When, loomFile.WhenAbsent) {
+		t.Error("loom writes api_provider.go without api")
+	}
+	// A single plan installing both processes api before loom is marked present,
+	// so only the later declaration fires and the engine never plans it twice.
+	if entryApplies(map[string]bool{"base": true, "api": true}, apiFile.When, apiFile.WhenAbsent) {
+		t.Error("api writes api_provider.go before loom is present in a combined plan")
+	}
+}
+
+// TestAPIProviderSeamSurvivesLaterAdd proves the durable seam end to end: after
+// api+db+loom, a user rewrites internal/di/api_provider.go to consume
+// data.Repository; a later `weld add web` regenerates the graph and loom_gen.go
+// from the new provider but leaves api_provider.go byte for byte intact, and the
+// project still builds, vets and tests without PostgreSQL.
+func TestAPIProviderSeamSurvivesLaterAdd(t *testing.T) {
+	goValidate := goValidateDir(t)
+	if goValidate == "" {
+		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
+	}
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	useLocalGoValidate(t, dir, goValidate)
+	for _, capability := range []string{"api", "db", "loom"} {
+		add(t, dir, capability)
+	}
+
+	// The user rewires the API service onto the repository Loom already declares
+	// as an available binding. Ignoring the repository keeps the test hermetic:
+	// the point is that Loom constructs the pool and repository because this
+	// provider asks for them.
+	const edited = `package di
+
+import (
+	"example.com/demo/internal/api"
+	"example.com/demo/internal/data"
+)
+
+// NewAPIService is wired by hand onto the repository.
+func NewAPIService(repo data.Repository) api.Service {
+	_ = repo
+	return api.NewService()
+}
+`
+	path := filepath.Join(dir, "internal/di/api_provider.go")
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "web")
+
+	if got := readFile(t, path); got != edited {
+		t.Fatalf("the later add rewrote the user's api_provider.go:\n%s", got)
+	}
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	if !strings.Contains(di, "example.com/demo/internal/web") {
+		t.Errorf("di.go was not regenerated for web:\n%s", di)
+	}
+	gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
+	for _, want := range []string{"NewPool", "NewRepository"} {
+		if !strings.Contains(gen, want) {
+			t.Errorf("loom_gen.go did not follow the edited provider to wire %s:\n%s", want, gen)
+		}
+	}
+	// The regenerated graph test must not call the edited provider's signature.
+	if diTest := readFile(t, filepath.Join(dir, "internal/di/di_test.go")); strings.Contains(diTest, "NewAPIService(") {
+		t.Errorf("the regenerated di_test.go calls the editable provider:\n%s", diTest)
+	}
+	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after the later add: %+v", drift)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 	}
 }
 

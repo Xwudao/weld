@@ -260,7 +260,7 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	if !strings.Contains(string(httpOnly), "NewServer") {
 		t.Errorf("http-only graph has no server:\n%s", httpOnly)
 	}
-	if strings.Contains(string(httpOnly), "NewPool") || strings.Contains(string(httpOnly), "NewAPIService") {
+	if strings.Contains(string(httpOnly), "loom.Provide(NewPool)") || strings.Contains(string(httpOnly), "loom.Provide(NewAPIService)") {
 		t.Errorf("http-only graph binds db/api:\n%s", httpOnly)
 	}
 
@@ -270,9 +270,67 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDIGraph(db,api): %v", err)
 	}
-	for _, want := range []string{"NewPool", "NewRepository", "NewAPIService", "data.Repository", "repositoryService"} {
+	// Installing db declares the pool and repository as available bindings, but
+	// the default composition never depends on them: the API service stays the
+	// in-memory demo and the graph root holds no repository. The provider itself
+	// lives in the stable api_provider.go seam, not in this regenerated graph.
+	for _, want := range []string{"loom.Provide(NewPool)", "loom.As[data.Repository](NewRepository)", "loom.Provide(NewAPIService)"} {
 		if !strings.Contains(string(withDB), want) {
 			t.Errorf("db+api graph is missing %q:\n%s", want, withDB)
 		}
+	}
+	if strings.Contains(string(withDB), "func NewAPIService") {
+		t.Errorf("db+api graph defines NewAPIService in di.go; the provider must live in api_provider.go:\n%s", withDB)
+	}
+	for _, forbidden := range []string{"repositoryService", "NewAPIService(repo", "Repository data.Repository"} {
+		if strings.Contains(string(withDB), forbidden) {
+			t.Errorf("db+api graph still auto-wires persistence (%q):\n%s", forbidden, withDB)
+		}
+	}
+	// ValidateDatabase guards the pool, the one constructor that needs it, and
+	// not the graph root, so installing db does not require a credential to
+	// serve.
+	if count := strings.Count(string(withDB), "ValidateDatabase()"); count != 1 {
+		t.Errorf("ValidateDatabase is called %d times in the db+api graph, want 1 (in NewPool):\n%s", count, withDB)
+	}
+}
+
+// TestRenderDITestIsInMemoryAndHTTPOnly checks that the generated graph test
+// exercises the in-memory API over a real socket and never injects a fake
+// repository, and that the database is validated at the pool rather than the
+// graph root.
+func TestRenderDITestIsInMemoryAndHTTPOnly(t *testing.T) {
+	capability, err := Load().Get("loom")
+	if err != nil {
+		t.Fatalf("Get loom: %v", err)
+	}
+	vars := DITemplateVars{
+		Name:    "demo",
+		Module:  "example.com/demo",
+		Version: "0.1.0",
+		Caps:    CapabilitySet{"base": true, "http": true, "loom": true, "db": true, "api": true},
+	}
+	test, err := capability.RenderDITest(vars)
+	if err != nil {
+		t.Fatalf("RenderDITest(db,api): %v", err)
+	}
+	for _, want := range []string{
+		"TestComposedServerServesInMemoryAPI",
+		"api.NewService",
+		"TestNewConfigNeedsNoDatabase",
+		"TestNewPoolRequiresDatabaseCredentials",
+	} {
+		if !strings.Contains(string(test), want) {
+			t.Errorf("db+api graph test is missing %q:\n%s", want, test)
+		}
+	}
+	// The regenerated test must not call the user-editable NewAPIService
+	// provider: a user who changes its signature to consume data.Repository
+	// would otherwise break the next regeneration with a compile error.
+	if strings.Contains(string(test), "NewAPIService(") {
+		t.Errorf("db+api graph test calls the editable NewAPIService provider:\n%s", test)
+	}
+	if strings.Contains(string(test), "fakeRepository") {
+		t.Errorf("db+api graph test still injects a fake repository:\n%s", test)
 	}
 }
