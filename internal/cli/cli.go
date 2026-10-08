@@ -10,6 +10,7 @@ import (
 	weldtemplate "github.com/Xwudao/weld-template"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/scaffold"
+	"github.com/Xwudao/weld/internal/skills"
 	"github.com/Xwudao/weld/internal/template"
 )
 
@@ -31,6 +32,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runAdd(args[1:], stdout)
 	case "list", "ls":
 		return runList(args[1:], stdout)
+	case "skills":
+		return runSkills(args[1:], stdout)
 	case "version", "--version", "-v":
 		fmt.Fprintf(stdout, "%s %s (templates %s)\n", progName, version, weldtemplate.Version)
 		return nil
@@ -54,6 +57,10 @@ Usage:
 
   %s list [--dir dir]
       Show available capabilities and, when inside a project, what is installed.
+
+  %s skills [--dir dir] [--dry-run]
+      Generate the project's .agents/skills/weld/SKILL.md, a project-specific
+      guide to the installed capabilities for coding agents.
 
   %s version
   %s help
@@ -84,9 +91,11 @@ the caller owns and never wires Redis into a service on its own. loom is
 opt-in: it requires http and regenerates its graph when web, api, db or redis is
 installed, and it raises the project's Go floor to 1.25.
 
-Every file weld writes is recorded in the project manifest (weld.json) with the
-capability and version that produced it.
-`, progName, progName, progName, progName, progName, progName)
+Every file a capability writes is recorded in the project manifest (weld.json)
+with the capability and version that produced it. The skills command writes
+.agents/skills/weld/SKILL.md from that manifest and refuses to overwrite the
+file once you edit it.
+`, progName, progName, progName, progName, progName, progName, progName)
 }
 
 func runNew(args []string, stdout io.Writer) error {
@@ -197,6 +206,42 @@ func runList(args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "  %s (%s)\n", item.Path, item.Reason)
 		}
 	}
+	return nil
+}
+
+func runSkills(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("skills", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	dir := flags.String("dir", ".", "project directory")
+	dryRun := flags.Bool("dry-run", false, "print the plan without writing")
+	if _, err := parseArgs(flags, args); err != nil {
+		return err
+	}
+
+	manifest, err := project.Load(*dir)
+	if err != nil {
+		return err
+	}
+	result, err := skills.Generate(*dir, manifest, template.Load())
+	if err != nil {
+		return err
+	}
+	if result.Changed {
+		action := "add"
+		if result.Existing {
+			action = "update"
+		}
+		if *dryRun {
+			fmt.Fprintf(stdout, "Plan (1 change(s), dry run):\n  %s %s\n", action, result.Path)
+			return nil
+		}
+		if err := result.Apply(*dir); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Applied 1 change(s):\n  %s %s\n", action, result.Path)
+		return nil
+	}
+	fmt.Fprintf(stdout, "%s is up to date.\n", result.Path)
 	return nil
 }
 

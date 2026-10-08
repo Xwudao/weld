@@ -207,3 +207,207 @@ func TestHelpMentionsLoomCapability(t *testing.T) {
 		t.Fatalf("help does not mention the loom capability:\n%s", out)
 	}
 }
+
+func skillsPath(dir string) string {
+	return filepath.Join(dir, ".agents", "skills", "weld", "SKILL.md")
+}
+
+func TestSkillsFreshGenerationAndRepeat(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "add", "http", "--dir", dir); err != nil {
+		t.Fatalf("add http: %v", err)
+	}
+	if _, err := run(t, "add", "api", "--dir", dir); err != nil {
+		t.Fatalf("add api: %v", err)
+	}
+
+	out, err := run(t, "skills", "--dir", dir)
+	if err != nil {
+		t.Fatalf("skills: %v", err)
+	}
+	if !strings.Contains(out, "Applied 1 change(s)") {
+		t.Fatalf("skills output = %q", out)
+	}
+	path := skillsPath(dir)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read skill: %v", err)
+	}
+	for _, want := range []string{"**http**", "**api**", "in-memory", "example.com/demo"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("generated skill is missing %q:\n%s", want, raw)
+		}
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(t, "skills", "--dir", dir)
+	if err != nil {
+		t.Fatalf("repeat skills: %v", err)
+	}
+	if !strings.Contains(out, "up to date") {
+		t.Fatalf("repeat skills output = %q", out)
+	}
+	repeat, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, repeat) {
+		t.Fatal("repeat skills changed the file")
+	}
+	again, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(again.ModTime()) {
+		t.Fatal("repeat skills rewrote an up-to-date file")
+	}
+}
+
+func TestSkillsDryRunWritesNothing(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	out, err := run(t, "skills", "--dir", dir, "--dry-run")
+	if err != nil {
+		t.Fatalf("skills --dry-run: %v", err)
+	}
+	if !strings.Contains(out, "dry run") {
+		t.Fatalf("dry-run output = %q", out)
+	}
+	if _, err := os.Stat(skillsPath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote the skill file (stat err = %v)", err)
+	}
+}
+
+func TestSkillsRefusesEditedFile(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "skills", "--dir", dir); err != nil {
+		t.Fatalf("skills: %v", err)
+	}
+	path := skillsPath(dir)
+	edited := []byte("# my own skill notes\n")
+	if err := os.WriteFile(path, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := run(t, "skills", "--dir", dir)
+	if err == nil {
+		t.Fatal("expected skills to refuse an edited file")
+	}
+	if !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("refusal error = %v", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, edited) {
+		t.Fatal("edited skill file was overwritten")
+	}
+}
+
+func TestSkillsTracksCapabilityChanges(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "skills", "--dir", dir); err != nil {
+		t.Fatalf("skills: %v", err)
+	}
+	before, err := os.ReadFile(skillsPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(before), "**db**") {
+		t.Fatalf("base project claims db is installed:\n%s", before)
+	}
+
+	if _, err := run(t, "add", "db", "--dir", dir); err != nil {
+		t.Fatalf("add db: %v", err)
+	}
+	out, err := run(t, "skills", "--dir", dir)
+	if err != nil {
+		t.Fatalf("skills after add: %v", err)
+	}
+	if !strings.Contains(out, "update") {
+		t.Fatalf("skills after add output = %q", out)
+	}
+	after, err := os.ReadFile(skillsPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), "**db**") {
+		t.Fatalf("skill does not reflect the added capability:\n%s", after)
+	}
+}
+
+func TestSkillsRefusesEditedFileAfterCapabilityAdd(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "skills", "--dir", dir); err != nil {
+		t.Fatalf("skills: %v", err)
+	}
+	path := skillsPath(dir)
+	if err := os.WriteFile(path, []byte("# user-owned\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "add", "http", "--dir", dir); err != nil {
+		t.Fatalf("add http: %v", err)
+	}
+	if _, err := run(t, "skills", "--dir", dir); err == nil {
+		t.Fatal("expected skills to refuse an edited file after a capability add")
+	}
+}
+
+func TestSkillsDoesNotLeakConfigSecrets(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "add", "http", "--dir", dir); err != nil {
+		t.Fatalf("add http: %v", err)
+	}
+	configPath := filepath.Join(dir, "config.yml")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yml: %v", err)
+	}
+	secret := append(append([]byte(nil), raw...), []byte("  password: SUPERSECRET-SENTINEL\n")...)
+	if err := os.WriteFile(configPath, secret, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "skills", "--dir", dir); err != nil {
+		t.Fatalf("skills: %v", err)
+	}
+	body, err := os.ReadFile(skillsPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "SUPERSECRET-SENTINEL") {
+		t.Fatal("the generated skill file leaked a configuration secret")
+	}
+}
+
+func TestSkillsRequiresProject(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "skills", "--dir", root); err == nil {
+		t.Fatal("expected skills to fail outside a weld project")
+	}
+}

@@ -1,0 +1,341 @@
+// Package skills renders the per-project agent skill file and plans its safe,
+// idempotent write.
+//
+// `weld skills` explains a generated project to a coding agent: which
+// capabilities are installed, what "installed" does and does not mean, and
+// which files weld generates. The document is derived from weld.json and the
+// capability catalog only, never from project source, so a local credential can
+// never reach it.
+package skills
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/Xwudao/weld/internal/project"
+	"github.com/Xwudao/weld/internal/template"
+)
+
+// Path is the project-relative path of the generated skill file.
+const Path = ".agents/skills/weld/SKILL.md"
+
+// The generated file ends with a trailer line recording the fingerprint of the
+// body above it. The fingerprint lets a later run tell weld output from a file
+// the user edited, so an edit is never overwritten silently.
+const (
+	trailerPrefix = "<!-- weld:skills sha256="
+	trailerSuffix = " -->"
+)
+
+// Catalog supplies the catalog description of an installed capability. It is
+// satisfied by *template.Catalog; tests inject a fake so a future capability
+// can be exercised without shipping it in the embedded template.
+type Catalog interface {
+	Get(name string) (*template.Capability, error)
+}
+
+// Result is a planned skill file.
+type Result struct {
+	// Path is the project-relative skill path.
+	Path string
+	// Content is the bytes to write.
+	Content []byte
+	// Existing reports that the file already existed and was not user-edited.
+	Existing bool
+	// Changed reports that applying the plan would change the file.
+	Changed bool
+}
+
+// Generate plans the skill file for a project rooted at root.
+//
+// A file weld did not write, or one the user edited after it was generated, is
+// a conflict rather than something to overwrite, so a user's own skill notes
+// are never lost.
+func Generate(root string, manifest *project.Manifest, catalog Catalog) (*Result, error) {
+	content, err := Render(manifest, catalog)
+	if err != nil {
+		return nil, err
+	}
+	existing, readErr := os.ReadFile(filepath.Join(root, Path))
+	switch {
+	case errors.Is(readErr, os.ErrNotExist):
+		return &Result{Path: Path, Content: content, Changed: true}, nil
+	case readErr != nil:
+		return nil, readErr
+	}
+	if Edited(existing) {
+		return nil, &project.ConflictError{
+			Path:   Path,
+			Reason: "was edited since it was generated; refusing to overwrite (delete or rename it to regenerate)",
+		}
+	}
+	return &Result{
+		Path:     Path,
+		Content:  content,
+		Existing: true,
+		Changed:  !bytes.Equal(existing, content),
+	}, nil
+}
+
+// Apply writes the planned file when it changed and does nothing otherwise, so
+// a repeat `weld skills` leaves the file untouched.
+func (r *Result) Apply(root string) error {
+	if !r.Changed {
+		return nil
+	}
+	return project.Apply(root, []project.Operation{{Path: r.Path, Content: r.Content, Overwrite: true}})
+}
+
+// Edited reports whether content is not a weld-generated document, or is one
+// that was modified after generation. An unrecognized file is treated as edited
+// so it is never overwritten.
+func Edited(content []byte) bool {
+	body, hash, ok := splitTrailer(content)
+	if !ok {
+		return true
+	}
+	return fingerprint(body) != hash
+}
+
+// splitTrailer separates the generated body from its trailer fingerprint. It
+// reports false when content does not end with a well-formed trailer.
+func splitTrailer(content []byte) (body []byte, hash string, ok bool) {
+	s := string(content)
+	index := strings.LastIndex(s, trailerPrefix)
+	if index < 0 {
+		return nil, "", false
+	}
+	rest := s[index+len(trailerPrefix):]
+	end := strings.Index(rest, trailerSuffix)
+	if end < 0 || rest[end+len(trailerSuffix):] != "\n" {
+		return nil, "", false
+	}
+	return []byte(s[:index]), rest[:end], true
+}
+
+func fingerprint(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// stamp appends the trailer recording the fingerprint of body.
+func stamp(body []byte) []byte {
+	out := make([]byte, 0, len(body)+len(trailerPrefix)+64+len(trailerSuffix)+1)
+	out = append(out, body...)
+	out = append(out, trailerPrefix...)
+	out = append(out, fingerprint(body)...)
+	out = append(out, trailerSuffix...)
+	out = append(out, '\n')
+	return out
+}
+
+// installedCapability is one capability recorded in the manifest.
+type installedCapability struct {
+	name    string
+	version string
+}
+
+// installedCapabilities returns the base and added capabilities in lexical
+// order, so the document is independent of install order and deterministic.
+func installedCapabilities(manifest *project.Manifest) []installedCapability {
+	versions := map[string]string{}
+	if manifest.Base.Name != "" {
+		versions[manifest.Base.Name] = manifest.Base.Version
+	}
+	for _, capability := range manifest.Capabilities {
+		versions[capability.Name] = capability.Version
+	}
+	caps := make([]installedCapability, 0, len(versions))
+	for name, version := range versions {
+		caps = append(caps, installedCapability{name: name, version: version})
+	}
+	sort.Slice(caps, func(i, j int) bool { return caps[i].name < caps[j].name })
+	return caps
+}
+
+// Render builds the skill document for the capabilities recorded in manifest.
+func Render(manifest *project.Manifest, catalog Catalog) ([]byte, error) {
+	if manifest == nil {
+		return nil, errors.New("skills: manifest is required")
+	}
+	caps := installedCapabilities(manifest)
+	set := make(map[string]bool, len(caps))
+	for _, capability := range caps {
+		set[capability.name] = true
+	}
+
+	var b strings.Builder
+	writeFrontmatter(&b)
+	writeHeader(&b, manifest)
+	writeCapabilities(&b, caps, catalog)
+	writeWiring(&b, set)
+	writeEditing(&b, set)
+	writeFileIndex(&b, manifest)
+	writeRegenerate(&b)
+	return stamp([]byte(b.String())), nil
+}
+
+func writeFrontmatter(b *strings.Builder) {
+	b.WriteString("---\n")
+	b.WriteString("name: weld\n")
+	b.WriteString("description: Project-specific guide to the weld capabilities installed in this repository.\n")
+	b.WriteString("---\n\n")
+}
+
+func writeHeader(b *strings.Builder, manifest *project.Manifest) {
+	fmt.Fprintf(b, "# weld project skill: %s\n\n", manifest.Name)
+	b.WriteString("This project is a Go application scaffolded with [weld](https://github.com/Xwudao/weld).\n")
+	if manifest.CreatedWith != "" {
+		fmt.Fprintf(b, "It was created with weld %s and its Go module is `%s`.\n\n", manifest.CreatedWith, manifest.Module)
+	} else {
+		fmt.Fprintf(b, "Its Go module is `%s`.\n\n", manifest.Module)
+	}
+	b.WriteString("`weld new` creates a minimal Go CLI and `weld add <capability>` extends that\n")
+	b.WriteString("same project one capability at a time. Capabilities are additive, resolved by\n")
+	b.WriteString("dependency, and never removed.\n\n")
+}
+
+// writeCapabilities lists every installed capability with a description. A
+// capability this weld build does not curate falls back to its catalog summary,
+// and one the catalog does not carry at all is described generically rather than
+// invented.
+func writeCapabilities(b *strings.Builder, caps []installedCapability, catalog Catalog) {
+	b.WriteString("## Installed capabilities\n\n")
+	for _, capability := range caps {
+		version := capability.version
+		if version == "" {
+			version = "unknown"
+		}
+		fmt.Fprintf(b, "- **%s** v%s — %s\n", capability.name, version, describe(capability.name, catalog))
+	}
+	b.WriteString("\n")
+}
+
+func describe(name string, catalog Catalog) string {
+	if note, ok := curatedNotes[name]; ok {
+		return note
+	}
+	if catalog != nil {
+		if capability, err := catalog.Get(name); err == nil && capability.Summary != "" {
+			return capability.Summary
+		}
+	}
+	return "capability recorded in `weld.json`; this weld build has no description for it."
+}
+
+// curatedNotes is the accurate, project-level description of the bundled
+// capabilities. It is a map rather than a switch so a future capability falls
+// through to its catalog summary instead of silently vanishing.
+var curatedNotes = map[string]string{
+	"base":   "minimal, dependency-free Go CLI: a command registry in `internal/app` and a `log/slog` factory in `internal/logging`. It ships no configuration and no server.",
+	"config": "shared typed configuration in `internal/config`: `config.yml` from the working directory with flag > environment > file > defaults precedence. `config.yml` is local and git-ignored and `config.example.yml` is committed. `config.Secret` redacts itself in `fmt`, `log/slog`, JSON and YAML.",
+	"http":   "HTTP server lifecycle in `internal/httpserver` and the single `serve` command in `internal/app/serve.go`. The handler is composed explicitly with `NewHandler(routes ...Route)`; routes are not registered globally.",
+	"web":    "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
+	"api":    "JSON HTTP API in `internal/api`: typed DTOs, go-validate rules and an OpenAPI 3.1 document served at `GET /api/openapi.json`. The default `Service` is an in-memory development demo whose items are lost on restart; it is not persistence.",
+	"db":     "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
+	"loom":   "opt-in compile-time dependency-injection graph in `internal/di` that composes the configuration, logger and HTTP server (and the JSON API service when **api** is installed); `serve` runs the graph. Installing it raises the project's Go directive to 1.25, and any installed **db** and **redis** are declared but pruned until a provider depends on them.",
+	"redis":  "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
+}
+
+func writeWiring(b *strings.Builder, set map[string]bool) {
+	b.WriteString("## Installed is not the same as wired\n\n")
+	b.WriteString("A capability is **installed** when weld wrote its files and recorded them in\n")
+	b.WriteString("`weld.json`. Installed does not mean **wired**: the generated application only\n")
+	b.WriteString("uses a capability where project code explicitly references it.\n\n")
+	wrote := false
+	if set["api"] {
+		b.WriteString("- **api** serves an in-memory development demo (`api.NewService()`). Items are\n")
+		b.WriteString("  lost on restart and no database is required; installing **db** does not switch\n")
+		b.WriteString("  the service to PostgreSQL. Wire persistence in explicitly (see\n")
+		b.WriteString("  `internal/api/README.md`).\n")
+		wrote = true
+	}
+	if set["db"] {
+		b.WriteString("- **db** installs a pool and repository but connects nothing. No pool is\n")
+		b.WriteString("  constructed and no database credential is needed until you inject\n")
+		b.WriteString("  `data.Repository` (see `internal/data/README.md`).\n")
+		wrote = true
+	}
+	if set["redis"] {
+		b.WriteString("- **redis** installs a client but never dials or pings; nothing generated\n")
+		b.WriteString("  imports it, so an ordinary serve needs no Redis setting (see\n")
+		b.WriteString("  `internal/redisclient/README.md`).\n")
+		wrote = true
+	}
+	if set["loom"] {
+		b.WriteString("- **loom** wires the configuration, logger, HTTP server and, when **api** is\n")
+		b.WriteString("  installed, the JSON API service. A **db** or **redis** binding is declared but\n")
+		b.WriteString("  pruned until a provider depends on it, so an unrelated serve needs neither.\n")
+		wrote = true
+	}
+	if wrote {
+		b.WriteString("\n")
+	}
+}
+
+func writeEditing(b *strings.Builder, set map[string]bool) {
+	b.WriteString("## Generated and editable files\n\n")
+	b.WriteString("weld records every file a capability writes in `weld.json`, with the capability\n")
+	b.WriteString("and version that produced it. Those files are **generated**: re-running\n")
+	b.WriteString("`weld add` can rewrite them, and `weld list` reports an edited one as\n")
+	b.WriteString("`modified`. Everything not recorded in `weld.json` is yours to edit.\n\n")
+	if set["loom"] {
+		b.WriteString("- Regenerated on every capability change, so do not edit:\n")
+		b.WriteString("  `internal/di/di.go` and `internal/di/loom_gen.go`.\n")
+	}
+	var seams []string
+	if set["api"] && set["loom"] {
+		seams = append(seams, "`internal/di/api_provider.go`")
+	}
+	if set["redis"] && set["loom"] {
+		seams = append(seams, "`internal/di/redis_provider.go`")
+	}
+	if set["api"] && !set["loom"] {
+		seams = append(seams, "`internal/httpserver/api_route.go`")
+	}
+	if len(seams) > 0 {
+		fmt.Fprintf(b, "- Stable seams, written once and never regenerated, so your edits\n  survive later `weld add`: %s.\n", strings.Join(seams, ", "))
+	}
+	if set["config"] {
+		b.WriteString("- `config.yml` is managed but local and git-ignored; weld appends a new\n")
+		b.WriteString("  capability's section through its marker region, so your values and comments\n")
+		b.WriteString("  are preserved.\n")
+	}
+	b.WriteString("- This skill file is generated by `weld skills`, separately from the manifest,\n")
+	b.WriteString("  and is not recorded in `weld.json`.\n\n")
+}
+
+func writeFileIndex(b *strings.Builder, manifest *project.Manifest) {
+	if len(manifest.Files) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(manifest.Files))
+	for _, file := range manifest.Files {
+		paths = append(paths, file.Path)
+	}
+	sort.Strings(paths)
+
+	b.WriteString("### Files weld manages in this project\n\n")
+	b.WriteString("Every path recorded in `weld.json` (weld.json records which capability\n")
+	b.WriteString("last wrote each one):\n\n")
+	for _, path := range paths {
+		fmt.Fprintf(b, "- `%s`\n", path)
+	}
+	b.WriteString("\n")
+}
+
+func writeRegenerate(b *strings.Builder) {
+	b.WriteString("## Regenerating this skill\n\n")
+	b.WriteString("This file is produced by `weld skills` from `weld.json`; re-run it after\n")
+	b.WriteString("adding a capability:\n\n")
+	b.WriteString("    weld skills [--dir .] [--dry-run]\n\n")
+	b.WriteString("weld refuses to overwrite the file once it differs from the generated content,\n")
+	b.WriteString("so your edits are safe. Delete or rename the file to regenerate from scratch.\n\n")
+}

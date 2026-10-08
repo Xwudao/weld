@@ -40,6 +40,7 @@ To release, publish `weld-template` and pin a real version, then drop the
 weld new <name> [--module path] [--dir dir] [--dry-run]
 weld add <capability> [--dir dir] [--dry-run]
 weld list [--dir dir]
+weld skills [--dir dir] [--dry-run]
 weld version
 weld help
 ```
@@ -158,6 +159,46 @@ the frontend never masquerades as an API that is not installed.
 - **Preserves user files.** Existing files are only rewritten through a verified
   marker region; every byte outside the region is left untouched, and all other
   writes are additive.
+
+## `weld skills`
+
+`weld skills` writes a project-specific agent skill to
+`.agents/skills/weld/SKILL.md`. It is generated from `weld.json` and the
+capability catalog, never from project source, so the document explains the
+installed capabilities without copying a local value or secret. Re-run it after
+adding a capability:
+
+```sh
+weld skills --dir . --dry-run   # print the plan without writing
+weld skills --dir .             # write or refresh SKILL.md
+```
+
+The document records the project name and module, each installed capability and
+version, what being **installed** does and does not mean, and which files weld
+generates. It is honest about the difference between installed and **wired**:
+the `api` service is an in-memory development demo that `db` never replaces on
+its own, `db` installs a pool and repository but connects nothing, and `redis`
+installs a client that never dials or pings. A capability the running binary
+knows but this command does not curate is described from the catalog summary,
+and an unrecognized one is listed without an invented description.
+
+The write is safe and deterministic:
+
+- **Idempotent.** Re-running it on an unchanged project reports `up to date` and
+  leaves the file untouched.
+- **Refuses user edits.** The generated file ends with a trailer recording a
+  fingerprint of its body. If the file no longer matches — the user edited it,
+  not `weld` — `weld skills` refuses to overwrite it rather than lose the user's
+  notes, including after a later `weld add` changed the installed set. Delete or
+  rename the file to regenerate from scratch.
+- **Preserves unrelated files.** Only `.agents/skills/weld/SKILL.md` is written;
+  sibling files under `.agents/skills/` are untouched.
+- **Not in the manifest.** The skill file is deliberately not recorded in
+  `weld.json`, so it can be edited freely; `weld` tracks the generated version
+  with the fingerprint instead.
+
+The document is derived only from `weld.json` and the catalog, so it is stable
+for a given manifest and catalog and contains no timestamps.
 
 ## `weld add api` (stage 2)
 
@@ -415,4 +456,5 @@ internal/cli/        argument parsing and output
 internal/template/   capability catalog + placeholder rendering
 internal/project/    manifest, marker patching, best-effort rollback apply
 internal/scaffold/   create/add plans and dependency resolution
+internal/skills/     project agent skill generation and safe write
 ```
