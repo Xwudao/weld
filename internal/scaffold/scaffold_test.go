@@ -184,10 +184,15 @@ func TestAddWebInstallsHTTPDependency(t *testing.T) {
 	baseApp := readFile(t, filepath.Join(dir, "internal/app/app.go"))
 	result := add(t, dir, "web")
 
-	if got, want := strings.Join(result.Installed, ","), "http,web"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,http,web"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
+		// shared configuration, installed as a dependency of http
+		"internal/config/config.go",
+		"internal/config/config_test.go",
+		"config.example.yml",
+		"config.yml",
 		// frontend
 		"web/package.json",
 		"web/vite.config.ts",
@@ -246,9 +251,9 @@ func TestAddWebInstallsHTTPDependency(t *testing.T) {
 		t.Fatalf("drift after add: %+v", manifest.Drift(dir))
 	}
 
-	gofmtCheck(t, dir)
-	goBuild(t, dir)
-	goTest(t, dir, "./...")
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
 }
 
 func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
@@ -256,7 +261,7 @@ func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "http")
-	if got, want := strings.Join(result.Installed, ","), "http"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,http"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "internal/httpserver/http.go")); err != nil {
@@ -273,9 +278,9 @@ func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
 		t.Fatalf("routes region missing:\n%s", httpGo)
 	}
 
-	gofmtCheck(t, dir)
-	goBuild(t, dir)
-	goTest(t, dir, "./...")
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
 }
 
 func TestAddWebAfterHTTPResolvesNothingExtra(t *testing.T) {
@@ -294,8 +299,9 @@ func TestAddWebAfterHTTPResolvesNothingExtra(t *testing.T) {
 	if !manifest.HasCapability("http") || !manifest.HasCapability("web") {
 		t.Fatalf("capabilities not recorded: %+v", manifest.Capabilities)
 	}
-	goBuild(t, dir)
-	goTest(t, dir, "./...")
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
 }
 
 func TestAddWebIsIdempotent(t *testing.T) {
@@ -415,11 +421,12 @@ func TestAddWebDoesNotTouchUnrelatedFiles(t *testing.T) {
 	root := t.TempDir()
 	dir := create(t, root)
 
+	// go.mod is deliberately absent: the config capability that http installs
+	// patches its weld:deps region, so it is no longer unrelated.
 	untouched := []string{
 		"main.go",
 		"internal/app/app.go",
 		"README.md",
-		"go.mod",
 	}
 	before := map[string]string{}
 	for _, path := range untouched {
@@ -555,7 +562,7 @@ func TestAddAPIInstallsHTTPDependency(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "api")
-	if got, want := strings.Join(result.Installed, ","), "http,api"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,http,api"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
@@ -679,12 +686,12 @@ func TestAddAPIGeneratedProjectBuildsAndTests(t *testing.T) {
 
 	gofmtCheck(t, dir)
 	useLocalGoValidate(t, dir, goValidate)
-	goBuild(t, dir)
 	if !goModTidy(t, dir) {
 		t.Skip("cannot resolve the generated project's test dependencies (network/module cache unavailable)")
 	}
-	goTest(t, dir, "./...")
+	goBuild(t, dir)
 	runGo(t, dir, "vet", "./...")
+	goTest(t, dir, "./...")
 }
 
 // TestAddAPIAndWebInEitherOrder proves the two capabilities compose on one
@@ -733,10 +740,10 @@ func TestAddAPIAndWebInEitherOrder(t *testing.T) {
 
 			gofmtCheck(t, dir)
 			useLocalGoValidate(t, dir, goValidate)
-			goBuild(t, dir)
 			if !goModTidy(t, dir) {
 				t.Skip("cannot resolve the generated project's test dependencies (network/module cache unavailable)")
 			}
+			goBuild(t, dir)
 			goTest(t, dir, "./...")
 		})
 	}
@@ -750,10 +757,14 @@ func TestAddDBInstallsAlone(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "db")
-	if got, want := strings.Join(result.Installed, ","), "db"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,db"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
+		// shared configuration, installed as a dependency of db
+		"internal/config/config.go",
+		"config.yml",
+		"config.example.yml",
 		"sqlc.yaml",
 		"db/migrations/000001_create_items.sql",
 		"db/query/items.sql",
@@ -1245,7 +1256,7 @@ func TestAddLoomInstallsHTTPAndRendersGraph(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "loom")
-	if got, want := strings.Join(result.Installed, ","), "http,loom"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,http,loom"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
@@ -1546,6 +1557,305 @@ func TestAddLoomLinksAPIServiceToRepository(t *testing.T) {
 				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 			}
 		})
+	}
+}
+
+// --- config milestone ------------------------------------------------------
+
+// TestAddHTTPInstallsSharedConfig proves the first http/db add installs the
+// shared config capability: the typed loader, the local config.yml and the
+// committed example, the git-ignore rule and the yaml dependency. An http-only
+// project never gains a database section.
+func TestAddHTTPInstallsSharedConfig(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+
+	result := add(t, dir, "http")
+	if got, want := strings.Join(result.Installed, ","), "config,http"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
+	}
+	for _, path := range []string{"internal/config/config.go", "internal/config/config_test.go", "config.yml", "config.example.yml"} {
+		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
+			t.Errorf("expected %s: %v", path, err)
+		}
+	}
+	if gi := readFile(t, filepath.Join(dir, ".gitignore")); !strings.Contains(gi, "config.yml") || !strings.Contains(gi, "weld:config:installed") {
+		t.Errorf(".gitignore does not ignore config.yml:\n%s", gi)
+	}
+	if gm := readFile(t, filepath.Join(dir, "go.mod")); !strings.Contains(gm, "gopkg.in/yaml.v3") || !strings.Contains(gm, "weld:config:installed") {
+		t.Errorf("go.mod does not require yaml.v3:\n%s", gm)
+	}
+	cfg := readFile(t, filepath.Join(dir, "config.yml"))
+	if strings.Contains(cfg, "database:") {
+		t.Errorf("http-only config.yml already has a database section:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, "http:") {
+		t.Errorf("http-only config.yml is missing the http section:\n%s", cfg)
+	}
+	manifest := mustLoad(t, dir)
+	if len(manifest.Drift(dir)) != 0 {
+		t.Fatalf("drift after add: %+v", manifest.Drift(dir))
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
+
+// TestAddDBOnlyConfigHasNoHTTPSection proves a db-only project does not gain a
+// gratuitous http section: the config capability writes only the marker region
+// and each capability appends its own section.
+func TestAddDBOnlyConfigHasNoHTTPSection(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+
+	add(t, dir, "db")
+	cfg := readFile(t, filepath.Join(dir, "config.yml"))
+	if strings.Contains(cfg, "http:") {
+		t.Errorf("db-only config.yml carries an http section:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, "database:") {
+		t.Errorf("db-only config.yml is missing the database section:\n%s", cfg)
+	}
+	example := readFile(t, filepath.Join(dir, "config.example.yml"))
+	if strings.Contains(example, "http:") {
+		t.Errorf("db-only config.example.yml carries an http section:\n%s", example)
+	}
+}
+
+// TestAddDBMergesConfigSectionInBothOrders proves the second capability appends
+// its section to the existing local config.yml and committed example, whichever
+// order http and db are added in, and does so exactly once.
+func TestAddDBMergesConfigSectionInBothOrders(t *testing.T) {
+	orders := []struct {
+		name          string
+		first, second string
+	}{
+		{"http then db", "http", "db"},
+		{"db then http", "db", "http"},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			add(t, dir, order.first)
+			add(t, dir, order.second)
+
+			for _, name := range []string{"config.yml", "config.example.yml"} {
+				content := readFile(t, filepath.Join(dir, name))
+				if !strings.Contains(content, "http:") || !strings.Contains(content, "database:") {
+					t.Errorf("%s is missing a section:\n%s", name, content)
+				}
+				if count := strings.Count(content, "weld:db:installed"); count != 1 {
+					t.Errorf("%s has %d database sections, want 1", name, count)
+				}
+			}
+			manifest := mustLoad(t, dir)
+			if len(manifest.Drift(dir)) != 0 {
+				t.Fatalf("drift: %+v", manifest.Drift(dir))
+			}
+		})
+	}
+}
+
+// TestAddDBPreservesEditedConfig proves a late add merges its section without
+// clobbering a user's edits to the local file: the changed address and an added
+// comment survive while the database section is appended.
+func TestAddDBPreservesEditedConfig(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "http")
+
+	path := filepath.Join(dir, "config.yml")
+	edited := strings.Replace(readFile(t, path), `  addr: ":8080"`, "  # keep my address\n  addr: \":9000\"", 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "db")
+	after := readFile(t, path)
+	for _, want := range []string{"# keep my address", `addr: ":9000"`, "database:"} {
+		if !strings.Contains(after, want) {
+			t.Errorf("add db did not preserve/merge %q:\n%s", want, after)
+		}
+	}
+}
+
+// TestAddPreservesConfigPassword proves a user's local database password in
+// config.yml survives later adds, including an idempotent repeat of db.
+func TestAddPreservesConfigPassword(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "db")
+
+	path := filepath.Join(dir, "config.yml")
+	edited := strings.Replace(readFile(t, path), `  password: ""`, `  password: "sentinel-password"`, 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "http")
+	add(t, dir, "db")
+	if !strings.Contains(readFile(t, path), `password: "sentinel-password"`) {
+		t.Fatalf("the database password was clobbered:\n%s", readFile(t, path))
+	}
+}
+
+// TestAddRestoresGitIgnoredConfigInBothOrders proves a fresh clone can continue.
+// config.yml is git-ignored, so it is absent after checkout while the manifest
+// still records it and the tracked config.example.yml remains. Adding the other
+// capability must restore the local file from the example rather than fail on
+// the missing patch target, and must merge its section exactly once.
+func TestAddRestoresGitIgnoredConfigInBothOrders(t *testing.T) {
+	orders := []struct {
+		name          string
+		first, second string
+	}{
+		{"http then db", "http", "db"},
+		{"db then http", "db", "http"},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			add(t, dir, order.first)
+
+			// Simulate a fresh clone: only the git-ignored local file is gone.
+			if err := os.Remove(filepath.Join(dir, "config.yml")); err != nil {
+				t.Fatal(err)
+			}
+
+			add(t, dir, order.second)
+
+			for _, name := range []string{"config.yml", "config.example.yml"} {
+				content := readFile(t, filepath.Join(dir, name))
+				for _, want := range []string{"http:", `addr: ":8080"`, "database:", "host: localhost"} {
+					if !strings.Contains(content, want) {
+						t.Errorf("%s is missing %q after the restore:\n%s", name, want, content)
+					}
+				}
+				if count := strings.Count(content, "weld:db:installed"); count != 1 {
+					t.Errorf("%s has %d database sections, want 1", name, count)
+				}
+				if count := strings.Count(content, "weld:http:installed"); count != 1 {
+					t.Errorf("%s has %d http sections, want 1", name, count)
+				}
+			}
+			manifest := mustLoad(t, dir)
+			if len(manifest.Drift(dir)) != 0 {
+				t.Fatalf("drift after restoring the config: %+v", manifest.Drift(dir))
+			}
+		})
+	}
+}
+
+// TestAddConfigRestoreKeepsSecretsOutOfTheExample proves a development password
+// lives only in the git-ignored local file: a restore copies the tracked example
+// (which never absorbed the secret) rather than inventing or scraping a
+// credential.
+func TestAddConfigRestoreKeepsSecretsOutOfTheExample(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "db")
+
+	path := filepath.Join(dir, "config.yml")
+	edited := strings.Replace(readFile(t, path), `  password: ""`, `  password: "sentinel-password"`, 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh clone: the local file and its secret are gone.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	add(t, dir, "http")
+
+	example := readFile(t, filepath.Join(dir, "config.example.yml"))
+	if strings.Contains(example, "sentinel-password") {
+		t.Errorf("the tracked example leaked the local password:\n%s", example)
+	}
+	restored := readFile(t, path)
+	if strings.Contains(restored, "sentinel-password") {
+		t.Errorf("the restore invented a credential instead of using the tracked example:\n%s", restored)
+	}
+	if !strings.Contains(restored, `password: ""`) {
+		t.Errorf("the restored config.yml has no empty password field:\n%s", restored)
+	}
+}
+
+// TestAddConfigRestoreReportsAMissingOrCorruptExample proves a fresh clone with
+// no usable tracked example fails with an actionable instruction instead of a
+// silent default: the missing local config is a distinct error naming the
+// example to restore.
+func TestAddConfigRestoreReportsAMissingOrCorruptExample(t *testing.T) {
+	cases := []struct {
+		name    string
+		corrupt string
+		want    string
+	}{
+		{"example absent", "", "is not present"},
+		{"example corrupt", "http:\n  addr: \":8080\"\n", "has no weld:config"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			add(t, dir, "db")
+
+			if err := os.Remove(filepath.Join(dir, "config.yml")); err != nil {
+				t.Fatal(err)
+			}
+			example := filepath.Join(dir, "config.example.yml")
+			if tc.corrupt == "" {
+				if err := os.Remove(example); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(example, []byte(tc.corrupt), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "http")
+			if err == nil {
+				t.Fatal("expected an error when the tracked example cannot restore config.yml")
+			}
+			for _, want := range []string{"config.yml", "config.example.yml", tc.want} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "config.yml")); !os.IsNotExist(statErr) {
+				t.Errorf("a failed plan created config.yml: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestAddDoesNotBootstrapUnmanagedConfig(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "db")
+	if err := os.Remove(filepath.Join(dir, "config.yml")); err != nil {
+		t.Fatal(err)
+	}
+	manifest := mustLoad(t, dir)
+	for i, file := range manifest.Files {
+		if file.Path == "config.yml" {
+			manifest.Files = append(manifest.Files[:i], manifest.Files[i+1:]...)
+			break
+		}
+	}
+	raw, err := manifest.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, project.ManifestName), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Add(Request{Dir: dir, Catalog: newCatalog()}, "http")
+	if err == nil || !strings.Contains(err.Error(), "not managed by weld") {
+		t.Fatalf("Add(http) with unmanaged missing config error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.yml")); !os.IsNotExist(err) {
+		t.Fatalf("unmanaged config was created: %v", err)
 	}
 }
 

@@ -48,25 +48,41 @@ Capabilities:
 
 - `base` (scaffold) — minimal, dependency-free Go CLI with a `log/slog`
   logging factory (`internal/logging`) whose sink is an injected `io.Writer`.
+  It ships no configuration.
+- `config` (add) — the shared typed configuration capability: `config.yml` from
+  the working directory, environment and flag overrides, and a redacting
+  `Secret` type. Installed automatically by the first of `http` and `db`.
 - `http` (add) — HTTP server lifecycle, a composable handler builder, and the
-  single `serve` command. Its `Serve` takes the injected `*slog.Logger`.
+  single `serve` command. Its `Serve` takes the injected `*slog.Logger`, and
+  `serve` reads the listen address through the shared `config` loader.
 - `web` (add) — React + TypeScript + Vite frontend, served by `http`.
 - `api` (add) — JSON HTTP API: typed DTOs, `go-validate` rules and an OpenAPI
   3.1 document built from the same contract, served by `http`.
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
-  code, an injectable connection pool and a repository. Requires only `base`.
+  code, an injectable connection pool and a repository. Requires `base` and
+  `config`.
 - `loom` (add) — a compile-time [Loom](https://github.com/Xwudao/loom)
   dependency-injection graph that wires the HTTP server, the JSON API service and
   the PostgreSQL repository with lifecycle start/stop. Requires `http` and is
   **opt-in**: `web`, `api` and `db` never install it.
 
+`http` and `db` each require `config`, so the first of them installs it
+automatically: `weld add http` or `weld add db` on a fresh project adds the
+shared loader, generates the local `config.yml` (git-ignored) from the committed
+`config.example.yml`, and appends only its own section. Adding the other later
+merges its section into the same file without clobbering the user's edits. On a
+fresh clone the git-ignored `config.yml` is absent while the manifest still
+records it, so the next add restores it from the committed example before
+appending; a missing or corrupt example fails with the exact restore command
+instead of a silent default.
+
 `web` and `api` are independent and both require `http`, so `weld add web` and
 `weld add api` can be run in either order and both are served by the one `serve`
-command. `db` requires only `base`: it is independent of the HTTP capabilities,
-so it can be added to a CLI-only project and composes with `http`/`web`/`api` in
-any order. `loom` is opt-in and requires `http`: it wires whatever of `db` and
-`api` is installed, and regenerates its graph when they are added, in either
-order.
+command. `db` requires `base` and `config`: it is independent of the HTTP
+capabilities, so it can be added to a CLI-only project and composes with
+`http`/`web`/`api` in any order. `loom` is opt-in and requires `http`: it wires
+whatever of `db` and `api` is installed, and regenerates its graph when they are
+added, in either order.
 
 ## Staged architecture
 
@@ -201,12 +217,14 @@ installed by `web`, `api` or `db`. It adds `internal/di`, a
 
 What Loom binds, and why it is not ceremonial:
 
-- `*Config` — an immutable config built by an injected `EnvLookup` (never
-  scattered `os.Getenv`), exposing the listen address for `http` and the
-  database URL for `db`, with defaults and validation. When `db` is installed
-  `DATABASE_URL` is **required**: there is no invented default dsn, so a
-  database-backed serve cannot silently reach a local database, and an error
-  never echoes the dsn.
+- `*config.Config` — the shared typed configuration from `internal/config`,
+  loaded by an injected `*config.Loader` (never scattered `os.Getenv`), exposing
+  the listen address for `http` and the database settings for `db`. The
+  `--config` path and the `--addr` flag are carried in the context, so the flag
+  outranks the environment, which outranks `config.yml`. When `db` is installed
+  the database section is validated: the credentials must come from `config.yml`
+  or the environment, there is no invented default, so a database-backed serve
+  cannot silently reach a local database, and an error never echoes the dsn.
 - `*slog.Logger` — provided by the graph (`NewLogger`) from the base
   `log/slog` factory and injected into the managed server, so startup, a serve
   failure and a graceful shutdown are recorded through one logging protocol
@@ -217,6 +235,16 @@ What Loom binds, and why it is not ceremonial:
   construction later fails or the lifecycle stops normally.
 - `api.Service` (`api`) — bound to the repository through a generated adapter
   when `db` is installed, otherwise the default in-memory service.
+
+> **Known issue (separate fix).** The adapter above means that installing `db`
+> silently switches an already-installed `api` from the in-memory service to
+> PostgreSQL, and a `db`+`loom` graph requires the database settings merely
+> because `db` is installed. The intended direction is that `weld add db` only
+> installs the capability and the API↔DB wiring is an explicit step (for example
+> a future `weld connect api db`), and that an unrelated `serve` does not need
+> the database. This is **not** changed here: the config milestone only unifies
+> the loader and does not broaden the feature. The generated demo API stays
+> in-memory unless that explicit wiring exists.
 - `*httpserver.Server` — the composed mux plus its `loom.Hook` start/stop
   lifecycle. `OnStart` binds the listen address synchronously, so a port already
   in use fails `Start`; the serve command waits for a signal or a reported serve
@@ -237,6 +265,61 @@ Because the generated initializer imports `github.com/Xwudao/loom`, installing
 `loom` raises the project's Go directive to `go 1.25.0`. The generator's
 `x/tools` dependency stays in `tools/loom`.
 
+## Configuration (`weld add http` / `weld add db`)
+
+`config` is a first-class, shared capability, not a base dependency: the base
+scaffold stays a minimal CLI with `log/slog` and no `config.yml`. Both `http` and
+`db` require `config`, so the first of them installs it and the user never adds
+it by hand. `weld add config` alone is also possible; it adds only the loader.
+
+What lands in the project:
+
+- `internal/config/` — typed Go structs (`Config`, `HTTP`, `Database`) with
+  `yaml` tags for names only (no validation tags), a loader whose `readFile` and
+  `lookupEnv` are injected (`NewLoader`) so it is testable without the
+  filesystem or the process environment, and a `Secret` type that redacts itself
+  in `fmt`, `log/slog`, JSON and YAML.
+- `config.yml` — generated locally and added to `.gitignore`. It is not silently
+  omitted: `weld` writes it and records it in the manifest.
+- `config.example.yml` — committed, and documents the shape.
+- the `go.mod` dependency region gains `gopkg.in/yaml.v3`.
+
+Configuration is read from `config.yml` in the working directory by default;
+`--config` overrides the path. Precedence is **command-line flag > environment
+variable > `config.yml` > explicit code defaults**. A missing file and an invalid
+file are distinct errors and neither is a silent fallback to defaults; an
+explicitly set-but-blank `HTTP_ADDR` (or `--addr`) is an error too. A parse error
+never quotes the file content, so a malformed secret cannot reach a log record.
+
+`http` uses `config.HTTP.Addr` (default `:8080`). `db` uses a typed
+`host`, `port`, `user`, `password`, `name` or an explicit `dsn`, and the database
+section is validated only where the database is actually used: an http-only
+project never needs it. There is no default credential, and the password may
+live in the local `config.yml` for development while a production environment
+overrides `DB_PASSWORD` or `DATABASE_URL`. `weld` never logs the value.
+
+`config.yml` and `config.example.yml` carry a `weld:config` marker region that
+each capability appends to: `http` appends the `http` section and `db` appends
+the `database` section, so a db-only project has no gratuitous http section.
+Because the append is marker-based and sentinel-guarded, `weld add db` after
+`weld add http` (or the reverse) merges the new section without clobbering the
+user's edits — including a database password — and a repeat add is a no-op. The
+generated Loom graph uses the same loader (`NewConfigLoader`/`NewConfig`), so the
+plain `serve` command and the graph share one configuration path.
+
+Because `config.yml` is git-ignored, a fresh clone has no local file while the
+manifest still records it as weld-managed. Each patch that targets `config.yml`
+declares the tracked `config.example.yml` as its `bootstrap`, so a later
+`weld add http` or `weld add db` restores the local file from the example before
+appending its section, instead of failing on the missing extension point. The
+restore runs only when the local file is absent, so a local value or comment is
+never overwritten, and the restored file is written and recorded in the manifest
+with its hash. If the example is absent or no longer carries the marker region,
+the plan fails with an actionable restore instruction (for example
+`git checkout config.example.yml`) — never a silent default. The generated
+runtime is unchanged: `config.Load` still errors on a missing `config.yml` until
+the file exists.
+
 ## Tests
 
 ```sh
@@ -256,6 +339,17 @@ Test conventions:
   listening line, and closes the occupying server.
 - The generated `serve` command is exercised through flag parsing and the
   command registry (`internal/app/serve_test.go`) rather than by listening.
+- The generated `internal/config` test drives the loader through an injected
+  `readFile`/`lookupEnv`: it covers the flag/environment/file/default precedence,
+  a missing file, an invalid file that must not echo its content, a blank
+  `HTTP_ADDR` that must not fall back to the default, the separate database
+  validation, and a `Secret` sentinel that must not survive `fmt`, `slog`, JSON
+  or YAML. Scaffold tests prove the first `http`/`db` add installs `config`, that
+  a db-only project has no http section, that both add orders merge the sections,
+  that an edited address and a local database password survive later adds, and
+  that deleting only the git-ignored `config.yml` (a fresh clone) is repaired from
+  the committed example in both add orders — with the example persisted, no local
+  secret copied into it, and a missing or corrupt example failing actionably.
 - The base CLI logs a failed command through its injected `log/slog` logger, and
   a generated `internal/logging` test covers text/JSON formatting, handler
   level filtering and an error record against a fake writer. A scaffold matrix

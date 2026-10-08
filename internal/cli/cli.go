@@ -60,6 +60,8 @@ Usage:
 
 Capabilities:
   base   (scaffold) minimal, dependency-free Go CLI with a log/slog factory
+  config (add)      typed YAML configuration (config.yml + environment) with a
+                    redacting Secret type; installed by http and db
   http   (add)      HTTP lifecycle, composable mux and a serve command
   web    (add)      React + TypeScript + Vite frontend (requires http)
   api    (add)      JSON API, go-validate rules and an OpenAPI 3.1 document
@@ -69,9 +71,13 @@ Capabilities:
                     JSON API service and the PostgreSQL repository (requires
                     http; opt-in, never installed by web, api or db)
 
+http and db each install the config capability, so the first of them adds the
+shared typed configuration loader and generates a local, git-ignored config.yml
+from config.example.yml; adding the other only appends its section to that file.
 web and api are independent and both require http: each can be added first and
-both share the one serve command. db requires only base, so it can be added to a
-CLI-only project and composes with the HTTP capabilities in any order. loom is
+both share the one serve command. db requires only base (and config), so it can
+be added to a CLI-only project and composes with the HTTP capabilities in any
+order. loom is
 opt-in: it requires http and regenerates its graph when web, api or db is
 installed, and it raises the project's Go floor to 1.25.
 

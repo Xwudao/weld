@@ -219,7 +219,7 @@ func Add(req Request, name string) (*Result, error) {
 			if !entryApplies(present, patch.When, patch.WhenAbsent) {
 				continue
 			}
-			original, err := patchTarget(req.Dir, patch.Path, planned, manifest)
+			original, bootstrapped, err := patchTarget(req.Dir, patch, planned, manifest)
 			if err != nil {
 				return nil, err
 			}
@@ -238,7 +238,10 @@ func Add(req Request, name string) (*Result, error) {
 			if err != nil {
 				return nil, &project.ConflictError{Path: patch.Path, Reason: err.Error()}
 			}
-			if already {
+			// A restored file is written even when the region already carries this
+			// capability's sentinel: the file is absent, so skipping the write here
+			// would leave it missing.
+			if already && !bootstrapped {
 				continue
 			}
 			planned[patch.Path] = updated
@@ -296,22 +299,68 @@ func installOrder(catalog *template.Catalog, manifest *project.Manifest, request
 // this plan is applied. It prefers a file already planned in this run so a
 // capability can patch a file an earlier capability just planned. It refuses to
 // patch a file weld does not manage, so user-owned files are never modified.
-func patchTarget(root, path string, planned map[string][]byte, manifest *project.Manifest) ([]byte, error) {
-	if content, ok := planned[path]; ok {
-		return content, nil
+//
+// A missing target the manifest still records as weld-managed is the fresh-clone
+// case: a git-ignored file such as config.yml is legitimately absent while its
+// committed example remains. When the patch declares a bootstrap source the
+// target is restored from it, and the second return reports that the file must
+// be written even if the patch itself turns out to be a no-op.
+func patchTarget(root string, patch template.Patch, planned map[string][]byte, manifest *project.Manifest) (content []byte, bootstrapped bool, err error) {
+	if content, ok := planned[patch.Path]; ok {
+		return content, false, nil
 	}
-	if _, err := os.Stat(filepath.Join(root, path)); err != nil {
+	if _, statErr := os.Stat(filepath.Join(root, patch.Path)); statErr != nil {
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, false, statErr
+		}
+		if patch.Bootstrap == "" {
+			return nil, false, &project.ConflictError{Path: patch.Path, Reason: "extension point file is missing"}
+		}
+		restored, err := bootstrapContent(root, patch.Path, patch, manifest)
+		if err != nil {
+			return nil, false, err
+		}
+		return restored, true, nil
+	}
+	if !manifest.Owns(patch.Path) {
+		return nil, false, &project.ConflictError{Path: patch.Path, Reason: "extension point file is not managed by weld"}
+	}
+	content, err = os.ReadFile(filepath.Join(root, patch.Path))
+	if err != nil {
+		return nil, false, err
+	}
+	return content, false, nil
+}
+
+// bootstrapContent restores a missing, weld-managed patch target from the
+// tracked source the patch declares (config.yml from config.example.yml).
+//
+// The source must be weld-managed and must carry the target's extension point;
+// anything else is an actionable error rather than a silent default, so a fresh
+// clone either restores the local file or names exactly how to. The absent local
+// file has no content to preserve by definition, so a bootstrap can never clobber
+// a local value or comment.
+func bootstrapContent(root, path string, patch template.Patch, manifest *project.Manifest) ([]byte, error) {
+	if !manifest.Owns(path) {
+		return nil, &project.ConflictError{Path: path, Reason: "missing extension point file is not managed by weld"}
+	}
+	if !manifest.Owns(patch.Bootstrap) {
+		return nil, &project.ConflictError{Path: path, Reason: fmt.Sprintf(
+			"is missing and cannot be restored: %s is not managed by weld", patch.Bootstrap)}
+	}
+	content, err := os.ReadFile(filepath.Join(root, patch.Bootstrap))
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, &project.ConflictError{Path: path, Reason: "extension point file is missing"}
+			return nil, &project.ConflictError{Path: path, Reason: fmt.Sprintf(
+				"is missing and cannot be restored: %s is not present (restore it with: git checkout %s)",
+				patch.Bootstrap, patch.Bootstrap)}
 		}
 		return nil, err
 	}
-	if !manifest.Owns(path) {
-		return nil, &project.ConflictError{Path: path, Reason: "extension point file is not managed by weld"}
-	}
-	content, err := os.ReadFile(filepath.Join(root, path))
-	if err != nil {
-		return nil, err
+	if !project.HasMarkerRegion(content, patch.Marker) {
+		return nil, &project.ConflictError{Path: path, Reason: fmt.Sprintf(
+			"is missing and cannot be restored: %s has no weld:%s:begin/%s:end region (restore it with: git checkout %s)",
+			patch.Bootstrap, patch.Marker, patch.Marker, patch.Bootstrap)}
 	}
 	return content, nil
 }

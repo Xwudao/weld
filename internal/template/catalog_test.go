@@ -11,7 +11,7 @@ func TestCatalogListsBaseAndWeb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Names: %v", err)
 	}
-	want := map[string]bool{"base": false, "http": false, "web": false, "api": false, "db": false}
+	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "api": false, "db": false}
 	for _, name := range names {
 		if _, ok := want[name]; ok {
 			want[name] = true
@@ -71,8 +71,66 @@ func TestHTTPCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
+	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+		t.Errorf("requires = %v, want %q", capability.Requires, want)
+	}
+	// http appends its section to the config capability's files rather than the
+	// config capability pre-writing an http section into every project, and it
+	// declares the tracked example to restore the git-ignored local file from.
+	var configLocal, configExample bool
+	for _, patch := range capability.Patches {
+		switch {
+		case patch.Path == "config.yml" && patch.Marker == "config":
+			configLocal = true
+			if patch.Bootstrap != "config.example.yml" {
+				t.Errorf("http config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+			}
+		case patch.Path == "config.example.yml" && patch.Marker == "config":
+			configExample = true
+		}
+	}
+	if !configLocal || !configExample {
+		t.Errorf("http patches = %+v, want config.yml and config.example.yml", capability.Patches)
+	}
+}
+
+// TestConfigCapabilityLoads pins the config capability's shape: it is additive,
+// needs only base, ships the shared loader and both the local and example YAML
+// files, and patches the git-ignore and go.mod dependency regions.
+func TestConfigCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("config")
+	if err != nil {
+		t.Fatalf("Get config: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
 	if len(capability.Requires) != 1 || capability.Requires[0] != "base" {
 		t.Errorf("requires = %v, want [base]", capability.Requires)
+	}
+	paths := map[string]bool{}
+	for _, file := range capability.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{"internal/config/config.go", "internal/config/config_test.go", "config.example.yml", "config.yml"} {
+		if !paths[want] {
+			t.Errorf("config capability does not ship %s", want)
+		}
+	}
+	var gitignore, deps bool
+	for _, patch := range capability.Patches {
+		switch {
+		case patch.Path == ".gitignore" && patch.Marker == "config":
+			gitignore = true
+		case patch.Path == "go.mod" && patch.Marker == "deps":
+			deps = true
+		}
+	}
+	if !gitignore {
+		t.Error("config does not patch the git-ignore region")
+	}
+	if !deps {
+		t.Error("config does not patch the go.mod dependency region")
 	}
 }
 
@@ -93,8 +151,9 @@ func TestAPICapabilityLoads(t *testing.T) {
 }
 
 // TestDBCapabilityLoads pins the db capability's shape: it is additive, needs
-// only base (not http), and patches exactly the go.mod dependency region and the
-// Makefile db region.
+// base and config (not http), patches exactly the go.mod dependency region, the
+// Makefile db region and the two config regions, and declares the tracked
+// example to restore the git-ignored local file from.
 func TestDBCapabilityLoads(t *testing.T) {
 	capability, err := Load().Get("db")
 	if err != nil {
@@ -103,11 +162,19 @@ func TestDBCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
-	if len(capability.Requires) != 1 || capability.Requires[0] != "base" {
-		t.Errorf("requires = %v, want [base]", capability.Requires)
+	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+		t.Errorf("requires = %v, want %q", capability.Requires, want)
 	}
-	if len(capability.Patches) != 2 {
-		t.Errorf("patches = %d, want 2 (go.mod deps and Makefile db)", len(capability.Patches))
+	if len(capability.Patches) != 4 {
+		t.Errorf("patches = %d, want 4 (go.mod deps, Makefile db and the two config regions)", len(capability.Patches))
+	}
+	for _, patch := range capability.Patches {
+		if patch.Path != "config.yml" || patch.Marker != "config" {
+			continue
+		}
+		if patch.Bootstrap != "config.example.yml" {
+			t.Errorf("db config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+		}
 	}
 }
 

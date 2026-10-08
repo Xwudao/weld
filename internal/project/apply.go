@@ -120,6 +120,32 @@ func isMarkerLine(line, token string) bool {
 	return strings.TrimSpace(trimmed) == token
 }
 
+// markerBounds returns the line indices of the named begin/end marker pair. A
+// pair whose begin line exists but has no end line reports found, not closed, so
+// a caller can distinguish "no extension point" from "unterminated one".
+func markerBounds(lines []string, marker string) (begin, end int, found, closed bool) {
+	for i, line := range lines {
+		if !isMarkerLine(line, markerToken(marker, "begin")) {
+			continue
+		}
+		for j := i + 1; j < len(lines); j++ {
+			if isMarkerLine(lines[j], markerToken(marker, "end")) {
+				return i, j, true, true
+			}
+		}
+		return i, 0, true, false
+	}
+	return 0, 0, false, false
+}
+
+// HasMarkerRegion reports whether original carries a complete named begin/end
+// marker pair. A caller uses it to reject a corrupt bootstrap source before it
+// is copied into a missing target.
+func HasMarkerRegion(original []byte, marker string) bool {
+	_, _, found, closed := markerBounds(strings.Split(string(original), "\n"), marker)
+	return found && closed
+}
+
 // ReplaceMarker rewrites the content of a marker region with snippet.
 //
 // Unlike PatchMarker it neither appends nor records a sentinel: the region is
@@ -129,24 +155,11 @@ func isMarkerLine(line, token string) bool {
 // idempotent and every byte outside the region is untouched.
 func ReplaceMarker(original []byte, marker string, snippet []byte) ([]byte, error) {
 	lines := strings.Split(string(original), "\n")
-	begin := -1
-	for i, line := range lines {
-		if isMarkerLine(line, markerToken(marker, "begin")) {
-			begin = i
-			break
-		}
-	}
-	if begin < 0 {
+	begin, end, found, closed := markerBounds(lines, marker)
+	if !found {
 		return nil, fmt.Errorf("extension point %q not found", markerToken(marker, "begin"))
 	}
-	end := -1
-	for i := begin + 1; i < len(lines); i++ {
-		if isMarkerLine(lines[i], markerToken(marker, "end")) {
-			end = i
-			break
-		}
-	}
-	if end < 0 {
+	if !closed {
 		return nil, fmt.Errorf("extension point %q is not closed", markerToken(marker, "begin"))
 	}
 	inserted := strings.Split(strings.TrimRight(string(snippet), "\n"), "\n")
@@ -167,24 +180,11 @@ func ReplaceMarker(original []byte, marker string, snippet []byte) ([]byte, erro
 // outside the region is left untouched, so user edits in the same file survive.
 func PatchMarker(original []byte, marker, capability string, snippet []byte) ([]byte, bool, error) {
 	lines := strings.Split(string(original), "\n")
-	begin := -1
-	for i, line := range lines {
-		if isMarkerLine(line, markerToken(marker, "begin")) {
-			begin = i
-			break
-		}
-	}
-	if begin < 0 {
+	begin, end, found, closed := markerBounds(lines, marker)
+	if !found {
 		return nil, false, fmt.Errorf("extension point %q not found", markerToken(marker, "begin"))
 	}
-	end := -1
-	for i := begin + 1; i < len(lines); i++ {
-		if isMarkerLine(lines[i], markerToken(marker, "end")) {
-			end = i
-			break
-		}
-	}
-	if end < 0 {
+	if !closed {
 		return nil, false, fmt.Errorf("extension point %q is not closed", markerToken(marker, "begin"))
 	}
 	region := strings.Join(lines[begin+1:end], "\n")

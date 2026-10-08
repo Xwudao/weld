@@ -40,7 +40,12 @@ type Patch struct {
 	Source string `json:"source"`
 	// Mode selects how the snippet joins the region: "" or "append" appends it
 	// (the default), "replace" rewrites the region's content.
-	Mode       string   `json:"mode,omitempty"`
+	Mode string `json:"mode,omitempty"`
+	// Bootstrap names a tracked file to restore Path from when Path is absent.
+	// A git-ignored local file (config.yml) is legitimately missing on a fresh
+	// clone while its committed example (config.example.yml) remains, so the
+	// patch declares where to restore the target before patching it.
+	Bootstrap  string   `json:"bootstrap,omitempty"`
 	When       []string `json:"when,omitempty"`
 	WhenAbsent []string `json:"whenAbsent,omitempty"`
 }

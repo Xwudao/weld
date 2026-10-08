@@ -160,6 +160,29 @@ func TestPatchMarkerMalformed(t *testing.T) {
 	}
 }
 
+// TestHasMarkerRegion pins the check a bootstrap source is validated with: only
+// a complete begin/end pair counts, so a truncated or unmarked file is rejected
+// rather than copied into a missing target.
+func TestHasMarkerRegion(t *testing.T) {
+	cases := map[string]struct {
+		content string
+		want    bool
+	}{
+		"complete":          {"# weld:config:begin\n# weld:config:end\n", true},
+		"with content":      {"# weld:config:begin\nhttp:\n  addr: \":8080\"\n# weld:config:end\n", true},
+		"unmarked":          {"http:\n  addr: \":8080\"\n", false},
+		"begin without end": {"# weld:config:begin\n", false},
+		"wrong region":      {"# weld:deps:begin\n# weld:deps:end\n", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := HasMarkerRegion([]byte(tc.content), "config"); got != tc.want {
+				t.Errorf("HasMarkerRegion(%q) = %v, want %v", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPatchMarkerPreservesUserTextOutsideRegion(t *testing.T) {
 	withUserEdit := strings.Replace(routeSample, "func Handler() []Route {",
 		"// user note: keep me\nfunc Handler() []Route {", 1)
