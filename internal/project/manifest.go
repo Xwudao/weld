@@ -1,5 +1,5 @@
 // Package project models a weld project on disk: the manifest that records
-// what weld wrote, and the crash-safe apply of planned operations.
+// what weld wrote, and the best-effort rollback apply of planned operations.
 package project
 
 import (
@@ -136,6 +136,16 @@ func (m *Manifest) Encode() ([]byte, error) {
 func HashContent(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
+}
+
+// Owns reports whether path is a file weld manages in this project.
+func (m *Manifest) Owns(path string) bool {
+	for _, file := range m.Files {
+		if file.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 // Drift describes a managed file that no longer matches the manifest.

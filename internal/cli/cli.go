@@ -59,11 +59,16 @@ Usage:
   %s help
 
 Capabilities:
-  base   (scaffold) minimal Go CLI with an HTTP serve command
-  web    (add)      React + TypeScript + Vite frontend embedded into the app
+  base   (scaffold) minimal, dependency-free Go CLI
+  http   (add)      HTTP lifecycle, composable mux and a serve command
+  web    (add)      React + TypeScript + Vite frontend (requires http)
+  api    (add)      JSON API, go-validate rules and an OpenAPI 3.1 document
+  db     (add)      PostgreSQL: SQL migrations, sqlc queries, an injectable pool
+                    and repository
 
-Roadmap:
-  api    (add)      HTTP contract, go-validate rule metadata, OpenAPI
+web and api are independent and both require http: each can be added first and
+both share the one serve command. db requires only base, so it can be added to a
+CLI-only project and composes with the HTTP capabilities in any order.
 
 Every file weld writes is recorded in the project manifest (weld.json) with the
 capability and version that produced it.
@@ -102,7 +107,7 @@ func runNew(args []string, stdout io.Writer) error {
 		return err
 	}
 	printResult(stdout, result, false)
-	fmt.Fprintf(stdout, "\nNext:\n  cd %s\n  go run . serve\n", result.Dir)
+	fmt.Fprintf(stdout, "\nNext:\n  cd %s\n  go run . help\n", result.Dir)
 	return nil
 }
 
@@ -132,7 +137,7 @@ func runAdd(args []string, stdout io.Writer) error {
 	}
 	printResult(stdout, result, false)
 	if len(result.Operations) > 0 {
-		fmt.Fprintf(stdout, "\nNext:\n  make build   # builds the frontend, then the app\n")
+		fmt.Fprintf(stdout, "\nNext:\n  make build\n")
 	}
 	return nil
 }

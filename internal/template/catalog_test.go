@@ -11,7 +11,7 @@ func TestCatalogListsBaseAndWeb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Names: %v", err)
 	}
-	want := map[string]bool{"base": false, "web": false}
+	want := map[string]bool{"base": false, "http": false, "web": false, "api": false, "db": false}
 	for _, name := range names {
 		if _, ok := want[name]; ok {
 			want[name] = true
@@ -55,11 +55,59 @@ func TestWebCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
+	if len(capability.Requires) != 1 || capability.Requires[0] != "http" {
+		t.Errorf("requires = %v, want [http]", capability.Requires)
+	}
+	if len(capability.Patches) != 3 {
+		t.Errorf("patches = %d, want 3", len(capability.Patches))
+	}
+}
+
+func TestHTTPCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("http")
+	if err != nil {
+		t.Fatalf("Get http: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
+	if len(capability.Requires) != 1 || capability.Requires[0] != "base" {
+		t.Errorf("requires = %v, want [base]", capability.Requires)
+	}
+}
+
+func TestAPICapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("api")
+	if err != nil {
+		t.Fatalf("Get api: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
+	if len(capability.Requires) != 1 || capability.Requires[0] != "http" {
+		t.Errorf("requires = %v, want [http]", capability.Requires)
+	}
+	if len(capability.Patches) != 2 {
+		t.Errorf("patches = %d, want 2 (go.mod deps and httpserver routes)", len(capability.Patches))
+	}
+}
+
+// TestDBCapabilityLoads pins the db capability's shape: it is additive, needs
+// only base (not http), and patches exactly the go.mod dependency region and the
+// Makefile db region.
+func TestDBCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("db")
+	if err != nil {
+		t.Fatalf("Get db: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
 	if len(capability.Requires) != 1 || capability.Requires[0] != "base" {
 		t.Errorf("requires = %v, want [base]", capability.Requires)
 	}
 	if len(capability.Patches) != 2 {
-		t.Errorf("patches = %d, want 2", len(capability.Patches))
+		t.Errorf("patches = %d, want 2 (go.mod deps and Makefile db)", len(capability.Patches))
 	}
 }
 

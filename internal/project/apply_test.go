@@ -3,6 +3,7 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -12,9 +13,26 @@ const sample = `target: dep
 other: y
 `
 
+// routeSample is a Go extension point: markers use the host file's comment
+// syntax, and user code sits both before and after the region.
+const routeSample = `package httpserver
+
+func Handler() []Route {
+	var routes []Route
+	// weld:routes:begin
+	// weld:routes:end
+	return routes
+}
+`
+
+var (
+	webSnippet = []byte("\t// weld:web:installed 0.1.0\n\troutes = append(routes, installWebRoute)\n")
+	apiSnippet = []byte("\t// weld:api:installed 0.1.0\n\troutes = append(routes, installAPIRoute)\n")
+)
+
 func TestPatchMarkerInsertsSnippet(t *testing.T) {
 	snippet := []byte("# weld:web:installed 0.1.0\n\tnpm run build\n")
-	got, already, err := PatchMarker([]byte(sample), "web", snippet)
+	got, already, err := PatchMarker([]byte(sample), "web", "web", snippet)
 	if err != nil {
 		t.Fatalf("PatchMarker: %v", err)
 	}
@@ -29,11 +47,11 @@ func TestPatchMarkerInsertsSnippet(t *testing.T) {
 
 func TestPatchMarkerIsIdempotent(t *testing.T) {
 	snippet := []byte("# weld:web:installed 0.1.0\n\tnpm run build\n")
-	once, _, err := PatchMarker([]byte(sample), "web", snippet)
+	once, _, err := PatchMarker([]byte(sample), "web", "web", snippet)
 	if err != nil {
 		t.Fatalf("PatchMarker: %v", err)
 	}
-	twice, already, err := PatchMarker(once, "web", snippet)
+	twice, already, err := PatchMarker(once, "web", "web", snippet)
 	if err != nil {
 		t.Fatalf("PatchMarker: %v", err)
 	}
@@ -46,9 +64,114 @@ func TestPatchMarkerIsIdempotent(t *testing.T) {
 }
 
 func TestPatchMarkerMissingPoint(t *testing.T) {
-	_, _, err := PatchMarker([]byte("no markers here\n"), "web", []byte("x\n"))
+	_, _, err := PatchMarker([]byte("no markers here\n"), "web", "web", []byte("x\n"))
 	if err == nil {
 		t.Fatal("expected error for missing extension point")
+	}
+}
+
+func TestPatchMarkerAcceptsGoCommentSyntax(t *testing.T) {
+	got, already, err := PatchMarker([]byte(routeSample), "routes", "web", webSnippet)
+	if err != nil {
+		t.Fatalf("PatchMarker: %v", err)
+	}
+	if already {
+		t.Fatal("already = true, want false")
+	}
+	if !strings.Contains(string(got), "routes = append(routes, installWebRoute)") {
+		t.Fatalf("install call missing:\n%s", got)
+	}
+}
+
+// TestPatchMarkerAppendsDistinctCapabilities verifies that two capabilities can
+// patch one region without one suppressing the other, in either order.
+func TestPatchMarkerAppendsDistinctCapabilities(t *testing.T) {
+	orders := []struct {
+		name  string
+		first struct {
+			capability string
+			snippet    []byte
+		}
+		second struct {
+			capability string
+			snippet    []byte
+		}
+	}{
+		{"web then api", struct {
+			capability string
+			snippet    []byte
+		}{"web", webSnippet}, struct {
+			capability string
+			snippet    []byte
+		}{"api", apiSnippet}},
+		{"api then web", struct {
+			capability string
+			snippet    []byte
+		}{"api", apiSnippet}, struct {
+			capability string
+			snippet    []byte
+		}{"web", webSnippet}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			first, already, err := PatchMarker([]byte(routeSample), "routes", order.first.capability, order.first.snippet)
+			if err != nil {
+				t.Fatalf("first patch: %v", err)
+			}
+			if already {
+				t.Fatal("first patch reported already installed")
+			}
+			second, already, err := PatchMarker(first, "routes", order.second.capability, order.second.snippet)
+			if err != nil {
+				t.Fatalf("second patch: %v", err)
+			}
+			if already {
+				t.Fatal("second patch reported already installed")
+			}
+			got := string(second)
+			for _, want := range []string{
+				"installWebRoute",
+				"installAPIRoute",
+				"weld:web:installed",
+				"weld:api:installed",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("%q missing from:\n%s", want, got)
+				}
+			}
+			if strings.Count(got, "weld:routes:begin") != 1 || strings.Count(got, "weld:routes:end") != 1 {
+				t.Errorf("marker pair duplicated:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestPatchMarkerMalformed(t *testing.T) {
+	cases := map[string]string{
+		"end before begin":  "// weld:routes:end\n// weld:routes:begin\n",
+		"begin without end": "// weld:routes:begin\n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := PatchMarker([]byte(content), "routes", "web", webSnippet); err == nil {
+				t.Fatal("expected error for malformed extension point")
+			}
+		})
+	}
+}
+
+func TestPatchMarkerPreservesUserTextOutsideRegion(t *testing.T) {
+	withUserEdit := strings.Replace(routeSample, "func Handler() []Route {",
+		"// user note: keep me\nfunc Handler() []Route {", 1)
+	got, _, err := PatchMarker([]byte(withUserEdit), "routes", "web", webSnippet)
+	if err != nil {
+		t.Fatalf("PatchMarker: %v", err)
+	}
+	if !strings.Contains(string(got), "// user note: keep me") {
+		t.Fatalf("user text was lost:\n%s", got)
+	}
+	if !strings.Contains(string(got), "\treturn routes\n}") {
+		t.Fatalf("code after the region changed:\n%s", got)
 	}
 }
 
