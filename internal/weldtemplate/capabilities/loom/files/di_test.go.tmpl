@@ -45,6 +45,9 @@ import (
 // testPolicies is the composition's policy list for these tests: the "admin"
 // policy with the shipped placeholder guard. The generated graph applies
 // httpserver.Policies, so a test passes the list it needs instead.
+//
+// Keep it in step with the project's policies: a module that requires a name this
+// list does not define makes the composition panic.
 var testPolicies = []httpserver.NamedPolicy{
 	{Name: httpserver.PolicyAdmin, Middleware: httpserver.AdminGuard()},
 }
