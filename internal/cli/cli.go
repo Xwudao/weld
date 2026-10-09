@@ -76,9 +76,17 @@ Capabilities:
                     and repository
   redis  (add)      Opt-in Redis client with typed connection config; installing
                     it never connects Redis to a service (requires base, config)
+  mail   (add)      Opt-in SMTP sender with typed, secret-redacted config;
+                    installing it never sends or connects
+  storage (add)     Opt-in S3-compatible object-storage client; installing it
+                    creates no bucket and uploads nothing
+  cron   (add)      Opt-in in-process scheduler that starts and stops with
+                    serve; installing it schedules nothing until you register
+                    jobs in internal/cron/register.go
   loom   (add)      Loom dependency-injection graph wiring the HTTP server, the
-                    JSON API service and the PostgreSQL repository (requires
-                    http; opt-in, never installed by web, api, db or redis)
+                    JSON API service, the database, Redis, mail, storage and
+                    the cron scheduler (requires http; opt-in, never installed
+                    by web, api, db, redis, mail, storage or cron)
 
 http and db each install the config capability, so the first of them adds the
 shared typed configuration loader and generates a local, git-ignored config.yml

@@ -203,8 +203,10 @@ func TestHelpMentionsLoomCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("help: %v", err)
 	}
-	if !strings.Contains(out, "loom") {
-		t.Fatalf("help does not mention the loom capability:\n%s", out)
+	for _, want := range []string{"loom", "cron", "mail", "storage"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("help does not mention the %s capability:\n%s", want, out)
+		}
 	}
 }
 

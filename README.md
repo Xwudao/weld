@@ -64,10 +64,20 @@ Capabilities:
   `config`.
 - `redis` (add) — an opt-in Redis client with typed connection configuration.
   Requires `base` and `config`; installing it never connects Redis to a service.
+- `mail` (add) — an opt-in SMTP sender with typed, secret-redacted
+  configuration and an explicit TLS policy. Requires `base` and `config`;
+  installing it never sends and never connects.
+- `storage` (add) — an opt-in S3-compatible object-storage client. Requires
+  `base` and `config`; installing it creates no bucket and uploads nothing.
+- `cron` (add) — an opt-in in-process scheduler that starts and stops with the
+  `serve` command and never with a short command. Requires `base` and `config`;
+  installing it schedules nothing until you register jobs in
+  `internal/cron/register.go`.
 - `loom` (add) — a compile-time [Loom](https://github.com/Xwudao/loom)
-  dependency-injection graph that wires the HTTP server, the JSON API service and
-  the PostgreSQL repository with lifecycle start/stop. Requires `http` and is
-  **opt-in**: `web`, `api`, `db` and `redis` never install it.
+  dependency-injection graph that wires the HTTP server, the JSON API service, the
+  database, Redis, mail, storage and the cron scheduler with lifecycle
+  start/stop. Requires `http` and is **opt-in**: `web`, `api`, `db`, `redis`,
+  `mail`, `storage` and `cron` never install it.
 
 `http` and `db` each require `config`, so the first of them installs it
 automatically: `weld add http` or `weld add db` on a fresh project adds the
@@ -190,7 +200,9 @@ The write is safe and deterministic:
   fingerprint of its body. If the file no longer matches — the user edited it,
   not `weld` — `weld skills` refuses to overwrite it rather than lose the user's
   notes, including after a later `weld add` changed the installed set. Delete or
-  rename the file to regenerate from scratch.
+  rename the file to regenerate from scratch. The file is re-checked when the
+  plan is applied too, so an edit made between planning and writing is a
+  conflict rather than a silent overwrite.
 - **Preserves unrelated files.** Only `.agents/skills/weld/SKILL.md` is written;
   sibling files under `.agents/skills/` are untouched.
 - **Not in the manifest.** The skill file is deliberately not recorded in
@@ -258,9 +270,9 @@ CLI-only project and composes with the HTTP capabilities in any order.
 ## `weld add loom` (stage 4)
 
 `weld add loom` is an **opt-in** capability that requires `http` and is never
-installed by `web`, `api` or `db`. It adds `internal/di`, a
-[Loom](https://github.com/Xwudao/loom) dependency graph, and rewires the single
-`serve` command to run `InitApp`.
+installed by `web`, `api`, `db`, `redis`, `mail`, `storage` or `cron`. It adds
+`internal/di`, a [Loom](https://github.com/Xwudao/loom) dependency graph, and
+rewires the single `serve` command to run `InitApp`.
 
 What Loom binds, and why it is not ceremonial:
 
@@ -296,12 +308,23 @@ What Loom binds, and why it is not ceremonial:
   lifecycle. `OnStart` binds the listen address synchronously, so a port already
   in use fails `Start`; the serve command waits for a signal or a reported serve
   failure, then stops gracefully.
+- `*cron.Scheduler` (`cron`) — the graph root consumes the scheduler, so it is
+  always constructed and its `loom.Hook` start/stop run with the server: the
+  socket is bound before the scheduler starts and the scheduler stops before the
+  server. It starts no jobs until `internal/cron/register.go` registers them, and
+  it takes no database or Redis lock.
+- `*redis.Client` (`redis`), `*mailsender.Sender` (`mail`) and
+  `*objectstore.Store` (`storage`) — declared bindings the default graph never
+  depends on, so Loom prunes them and an unrelated serve needs none of those
+  settings. Each provider lives in a stable seam (`redis_provider.go`,
+  `mail_provider.go`, `storage_provider.go`).
 - `*App` — the graph root, holding every bound service.
 
 The graph is capability aware and order independent. `weld add loom` renders
 `internal/di/di.go` for the installed set and generates `internal/di/loom_gen.go`
-with the real pinned generator; adding `web`, `api` or `db` afterwards
-regenerates both. Generation runs at add time with the generator pinned in the
+with the real pinned generator; adding `web`, `api`, `db`, `redis`, `mail`,
+`storage` or `cron` afterwards regenerates both. Generation runs at add time with
+the generator pinned in the
 nested `tools/loom` module, not in the application `go.mod`, and a generation
 failure rolls the whole plan back so a project is never left with a graph that
 does not match `loom_gen.go`. Installed capabilities other than `loom` stay

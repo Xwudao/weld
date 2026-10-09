@@ -51,6 +51,13 @@ type Result struct {
 	Existing bool
 	// Changed reports that applying the plan would change the file.
 	Changed bool
+
+	// original is the file content read when the plan was built, and
+	// originalExisted reports whether it existed. Apply re-reads the file and
+	// refuses when either changed, so a user edit made between planning and
+	// application is never overwritten silently.
+	original        []byte
+	originalExisted bool
 }
 
 // Generate plans the skill file for a project rooted at root.
@@ -77,20 +84,51 @@ func Generate(root string, manifest *project.Manifest, catalog Catalog) (*Result
 		}
 	}
 	return &Result{
-		Path:     Path,
-		Content:  content,
-		Existing: true,
-		Changed:  !bytes.Equal(existing, content),
+		Path:            Path,
+		Content:         content,
+		Existing:        true,
+		Changed:         !bytes.Equal(existing, content),
+		original:        existing,
+		originalExisted: true,
 	}, nil
 }
 
 // Apply writes the planned file when it changed and does nothing otherwise, so
 // a repeat `weld skills` leaves the file untouched.
+//
+// It re-reads the file first and refuses when it no longer matches the state the
+// plan was built against, so a user edit made between planning and application
+// is a conflict rather than a silent overwrite.
 func (r *Result) Apply(root string) error {
 	if !r.Changed {
 		return nil
 	}
+	if err := r.recheck(root); err != nil {
+		return err
+	}
 	return project.Apply(root, []project.Operation{{Path: r.Path, Content: r.Content, Overwrite: true}})
+}
+
+// recheck re-reads the on-disk file and reports a conflict when it differs from
+// the state stored in the plan, so a concurrent edit is never overwritten.
+func (r *Result) recheck(root string) error {
+	current, err := os.ReadFile(filepath.Join(root, r.Path))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if r.originalExisted {
+			return &project.ConflictError{Path: r.Path, Reason: "was removed since the plan was generated; refusing to overwrite"}
+		}
+		return nil
+	case err != nil:
+		return err
+	}
+	if !r.originalExisted {
+		return &project.ConflictError{Path: r.Path, Reason: "appeared since the plan was generated; refusing to overwrite"}
+	}
+	if !bytes.Equal(current, r.original) {
+		return &project.ConflictError{Path: r.Path, Reason: "was edited since the plan was generated; refusing to overwrite (delete or rename it to regenerate)"}
+	}
+	return nil
 }
 
 // Edited reports whether content is not a weld-generated document, or is one
@@ -234,14 +272,17 @@ func describe(name string, catalog Catalog) string {
 // capabilities. It is a map rather than a switch so a future capability falls
 // through to its catalog summary instead of silently vanishing.
 var curatedNotes = map[string]string{
-	"base":   "minimal, dependency-free Go CLI: a command registry in `internal/app` and a `log/slog` factory in `internal/logging`. It ships no configuration and no server.",
-	"config": "shared typed configuration in `internal/config`: `config.yml` from the working directory with flag > environment > file > defaults precedence. `config.yml` is local and git-ignored and `config.example.yml` is committed. `config.Secret` redacts itself in `fmt`, `log/slog`, JSON and YAML.",
-	"http":   "HTTP server lifecycle in `internal/httpserver` and the single `serve` command in `internal/app/serve.go`. The handler is composed explicitly with `NewHandler(routes ...Route)`; routes are not registered globally.",
-	"web":    "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
-	"api":    "JSON HTTP API in `internal/api`: typed DTOs, go-validate rules and an OpenAPI 3.1 document served at `GET /api/openapi.json`. The default `Service` is an in-memory development demo whose items are lost on restart; it is not persistence.",
-	"db":     "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
-	"loom":   "opt-in compile-time dependency-injection graph in `internal/di` that composes the configuration, logger and HTTP server (and the JSON API service when **api** is installed); `serve` runs the graph. Installing it raises the project's Go directive to 1.25, and any installed **db** and **redis** are declared but pruned until a provider depends on them.",
-	"redis":  "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
+	"base":    "minimal, dependency-free Go CLI: a command registry in `internal/app` and a `log/slog` factory in `internal/logging`. It ships no configuration and no server.",
+	"config":  "shared typed configuration in `internal/config`: `config.yml` from the working directory with flag > environment > file > defaults precedence. `config.yml` is local and git-ignored and `config.example.yml` is committed. `config.Secret` redacts itself in `fmt`, `log/slog`, JSON and YAML.",
+	"http":    "HTTP server lifecycle in `internal/httpserver` and the single `serve` command in `internal/app/serve.go`. The handler is composed explicitly with `NewHandler(routes ...Route)`; routes are not registered globally.",
+	"web":     "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
+	"api":     "JSON HTTP API in `internal/api`: typed DTOs, go-validate rules and an OpenAPI 3.1 document served at `GET /api/openapi.json`. The default `Service` is an in-memory development demo whose items are lost on restart; it is not persistence.",
+	"db":      "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
+	"loom":    "opt-in compile-time dependency-injection graph in `internal/di` that composes the configuration, logger and HTTP server (and the JSON API service when **api** is installed); `serve` runs the graph. Installing it raises the project's Go directive to 1.25, and any installed **db** and **redis** are declared but pruned until a provider depends on them.",
+	"redis":   "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
+	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs, unique names, overlap skipping, panic recovery and graceful stop. It starts and stops with `serve` (plain and Loom) and never with a short command. `internal/cron/register.go` is the stable file where you declare jobs, so installing the capability schedules nothing.",
+	"mail":    "opt-in SMTP sender in `internal/mailsender`: one connection per `Send` with an explicit TLS policy and header-injection guards. Nothing generated imports it, so serving sends no mail; `internal/di/mail_provider.go` is the stable Loom seam.",
+	"storage": "opt-in S3-compatible object storage in `internal/objectstore`: a streaming client with bounded presigned URLs. It never creates the bucket, and nothing generated imports it; `internal/di/storage_provider.go` is the stable Loom seam.",
 }
 
 func writeWiring(b *strings.Builder, set map[string]bool) {
@@ -267,6 +308,24 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 		b.WriteString("- **redis** installs a client but never dials or pings; nothing generated\n")
 		b.WriteString("  imports it, so an ordinary serve needs no Redis setting (see\n")
 		b.WriteString("  `internal/redisclient/README.md`).\n")
+		wrote = true
+	}
+	if set["mail"] {
+		b.WriteString("- **mail** installs an SMTP sender but sends nothing; constructing it opens\n")
+		b.WriteString("  no connection and nothing generated imports it (see\n")
+		b.WriteString("  `internal/mailsender/README.md`).\n")
+		wrote = true
+	}
+	if set["storage"] {
+		b.WriteString("- **storage** installs an S3-compatible client but connects nothing and\n")
+		b.WriteString("  creates no bucket; nothing generated imports it (see\n")
+		b.WriteString("  `internal/objectstore/README.md`).\n")
+		wrote = true
+	}
+	if set["cron"] {
+		b.WriteString("- **cron** installs a scheduler but schedules nothing by itself: it starts and\n")
+		b.WriteString("  stops with `serve` and runs only the jobs you add in\n")
+		b.WriteString("  `internal/cron/register.go` (see `internal/cron/README.md`).\n")
 		wrote = true
 	}
 	if set["loom"] {
@@ -296,6 +355,18 @@ func writeEditing(b *strings.Builder, set map[string]bool) {
 	}
 	if set["redis"] && set["loom"] {
 		seams = append(seams, "`internal/di/redis_provider.go`")
+	}
+	if set["mail"] && set["loom"] {
+		seams = append(seams, "`internal/di/mail_provider.go`")
+	}
+	if set["storage"] && set["loom"] {
+		seams = append(seams, "`internal/di/storage_provider.go`")
+	}
+	if set["cron"] && set["loom"] {
+		seams = append(seams, "`internal/di/cron_provider.go`")
+	}
+	if set["cron"] {
+		seams = append(seams, "`internal/cron/register.go`")
 	}
 	if set["api"] && !set["loom"] {
 		seams = append(seams, "`internal/httpserver/api_route.go`")

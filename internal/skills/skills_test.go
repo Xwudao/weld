@@ -311,3 +311,84 @@ func TestGenerateRefusesEditedFileAfterCapabilityAdd(t *testing.T) {
 		t.Fatal("expected Generate to refuse after a capability add")
 	}
 }
+
+// TestApplyRefusesConcurrentEdit proves a user edit made after Generate is a
+// conflict at Apply time rather than a silent overwrite: the plan is rechecked
+// against the file before it is written.
+func TestApplyRefusesConcurrentEdit(t *testing.T) {
+	root := t.TempDir()
+	first, err := Generate(root, manifest("http"), template.Load())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := first.Apply(root); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// Plan an update against the generated file, then let the user edit the file
+	// before the plan is applied.
+	second, err := Generate(root, manifest("http", "db"), template.Load())
+	if err != nil {
+		t.Fatalf("Generate update: %v", err)
+	}
+	if !second.Changed {
+		t.Fatal("expected the capability add to change the file")
+	}
+	path := filepath.Join(root, filepath.FromSlash(Path))
+	edited := append(append([]byte(nil), second.Content...), []byte("user note\n")...)
+	if err := os.WriteFile(path, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := second.Apply(root); err == nil {
+		t.Fatal("expected Apply to refuse after a concurrent edit")
+	}
+	preserved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(preserved, edited) {
+		t.Fatal("Apply overwrote the concurrent user edit")
+	}
+}
+
+// TestRenderCronMailStorageLabelsAndSeams proves the new capabilities are
+// described accurately and their stable seams are listed, so a coding agent
+// learns where to register cron jobs and how mail/storage are wired.
+func TestRenderCronMailStorageLabelsAndSeams(t *testing.T) {
+	body, err := Render(manifest("cron", "mail", "storage", "loom"), template.Load())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"**cron** v0.1.0",
+		"**mail** v0.1.0",
+		"**storage** v0.1.0",
+		"`internal/cron/register.go`",
+		"`internal/di/cron_provider.go`",
+		"`internal/di/mail_provider.go`",
+		"`internal/di/storage_provider.go`",
+		"schedules nothing",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("rendered skill is missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestRenderCronAloneStillNamesTheRegistrationSeam proves a cron-only project is
+// told where jobs are declared even without Loom.
+func TestRenderCronAloneStillNamesTheRegistrationSeam(t *testing.T) {
+	body, err := Render(manifest("cron"), template.Load())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "`internal/cron/register.go`") {
+		t.Errorf("cron-only skill does not name the registration seam:\n%s", text)
+	}
+	if strings.Contains(text, "`internal/di/cron_provider.go`") {
+		t.Errorf("cron-only skill claims a Loom provider seam that is not installed:\n%s", text)
+	}
+}

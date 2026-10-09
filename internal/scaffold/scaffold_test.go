@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2257,6 +2258,10 @@ func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
 		{name: "api+db", caps: []string{"api", "db"}, needsAPI: true},
 		{name: "db+loom", caps: []string{"db", "loom"}, needsLoom: true},
 		{name: "api+db+loom", caps: []string{"api", "db", "loom"}, needsAPI: true, needsLoom: true},
+		{name: "cron", caps: []string{"cron"}},
+		{name: "http+cron", caps: []string{"http", "cron"}},
+		{name: "cron+loom", caps: []string{"cron", "loom"}, needsLoom: true},
+		{name: "mail+storage+loom", caps: []string{"mail", "storage", "loom"}, needsLoom: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2774,5 +2779,593 @@ func TestRedisProviderSeamGuardsInstallOnce(t *testing.T) {
 	}
 	if entryApplies(map[string]bool{"base": true, "api": true}, redisFile.When, redisFile.WhenAbsent) {
 		t.Error("redis writes redis_provider.go before loom is present in a combined plan")
+	}
+}
+
+// --- cron capability --------------------------------------------------------
+
+// serveEnv is the environment a generated serve process runs with: the database,
+// HTTP, Redis, mail and storage variables are removed so the process can never
+// reach an external service, and GOWORK is off so no workspace interferes.
+func serveEnv() []string {
+	return append(envWithout(
+		"DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME",
+		"HTTP_ADDR", "CRON_TIMEZONE",
+		"REDIS_ADDR", "REDIS_USERNAME", "REDIS_PASSWORD", "REDIS_DB", "REDIS_TLS",
+		"MAIL_HOST", "MAIL_PORT", "MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_FROM", "MAIL_TLS", "MAIL_TIMEOUT_SECONDS",
+		"STORAGE_ENDPOINT", "STORAGE_REGION", "STORAGE_BUCKET", "STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY", "STORAGE_PATH_STYLE", "STORAGE_TLS",
+	), "GOWORK=off")
+}
+
+// startServe starts a generated serve binary on a fresh loopback address and
+// waits until it logs the listening line, returning the process and its captured
+// stderr. The process is killed when the test finishes.
+func startServe(t *testing.T, binary, dir string, env []string) (*exec.Cmd, string, *syncBuffer) {
+	t.Helper()
+	addr := freeAddr(t)
+	cmd := exec.Command(binary, "serve", "--addr", addr)
+	cmd.Dir = dir
+	cmd.Env = env
+	stderr := &syncBuffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start serve: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	waitForLog(t, stderr, "listening", 20*time.Second)
+	return cmd, addr, stderr
+}
+
+// stopServe sends SIGTERM and waits for the process to exit, returning its final
+// stderr. A non-zero exit after the signal is a failure: serve must stop cleanly.
+func stopServe(t *testing.T, cmd *exec.Cmd, stderr *syncBuffer) string {
+	t.Helper()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal serve: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve exited with %v after SIGTERM:\n%s", err, stderr.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("serve did not exit after SIGTERM:\n%s", stderr.String())
+	}
+	return stderr.String()
+}
+
+// waitForLog blocks until the captured output contains substr or the timeout
+// elapses.
+func waitForLog(t *testing.T, stderr *syncBuffer, substr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(stderr.String(), substr) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("serve never logged %q:\n%s", substr, stderr.String())
+}
+
+// TestAddCronInstallsLibraryWithoutHTTP proves `weld add cron` is a library
+// install that needs no server: it writes the scheduler and its stable
+// registration file, attaches a runtime to the shared config seam, and creates
+// no serve command or HTTP package. It schedules nothing by itself.
+func TestAddCronInstallsLibraryWithoutHTTP(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+
+	result := add(t, dir, "cron")
+	if got, want := strings.Join(result.Installed, ","), "config,cron"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
+	}
+	for _, path := range []string{
+		"internal/cron/cron.go",
+		"internal/cron/register.go",
+		"internal/config/cron.go",
+		"internal/app/cron.go",
+		"internal/app/cron_test.go",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
+			t.Errorf("expected %s: %v", path, err)
+		}
+	}
+	for _, absent := range []string{"internal/app/serve.go", "internal/httpserver", "internal/di", "internal/api", "internal/data"} {
+		if _, err := os.Stat(filepath.Join(dir, absent)); !os.IsNotExist(err) {
+			t.Errorf("add cron created %s", absent)
+		}
+	}
+
+	// The registration file is the stable job seam and registers nothing.
+	register := readFile(t, filepath.Join(dir, "internal/cron/register.go"))
+	if !strings.Contains(register, "func Register(s *Scheduler) error") {
+		t.Errorf("register.go does not expose Register:\n%s", register)
+	}
+	if !strings.Contains(register, "return nil") {
+		t.Errorf("register.go schedules work by default:\n%s", register)
+	}
+	// The runtime follows the shared seam, so it starts with serve when http is
+	// added later and never with a short command.
+	appCron := readFile(t, filepath.Join(dir, "internal/app/cron.go"))
+	for _, want := range []string{"config.RegisterRuntime", "cron.New", "cron.Register", "scheduler.Start", "scheduler.Stop"} {
+		if !strings.Contains(appCron, want) {
+			t.Errorf("internal/app/cron.go is missing %q:\n%s", want, appCron)
+		}
+	}
+
+	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after add cron: %+v", drift)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's cron dependencies (network/module cache unavailable)")
+	}
+}
+
+// TestAddCronSchedulerFollowsServe proves the runtime hook end to end, in both
+// http/cron install orders: serve binds its socket and logs the listening line,
+// starts the scheduler, and on SIGTERM stops the scheduler before shutting the
+// HTTP server down and exits cleanly. No job fires; the point is that the
+// scheduler lifecycle really follows the long-running command.
+func TestAddCronSchedulerFollowsServe(t *testing.T) {
+	orders := []struct {
+		name string
+		caps []string
+	}{
+		{"http then cron", []string{"http", "cron"}},
+		{"cron then http", []string{"cron", "http"}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			for _, capability := range order.caps {
+				add(t, dir, capability)
+			}
+			if !goModTidy(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+			gofmtCheck(t, dir)
+			runGo(t, dir, "vet", "./...")
+
+			env := serveEnv()
+			binary := buildAppBinary(t, dir, env)
+			cmd, _, stderr := startServe(t, binary, dir, env)
+			waitForLog(t, stderr, "cron scheduler started", 10*time.Second)
+
+			listening := strings.Index(stderr.String(), "listening")
+			started := strings.Index(stderr.String(), "cron scheduler started")
+			if listening < 0 || started < 0 || listening > started {
+				t.Fatalf("the scheduler did not start after the socket was bound:\n%s", stderr.String())
+			}
+
+			final := stopServe(t, cmd, stderr)
+			stopped := strings.Index(final, "cron scheduler stopped")
+			shutting := strings.Index(final, "shutting down")
+			if stopped < 0 || shutting < 0 || stopped > shutting {
+				t.Fatalf("the scheduler did not stop before the server shut down:\n%s", final)
+			}
+		})
+	}
+}
+
+// TestAddCronWithLoomWiresScheduler proves the Loom integration is graph
+// reachable and ordered, in every install order: the graph root consumes the
+// scheduler, Loom constructs the server before the scheduler, and the generated
+// graph test (run by buildAndTestGeneratedProject) asserts the server logs
+// "listening" before the scheduler starts and the scheduler stops before the
+// server shuts down.
+func TestAddCronWithLoomWiresScheduler(t *testing.T) {
+	loomToolAvailable(t)
+	orders := []struct {
+		name string
+		caps []string
+	}{
+		{"http cron then loom", []string{"http", "cron", "loom"}},
+		{"loom then cron", []string{"loom", "cron"}},
+		{"cron then loom", []string{"cron", "loom"}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			for _, capability := range order.caps {
+				add(t, dir, capability)
+			}
+
+			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+			for _, want := range []string{"loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
+				if !strings.Contains(di, want) {
+					t.Errorf("di.go is missing %q:\n%s", want, di)
+				}
+			}
+			gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
+			serverIdx := strings.Index(gen, "NewServer(")
+			schedulerIdx := strings.Index(gen, "NewScheduler(")
+			if serverIdx < 0 || schedulerIdx < 0 {
+				t.Fatalf("loom_gen.go does not construct the server and scheduler:\n%s", gen)
+			}
+			if serverIdx > schedulerIdx {
+				t.Fatalf("loom_gen.go constructs the scheduler before the server:\n%s", gen)
+			}
+
+			if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+				t.Fatalf("drift after add: %+v", drift)
+			}
+			if !buildAndTestGeneratedProject(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+		})
+	}
+}
+
+// TestAddCronLoomSchedulerRunsWithServe is the runtime proof for the Loom path:
+// the graph-owned scheduler starts after the socket is bound and stops before
+// the HTTP server, observed from the generated binary's logs.
+func TestAddCronLoomSchedulerRunsWithServe(t *testing.T) {
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	for _, capability := range []string{"http", "cron", "loom"} {
+		add(t, dir, capability)
+	}
+	if !goModTidy(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	env := serveEnv()
+	binary := buildAppBinary(t, dir, env)
+	cmd, _, stderr := startServe(t, binary, dir, env)
+	waitForLog(t, stderr, "cron scheduler started", 10*time.Second)
+
+	listening := strings.Index(stderr.String(), "listening")
+	started := strings.Index(stderr.String(), "cron scheduler started")
+	if listening < 0 || started < 0 || listening > started {
+		t.Fatalf("the scheduler did not start after the socket was bound:\n%s", stderr.String())
+	}
+
+	final := stopServe(t, cmd, stderr)
+	stopped := strings.Index(final, "cron scheduler stopped")
+	shutting := strings.Index(final, "shutting down")
+	if stopped < 0 || shutting < 0 || stopped > shutting {
+		t.Fatalf("the scheduler did not stop before the server shut down:\n%s", final)
+	}
+}
+
+// TestCronProviderSeamGuardsInstallOnce proves the conditional install that makes
+// cron_provider.go durable: each declaration requires the other capability, so it
+// fires only for the capability installed second and never for a project with
+// only one of them.
+func TestCronProviderSeamGuardsInstallOnce(t *testing.T) {
+	const path = "internal/di/cron_provider.go"
+	fileEntry := func(capability string) template.File {
+		t.Helper()
+		got, err := newCatalog().Get(capability)
+		if err != nil {
+			t.Fatalf("Get %s: %v", capability, err)
+		}
+		for _, file := range got.Files {
+			if file.Path == path {
+				return file
+			}
+		}
+		t.Fatalf("%s does not declare %s", capability, path)
+		return template.File{}
+	}
+	cronFile := fileEntry("cron")
+	loomFile := fileEntry("loom")
+
+	if !entryApplies(map[string]bool{"base": true, "loom": true}, cronFile.When, cronFile.WhenAbsent) {
+		t.Error("cron does not write cron_provider.go when loom is already installed")
+	}
+	if !entryApplies(map[string]bool{"base": true, "cron": true}, loomFile.When, loomFile.WhenAbsent) {
+		t.Error("loom does not write cron_provider.go when cron is already installed")
+	}
+	if entryApplies(map[string]bool{"base": true}, cronFile.When, cronFile.WhenAbsent) {
+		t.Error("cron writes cron_provider.go without loom")
+	}
+	if entryApplies(map[string]bool{"base": true}, loomFile.When, loomFile.WhenAbsent) {
+		t.Error("loom writes cron_provider.go without cron")
+	}
+}
+
+// TestAddCronProviderSeamSurvivesLaterAdd proves the durable seam end to end: a
+// user edit to the stable register and provider files survives a later
+// capability add that regenerates the graph.
+func TestAddCronProviderSeamSurvivesLaterAdd(t *testing.T) {
+	loomToolAvailable(t)
+	orders := []struct {
+		name string
+		caps []string
+	}{
+		{"cron then loom", []string{"cron", "loom"}},
+		{"loom then cron", []string{"loom", "cron"}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			for _, capability := range order.caps {
+				add(t, dir, capability)
+			}
+
+			registerPath := filepath.Join(dir, "internal/cron/register.go")
+			providerPath := filepath.Join(dir, "internal/di/cron_provider.go")
+			registerEdit := readFile(t, registerPath) + "\n// user job, must survive a later add\n"
+			providerEdit := readFile(t, providerPath) + "\n// user wiring, must survive a later add\n"
+			if err := os.WriteFile(registerPath, []byte(registerEdit), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(providerPath, []byte(providerEdit), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			add(t, dir, "web")
+
+			if got := readFile(t, registerPath); got != registerEdit {
+				t.Fatalf("the later add rewrote the user's register.go:\n%s", got)
+			}
+			if got := readFile(t, providerPath); got != providerEdit {
+				t.Fatalf("the later add rewrote the user's cron_provider.go:\n%s", got)
+			}
+			if di := readFile(t, filepath.Join(dir, "internal/di/di.go")); !strings.Contains(di, "internal/web") {
+				t.Errorf("di.go was not regenerated for web:\n%s", di)
+			}
+			if !buildAndTestGeneratedProject(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+		})
+	}
+}
+
+// TestAddMailStorageWithLoomBothOrders proves the mail and storage Loom
+// integrations are declared but pruned in either install order: the graph
+// declares the provider, the stable seam defines it, the generated initializer
+// never constructs it, and the project builds and tests with no external server.
+func TestAddMailStorageWithLoomBothOrders(t *testing.T) {
+	loomToolAvailable(t)
+	cases := []struct {
+		capability  string
+		provider    string
+		constructor string
+	}{
+		{capability: "mail", provider: "mail_provider.go", constructor: "NewMailSender"},
+		{capability: "storage", provider: "storage_provider.go", constructor: "NewObjectStore"},
+	}
+	for _, tc := range cases {
+		orders := []struct {
+			name string
+			caps []string
+		}{
+			{tc.capability + " then loom", []string{tc.capability, "loom"}},
+			{"loom then " + tc.capability, []string{"loom", tc.capability}},
+		}
+		for _, order := range orders {
+			t.Run(order.name, func(t *testing.T) {
+				root := t.TempDir()
+				dir := create(t, root)
+				for _, capability := range order.caps {
+					add(t, dir, capability)
+				}
+				providerPath := filepath.Join(dir, "internal/di", tc.provider)
+				if provider := readFile(t, providerPath); !strings.Contains(provider, "func "+tc.constructor) {
+					t.Errorf("%s does not define %s:\n%s", tc.provider, tc.constructor, provider)
+				}
+				di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+				if !strings.Contains(di, "loom.Provide("+tc.constructor+")") {
+					t.Errorf("di.go does not declare %s:\n%s", tc.constructor, di)
+				}
+				gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
+				if strings.Contains(gen, tc.constructor) {
+					t.Errorf("loom_gen.go constructs the unused %s; the default composition must not wire it:\n%s", tc.constructor, gen)
+				}
+				if !buildAndTestGeneratedProject(t, dir) {
+					t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+				}
+			})
+		}
+	}
+}
+
+// TestMailStorageProviderSeamsGuardInstallOnce proves the mail and storage
+// provider seams follow the same conditional-install contract as redis: each
+// declaration fires only for the capability installed second.
+func TestMailStorageProviderSeamsGuardInstallOnce(t *testing.T) {
+	cases := []struct {
+		capability string
+		path       string
+	}{
+		{"mail", "internal/di/mail_provider.go"},
+		{"storage", "internal/di/storage_provider.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.capability, func(t *testing.T) {
+			fileEntry := func(capability string) template.File {
+				t.Helper()
+				got, err := newCatalog().Get(capability)
+				if err != nil {
+					t.Fatalf("Get %s: %v", capability, err)
+				}
+				for _, file := range got.Files {
+					if file.Path == tc.path {
+						return file
+					}
+				}
+				t.Fatalf("%s does not declare %s", capability, tc.path)
+				return template.File{}
+			}
+			capFile := fileEntry(tc.capability)
+			loomFile := fileEntry("loom")
+
+			if !entryApplies(map[string]bool{"base": true, "loom": true}, capFile.When, capFile.WhenAbsent) {
+				t.Errorf("%s does not write %s when loom is already installed", tc.capability, tc.path)
+			}
+			if !entryApplies(map[string]bool{"base": true, tc.capability: true}, loomFile.When, loomFile.WhenAbsent) {
+				t.Errorf("loom does not write %s when %s is already installed", tc.path, tc.capability)
+			}
+			if entryApplies(map[string]bool{"base": true}, capFile.When, capFile.WhenAbsent) {
+				t.Errorf("%s writes %s without loom", tc.capability, tc.path)
+			}
+			if entryApplies(map[string]bool{"base": true}, loomFile.When, loomFile.WhenAbsent) {
+				t.Errorf("loom writes %s without %s", tc.path, tc.capability)
+			}
+		})
+	}
+}
+
+// TestCronGeneratedProjectRaceAndVet runs the generated project's tests under the
+// race detector and vets it for the cron permutations that matter: cron alone
+// with http (the runtime hook), cron with Loom (the graph-owned scheduler), cron
+// with the db/redis mix, and cron with api. No PostgreSQL, Redis, mail or object
+// store is reached.
+func TestCronGeneratedProjectRaceAndVet(t *testing.T) {
+	goValidate := goValidateDir(t)
+	cases := []struct {
+		name      string
+		caps      []string
+		needsAPI  bool
+		needsLoom bool
+	}{
+		{name: "http+cron", caps: []string{"http", "cron"}},
+		{name: "cron+loom", caps: []string{"cron", "loom"}, needsLoom: true},
+		{name: "db+redis+cron", caps: []string{"db", "redis", "cron"}},
+		{name: "api+cron", caps: []string{"api", "cron"}, needsAPI: true},
+		{name: "api+db+cron+loom", caps: []string{"api", "db", "cron", "loom"}, needsAPI: true, needsLoom: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsLoom {
+				loomToolAvailable(t)
+			}
+			if tc.needsAPI && goValidate == "" {
+				t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
+			}
+			root := t.TempDir()
+			dir := create(t, root)
+			if tc.needsAPI {
+				useLocalGoValidate(t, dir, goValidate)
+			}
+			for _, capability := range tc.caps {
+				add(t, dir, capability)
+			}
+			if !goModTidy(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+			gofmtCheck(t, dir)
+			runGo(t, dir, "vet", "./...")
+			runGo(t, dir, "test", "-race", "./...")
+		})
+	}
+}
+
+// TestAddCronRegistrationFileIsConsumed proves the stable registration file is
+// really invoked when serve starts the scheduler, not just compiled: a user job
+// with an invalid spec makes serve fail loudly instead of starting.
+func TestAddCronRegistrationFileIsConsumed(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	for _, capability := range []string{"http", "cron"} {
+		add(t, dir, capability)
+	}
+
+	path := filepath.Join(dir, "internal/cron/register.go")
+	const before = "func Register(s *Scheduler) error {\n\treturn nil\n}"
+	const after = "func Register(s *Scheduler) error {\n\treturn s.Register(\"bad\", \"not a spec\", nil)\n}"
+	content := readFile(t, path)
+	if !strings.Contains(content, before) {
+		t.Fatalf("register.go does not carry the expected default body:\n%s", content)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(content, before, after, 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !goModTidy(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	env := serveEnv()
+	binary := buildAppBinary(t, dir, env)
+	cmd := exec.Command(binary, "serve", "--addr", freeAddr(t))
+	cmd.Dir = dir
+	cmd.Env = env
+
+	done := make(chan struct{})
+	var out []byte
+	var runErr error
+	go func() {
+		out, runErr = cmd.CombinedOutput()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("serve did not fail fast on the invalid registered job; the registration file may not be consumed")
+	}
+	if runErr == nil {
+		t.Fatalf("serve started despite an invalid registered job:\n%s", out)
+	}
+	if !strings.Contains(string(out), "cron") {
+		t.Fatalf("the failure does not name cron:\n%s", out)
+	}
+}
+
+// TestCronDoesNotStartForShortCommands proves the scheduler follows serve only:
+// help, version and an unknown command never start it.
+func TestCronDoesNotStartForShortCommands(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	for _, capability := range []string{"http", "cron"} {
+		add(t, dir, capability)
+	}
+	if !goModTidy(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	env := serveEnv()
+	binary := buildAppBinary(t, dir, env)
+	for _, args := range [][]string{{"help"}, {"version"}, {"--help"}, {"bogus"}} {
+		cmd := exec.Command(binary, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, _ := cmd.CombinedOutput()
+		if strings.Contains(string(out), "cron scheduler started") {
+			t.Fatalf("%v started the cron scheduler:\n%s", args, out)
+		}
+	}
+}
+
+// TestAddMailStorageProviderSeamSurvivesLaterAdd proves the mail and storage
+// stable seams preserve user wiring: an edit to the provider file survives a
+// later capability add that regenerates the graph.
+func TestAddMailStorageProviderSeamSurvivesLaterAdd(t *testing.T) {
+	loomToolAvailable(t)
+	for _, capability := range []string{"mail", "storage"} {
+		t.Run(capability, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			for _, name := range []string{capability, "loom"} {
+				add(t, dir, name)
+			}
+			providerPath := filepath.Join(dir, "internal/di", capability+"_provider.go")
+			edit := readFile(t, providerPath) + "\n// user wiring, must survive a later add\n"
+			if err := os.WriteFile(providerPath, []byte(edit), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			add(t, dir, "web")
+
+			if got := readFile(t, providerPath); got != edit {
+				t.Fatalf("the later add rewrote the user's %s_provider.go:\n%s", capability, got)
+			}
+			if di := readFile(t, filepath.Join(dir, "internal/di/di.go")); !strings.Contains(di, "internal/web") {
+				t.Errorf("di.go was not regenerated for web:\n%s", di)
+			}
+			if !buildAndTestGeneratedProject(t, dir) {
+				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+			}
+		})
 	}
 }

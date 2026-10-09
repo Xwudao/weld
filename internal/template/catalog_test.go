@@ -11,7 +11,7 @@ func TestCatalogListsBaseAndWeb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Names: %v", err)
 	}
-	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "api": false, "db": false, "loom": false, "redis": false}
+	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "api": false, "db": false, "loom": false, "redis": false, "mail": false, "storage": false, "cron": false}
 	for _, name := range names {
 		if _, ok := want[name]; ok {
 			want[name] = true
@@ -238,6 +238,144 @@ func TestRedisCapabilityLoads(t *testing.T) {
 	}
 }
 
+// TestCronCapabilityLoads pins the cron capability's shape: it is additive,
+// needs only base and config, ships the scheduler plus a stable registration file
+// and the serve runtime, and declares its Loom provider seam guarded on loom.
+func TestCronCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("cron")
+	if err != nil {
+		t.Fatalf("Get cron: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
+	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+		t.Errorf("requires = %v, want %q", capability.Requires, want)
+	}
+	for _, forbidden := range []string{"http", "web", "api", "db", "loom"} {
+		for _, required := range capability.Requires {
+			if required == forbidden {
+				t.Errorf("cron requires %q", forbidden)
+			}
+		}
+	}
+	paths := map[string]bool{}
+	for _, file := range capability.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/cron/cron.go",
+		"internal/cron/register.go",
+		"internal/config/cron.go",
+		"internal/app/cron.go",
+		"internal/app/cron_test.go",
+		"internal/di/cron_provider.go",
+	} {
+		if !paths[want] {
+			t.Errorf("cron capability does not ship %s", want)
+		}
+	}
+	var providerSeam bool
+	for _, file := range capability.Files {
+		if file.Path == "internal/di/cron_provider.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom"
+		}
+	}
+	if !providerSeam {
+		t.Errorf("cron cron_provider.go is not guarded by when: [loom]: %+v", capability.Files)
+	}
+	markers := map[string]bool{}
+	for _, patch := range capability.Patches {
+		if patch.Path == "internal/config/config.go" {
+			markers[patch.Marker] = true
+		}
+		if patch.Path == "config.yml" && patch.Marker == "config" && patch.Bootstrap != "config.example.yml" {
+			t.Errorf("cron config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+		}
+	}
+	for _, want := range []string{"configfields", "configenv", "configdefaults"} {
+		if !markers[want] {
+			t.Errorf("cron does not patch the config.go %s extension point: %+v", want, capability.Patches)
+		}
+	}
+}
+
+// TestMailCapabilityLoads pins the mail capability's shape: it is additive, needs
+// only base and config, and declares its Loom provider seam guarded on loom.
+func TestMailCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("mail")
+	if err != nil {
+		t.Fatalf("Get mail: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
+	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+		t.Errorf("requires = %v, want %q", capability.Requires, want)
+	}
+	paths := map[string]bool{}
+	for _, file := range capability.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/config/mail.go",
+		"internal/mailsender/mailsender.go",
+		"internal/mailsender/mailsender_test.go",
+		"internal/di/mail_provider.go",
+	} {
+		if !paths[want] {
+			t.Errorf("mail capability does not ship %s", want)
+		}
+	}
+	var providerSeam bool
+	for _, file := range capability.Files {
+		if file.Path == "internal/di/mail_provider.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom"
+		}
+	}
+	if !providerSeam {
+		t.Errorf("mail mail_provider.go is not guarded by when: [loom]: %+v", capability.Files)
+	}
+}
+
+// TestStorageCapabilityLoads pins the storage capability's shape and its
+// guarded Loom provider seam, mirroring the redis contract.
+func TestStorageCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("storage")
+	if err != nil {
+		t.Fatalf("Get storage: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
+	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+		t.Errorf("requires = %v, want %q", capability.Requires, want)
+	}
+	paths := map[string]bool{}
+	for _, file := range capability.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/config/storage.go",
+		"internal/objectstore/objectstore.go",
+		"internal/objectstore/objectstore_test.go",
+		"internal/di/storage_provider.go",
+	} {
+		if !paths[want] {
+			t.Errorf("storage capability does not ship %s", want)
+		}
+	}
+	var providerSeam bool
+	for _, file := range capability.Files {
+		if file.Path == "internal/di/storage_provider.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom"
+		}
+	}
+	if !providerSeam {
+		t.Errorf("storage storage_provider.go is not guarded by when: [loom]: %+v", capability.Files)
+	}
+}
+
 func TestUnknownCapabilityErrors(t *testing.T) {
 	if _, err := Load().Get("nope"); err == nil {
 		t.Fatal("expected error for unknown capability")
@@ -282,6 +420,22 @@ func TestLoomCapabilityLoads(t *testing.T) {
 	}
 	if capability.DI == nil || capability.DI.Dir != "internal/di" || capability.DI.Source == "" {
 		t.Fatalf("loom DI spec = %+v", capability.DI)
+	}
+	paths := map[string]bool{}
+	for _, file := range capability.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/app/serve_loom.go",
+		"tools/loom/go.mod",
+		"tools/loom/go.sum",
+		"internal/di/mail_provider.go",
+		"internal/di/storage_provider.go",
+		"internal/di/cron_provider.go",
+	} {
+		if !paths[want] {
+			t.Errorf("loom capability does not ship %s", want)
+		}
 	}
 	var goversion, serve bool
 	for _, patch := range capability.Patches {
@@ -368,6 +522,43 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	}
 	if strings.Contains(string(withRedis), "func NewRedisClient") {
 		t.Errorf("redis graph defines NewRedisClient in di.go; the provider must live in redis_provider.go:\n%s", withRedis)
+	}
+
+	// Installing mail and storage declares their bindings but the default graph
+	// never depends on them, so Loom prunes them and the providers live in the
+	// stable mail_provider.go and storage_provider.go seams.
+	vars.Caps["mail"] = true
+	vars.Caps["storage"] = true
+	withAux, err := capability.RenderDIGraph(vars)
+	if err != nil {
+		t.Fatalf("RenderDIGraph(mail,storage): %v", err)
+	}
+	for _, want := range []string{"loom.Provide(NewMailSender)", "loom.Provide(NewObjectStore)"} {
+		if !strings.Contains(string(withAux), want) {
+			t.Errorf("mail+storage graph is missing %q:\n%s", want, withAux)
+		}
+	}
+	for _, forbidden := range []string{"func NewMailSender", "func NewObjectStore"} {
+		if strings.Contains(string(withAux), forbidden) {
+			t.Errorf("mail+storage graph defines %s in di.go; the provider must live in its stable seam:\n%s", forbidden, withAux)
+		}
+	}
+
+	// Installing cron is different: the graph root consumes the scheduler, so it
+	// is constructed and its lifecycle hooks run with the server rather than
+	// being pruned.
+	vars.Caps["cron"] = true
+	withCron, err := capability.RenderDIGraph(vars)
+	if err != nil {
+		t.Fatalf("RenderDIGraph(cron): %v", err)
+	}
+	for _, want := range []string{"loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler", "example.com/demo/internal/cron"} {
+		if !strings.Contains(string(withCron), want) {
+			t.Errorf("cron graph is missing %q:\n%s", want, withCron)
+		}
+	}
+	if strings.Contains(string(withCron), "func NewScheduler") {
+		t.Errorf("cron graph defines NewScheduler in di.go; the provider must live in cron_provider.go:\n%s", withCron)
 	}
 }
 
