@@ -542,7 +542,7 @@ func getJSON(t *testing.T, url string) []byte {
 // TestComposedMuxServesModulesWithoutSocket proves the graph registers every
 // installed business module on the composed mux, with no socket and no database.
 func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
-	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}({{if .Caps.Has "api"}}&config.Config{}, api.NewService(){{end}}{{range .Modules}}{{if $.Caps.Has "api"}}, {{end}}{{.Name}}FakeService{},{{end}})
+	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}({{if .Caps.Has "api"}}&config.Config{}, api.NewService(),{{end}}{{range .Modules}}{{.Name}}FakeService{},{{end}})
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, {{(index .Modules 0).Name}}.RoutePrefix, nil))
 	if recorder.Code != nethttp.StatusOK {
@@ -597,6 +597,7 @@ func TestDocumentIncludesBusinessModules(t *testing.T) {
 		t.Fatalf("validate composed OpenAPI: %v", err)
 	}
 	{{- range .Modules}}
+	{
 	module := document.Paths[{{.Name}}.RoutePrefix]
 	operation, ok := module["get"]
 	if !ok {
@@ -608,6 +609,7 @@ func TestDocumentIncludesBusinessModules(t *testing.T) {
 	data := operation.Responses["200"].Content["application/json"].Schema.Properties["data"].Properties
 	if data["module"] == nil || data["message"] == nil {
 		t.Fatalf("%s success data = %+v, want the module response fields", {{.Name}}.RoutePrefix, data)
+	}
 	}
 	{{- end}}
 }

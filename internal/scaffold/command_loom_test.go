@@ -505,6 +505,21 @@ func TestAddRefreshesUneditedDITest(t *testing.T) {
 	}
 }
 
+// TestTwoModulesKeepGeneratedDITestValid catches template argument delimiters
+// that a single-module project cannot expose. Both module routes must appear
+// in the real composed document with an opt-in development build.
+func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
+	loomToolAvailable(t)
+	dir := create(t, t.TempDir())
+	addModule(t, dir, "first")
+	addModule(t, dir, "second")
+	add(t, dir, "api")
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve generated project's dependencies (network/module cache unavailable)")
+	}
+	runGo(t, dir, "test", "-tags", "openapi", "./internal/api", "./internal/di")
+}
+
 // TestAddKeepsEditedDITestAndDocumentsTheBoundary proves the other half of the
 // seam: once the user has edited di_test.go it stays preserved across a later
 // module add too, and the add reports it. weld deliberately does not merge or
