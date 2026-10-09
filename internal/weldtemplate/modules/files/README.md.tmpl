@@ -31,6 +31,11 @@ things together stays readable because the work lives elsewhere.
 - `dto.go` and `params.go` hold the wire types, and a request type's `Validate`
   holds its rules, so no handler repeats a manual check.
 - `service.go` holds the business logic and the dependencies it needs.
+- A helper the handlers or the service need lives in this package, in a file
+  named for its concern (`username.go`, `random_password.go`), and stays
+  unexported while only this package uses it. A helper a second module needs
+  moves to a shared `internal/<domain>` package instead: this package is the
+  right home only while it has exactly one user.
 
 Keep the handler bodies out of `Register`: a route declared with an inline
 closure hides the surface and makes the logic untestable on its own.
@@ -44,9 +49,10 @@ composition root gives it:
 - `GET {prefix}/` — `httpx.NoInput`, a public route with no parameters.
 - `GET {prefix}/greet?name=Ada` — `httpx.Get`, which binds the query into
   `Request`.
-- `POST {prefix}/admin/items` — `httpx.Post` with `httpx.Policy(adminPolicy)`.
-  The named policy rejects an unauthenticated caller before the handler, the
-  JSON body is bound, and `CreateRequest.Validate` runs before the handler.
+- `POST {prefix}/admin/items` — `httpx.Post` with
+  `httpx.Policy(httpserver.PolicyAdmin)`. The named policy rejects an
+  unauthenticated caller before the handler, the JSON body is bound, and
+  `CreateRequest.Validate` runs before the handler.
 - `GET {prefix}/health` — `router.HandleFunc`, the raw escape hatch for a
   response that must stay unwrapped.
 
@@ -54,15 +60,16 @@ The module declares no mount prefix and no guard. `internal/httpserver.ModulePre
 returns the module's prefix (the versioned `APIPrefix/__modname__` by default) and
 the generated server graph mounts the module there, so the same module serves
 `/api/v1/__modname__` and `/api/v2/__modname__` without an edit; a module that owns
-its full paths is mounted at the root by returning `""`. `adminPolicy` is only a name: the composition root defines what the
-`"admin"` policy does (`httpserver.AdminGuard` by default), so authorization
-lives in exactly one place and every module shares it.
+its full paths is mounted at the root by returning `""`. `httpserver.PolicyAdmin`
+is only a name: the composition root defines what the `"admin"` policy does
+(`httpserver.AdminGuard` by default), so authorization lives in exactly one place
+and every module shares it.
 
 ## Authentication and authorization
 
-`adminPolicy` is a name, not a check. At startup the composition root resolves
-every referenced name into middleware through `httpx.Router.WithPolicy`, so the
-`"admin"` policy is defined once, in `internal/httpserver/policy.go`
+`httpserver.PolicyAdmin` is a name, not a check. At startup the composition root
+resolves every referenced name into middleware through `httpx.Router.WithPolicy`,
+so the `"admin"` policy is defined once, in `internal/httpserver/policy.go`
 (`AdminGuard`), and shared by every module; the server graph mounts it in
 `internal/di/di.go`.
 

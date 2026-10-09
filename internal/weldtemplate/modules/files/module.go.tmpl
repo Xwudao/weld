@@ -24,9 +24,11 @@
 //
 // The module declares only relative paths; the composition root owns the mount
 // prefix, so the same module can serve /api/v1/__modname__ and /api/v2/__modname__
-// without an edit here. Administrator routes carry httpx.Policy, a named policy
-// the composition root defines once; this package never implements a guard, so
-// authorization policy lives in one place.
+// without an edit here. Administrator routes carry the project's named policy,
+// httpx.Policy(httpserver.PolicyAdmin): this package references the constant the
+// composition root defines in internal/httpserver/policy.go rather than repeating
+// the string, so the name lives in one place and a rename is a compile error here.
+// This package never implements a guard.
 //
 // The handlers themselves live in handler.go, and this file is the route table:
 // one statement per route, with the handler named rather than inlined, so the
@@ -47,6 +49,7 @@ package __modname__
 import (
 	nethttp "net/http"
 
+	"__module__/internal/httpserver"
 	"__module__/internal/httpx"
 )
 
@@ -55,18 +58,18 @@ import (
 // package declares only relative paths.
 const Name = "__modname__"
 
-// adminPolicy is the named policy the module's administrator routes require. The
-// composition root defines what the policy does (see the generated server graph
-// and internal/httpserver); this package only references the name. Referencing
-// an undefined policy fails at startup rather than serving the route unguarded.
-const adminPolicy = "admin"
-
 // Register installs the module's routes on router.
 //
 // Each route is declared once: the method, the relative path, the handler and
 // any policy are together, so there is no separate route table to keep in sync.
 // The handler is named rather than inlined — its body lives in handler.go — so
 // this function reads as the module's route table.
+//
+// The policy names are the project's: a route references httpserver.PolicyAdmin
+// (internal/httpserver/policy.go) rather than repeating the string, and the
+// composition root resolves the name to the guard. Referencing a name the
+// composition root never defines panics at startup rather than serving the route
+// unguarded.
 //
 // It takes the Service rather than constructing one, so the caller owns the
 // module's dependencies and a test can inject a fake. The Loom server graph
@@ -80,7 +83,7 @@ const adminPolicy = "admin"
 //
 //	public := router.Group("/v1/widget")
 //	public.Get("/all", handler)
-//	admin := router.Group("/admin/v1/widget").Require(adminPolicy)
+//	admin := router.Group("/admin/v1/widget").Require(httpserver.PolicyAdmin)
 //	admin.Post("/create", handler)
 func Register(router *httpx.Router, service Service) {
 	// GET {prefix}/ — public, no input.
@@ -92,7 +95,7 @@ func Register(router *httpx.Router, service Service) {
 	// POST {prefix}/admin/items — administrator. The named policy rejects an
 	// unauthenticated caller before the handler runs; the JSON body is bound and
 	// validated, then handleCreateItem creates the item.
-	httpx.Post(router, "/admin/items", handleCreateItem(service), httpx.Policy(adminPolicy), httpx.WithStatus(nethttp.StatusCreated))
+	httpx.Post(router, "/admin/items", handleCreateItem(service), httpx.Policy(httpserver.PolicyAdmin), httpx.WithStatus(nethttp.StatusCreated))
 
 	// GET {prefix}/health — the raw escape hatch: a response that must not be
 	// wrapped in the JSON envelope. The raw Get method keeps the method out of the

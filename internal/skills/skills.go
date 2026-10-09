@@ -358,7 +358,10 @@ func writeModules(b *strings.Builder, manifest *project.Manifest) {
 	b.WriteString("packages untouched. Each module keeps `module.go` a route table — one statement\n")
 	b.WriteString("per route, the handler named rather than inlined — and the handler bodies in\n")
 	b.WriteString("`handler.go`; follow that split when you add a route, so the module's surface\n")
-	b.WriteString("stays legible and each handler stays testable on its own.\n\n")
+	b.WriteString("stays legible and each handler stays testable on its own. A route that needs a\n")
+	b.WriteString("named policy references the project's constant (`httpserver.PolicyAdmin`)\n")
+	b.WriteString("rather than repeating the string, so a rename is a compile error rather than an\n")
+	b.WriteString("undefined policy at startup.\n\n")
 	for _, module := range manifest.Modules {
 		fmt.Fprintf(b, "- **%s** v%s — `internal/modules/%s`, mounted by the server graph under `httpserver.APIPrefix` (so `/api/%s` by default).\n", module.Name, module.Version, module.Name, module.Name)
 	}

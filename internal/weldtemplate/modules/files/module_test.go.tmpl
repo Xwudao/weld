@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"__module__/internal/httpserver"
 	"__module__/internal/httpx"
 )
 
@@ -26,7 +27,7 @@ type envelope struct {
 func newTestMux() *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 	router := httpx.NewRouter(mux).
-		WithPolicy(adminPolicy, testAdminGuard).
+		WithPolicy(httpserver.PolicyAdmin, testAdminGuard).
 		Group(testPrefix)
 	Register(router, NewDemoService())
 	return mux

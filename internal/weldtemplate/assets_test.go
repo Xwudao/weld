@@ -885,6 +885,18 @@ func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
 	}
 	module := read("modules/files/module.go.tmpl")
 	moduleHandler := read("modules/files/handler.go.tmpl")
+	// The module references the project's policy constant rather than repeating
+	// the policy name: internal/httpserver/policy.go is the one place a policy
+	// name is written, so a rename is a compile error in the module, not an
+	// undefined policy at startup.
+	for _, want := range []string{"httpserver.PolicyAdmin", `"__module__/internal/httpserver"`} {
+		if !strings.Contains(module, want) {
+			t.Errorf("the module template does not reference %q", want)
+		}
+	}
+	if strings.Contains(module, `const adminPolicy`) {
+		t.Error("the module template redeclares the policy name instead of referencing httpserver.PolicyAdmin")
+	}
 	for _, want := range []string{"httpx.NoInput(", "httpx.Get(", "httpx.Post(", "httpx.Policy(", "handleIndex(service)", "handleGreet(service)", "handleCreateItem(service)", "handleHealth"} {
 		if !strings.Contains(module, want) {
 			t.Errorf("the module template is missing %q", want)
