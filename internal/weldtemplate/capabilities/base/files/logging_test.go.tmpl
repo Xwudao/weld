@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeWriter records how many times a logger wrote, so a test can assert on the
@@ -82,5 +83,67 @@ func TestNewLogsErrorAttribute(t *testing.T) {
 	}
 	if record["level"] != "ERROR" || record["msg"] != "command failed" || record["error"] != "boom" {
 		t.Fatalf("record = %v", record)
+	}
+}
+
+// TestNewFormatsTextRecordTime pins the text handler's time: time.DateTime, the
+// date and local wall clock to the second, without slog's RFC 3339 "T" separator
+// or zone offset. slog quotes a value containing a space, so the field reads
+// time="2006-01-02 15:04:05".
+func TestNewFormatsTextRecordTime(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).Info("hello")
+	_, rest, ok := strings.Cut(w.String(), `time="`)
+	if !ok {
+		t.Fatalf("text record has no quoted time field:\n%s", w.String())
+	}
+	got, _, ok := strings.Cut(rest, `"`)
+	if !ok {
+		t.Fatalf("text record time is not terminated:\n%s", w.String())
+	}
+	if _, err := time.Parse(timeLayout, got); err != nil {
+		t.Fatalf("time %q does not match timeLayout: %v", got, err)
+	}
+	if strings.ContainsAny(got, "TZ+") {
+		t.Fatalf("time %q still carries the RFC 3339 separator or zone offset", got)
+	}
+}
+
+// TestNewKeepsRFC3339TimeInJSON pins the JSON handler's timestamp as RFC 3339: a
+// log pipeline parses it, so the text layout stays a text-only concern.
+func TestNewKeepsRFC3339TimeInJSON(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, JSONFormat, nil).Info("hello")
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(w.String())), &record); err != nil {
+		t.Fatalf("record is not JSON: %v\n%s", err, w.String())
+	}
+	ts, _ := record["time"].(string)
+	if _, err := time.Parse(time.RFC3339Nano, ts); err != nil {
+		t.Fatalf("json time %q is not RFC 3339: %v", ts, err)
+	}
+}
+
+// TestNewTextHonoursCallerReplaceAttr proves the caller's ReplaceAttr runs first:
+// an attribute it drops is not resurrected, and New does not mutate the options it
+// was handed.
+func TestNewTextHonoursCallerReplaceAttr(t *testing.T) {
+	w := &fakeWriter{}
+	options := &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+		return a
+	}}
+	New(w, TextFormat, options).Info("hello")
+	out := w.String()
+	if strings.Contains(out, "time=") {
+		t.Fatalf("caller's ReplaceAttr did not drop the time:\n%s", out)
+	}
+	if !strings.Contains(out, "msg=hello") {
+		t.Fatalf("record lost its message:\n%s", out)
+	}
+	if options.ReplaceAttr == nil {
+		t.Fatal("New mutated the caller's HandlerOptions")
 	}
 }

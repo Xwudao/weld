@@ -9,6 +9,7 @@ package logging
 import (
 	"io"
 	"log/slog"
+	"time"
 )
 
 // Format selects how a logger encodes records.
@@ -21,11 +22,19 @@ const (
 	JSONFormat Format = "json"
 )
 
+// timeLayout is how the text handler renders a record's time: time.DateTime, the
+// date and local wall clock to the second, without slog's RFC 3339 "T" separator
+// and zone offset. The JSON handler keeps slog's RFC 3339 timestamp, which a log
+// pipeline parses.
+const timeLayout = time.DateTime
+
 // New returns a *slog.Logger that writes records to w.
 //
 // format selects the handler encoding; any value other than JSONFormat selects
 // the text handler, so the zero Format is a working default. options configures
 // the handler — for example its Level — and a nil options uses slog's defaults.
+// The text handler renders the time with timeLayout; a caller's own ReplaceAttr,
+// if any, still runs first.
 func New(w io.Writer, format Format, options *slog.HandlerOptions) *slog.Logger {
 	if options == nil {
 		options = &slog.HandlerOptions{}
@@ -33,5 +42,25 @@ func New(w io.Writer, format Format, options *slog.HandlerOptions) *slog.Logger 
 	if format == JSONFormat {
 		return slog.New(slog.NewJSONHandler(w, options))
 	}
-	return slog.New(slog.NewTextHandler(w, options))
+	textOptions := *options
+	textOptions.ReplaceAttr = textTime(textOptions.ReplaceAttr)
+	return slog.New(slog.NewTextHandler(w, &textOptions))
+}
+
+// textTime returns a ReplaceAttr for the text handler that renders a record's
+// time with timeLayout. It calls next first, so a caller that supplied its own
+// ReplaceAttr keeps control: an attribute it drops stays dropped, and the time is
+// reformatted only while it is still the handler's time.Time.
+func textTime(next func([]string, slog.Attr) slog.Attr) func([]string, slog.Attr) slog.Attr {
+	return func(groups []string, a slog.Attr) slog.Attr {
+		if next != nil {
+			a = next(groups, a)
+		}
+		if len(groups) == 0 && a.Key == slog.TimeKey {
+			if t, ok := a.Value.Any().(time.Time); ok {
+				return slog.String(slog.TimeKey, t.Format(timeLayout))
+			}
+		}
+		return a
+	}
 }
