@@ -1,0 +1,15 @@
+package __modname__
+
+// Request is the input to the module's Service. Its fields are populated from
+// the request (here the ?name= query parameter). Add validation in the handler
+// or the service when a real endpoint needs it.
+type Request struct {
+	Name string
+}
+
+// Response is the module's typed output. The handler wraps it in the shared
+// {code,msg,data} envelope from internal/httpx before it is written.
+type Response struct {
+	Module  string `json:"module"`
+	Message string `json:"message"`
+}

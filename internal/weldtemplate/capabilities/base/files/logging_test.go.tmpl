@@ -1,0 +1,86 @@
+package logging
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"strings"
+	"testing"
+)
+
+// fakeWriter records how many times a logger wrote, so a test can assert on the
+// injected sink without touching the process streams.
+type fakeWriter struct {
+	bytes.Buffer
+	Writes int
+}
+
+func (w *fakeWriter) Write(p []byte) (int, error) {
+	w.Writes++
+	return w.Buffer.Write(p)
+}
+
+func TestNewWritesTextRecords(t *testing.T) {
+	w := &fakeWriter{}
+	logger := New(w, TextFormat, nil)
+	logger.Info("listening", "addr", ":8080")
+	out := w.String()
+	for _, want := range []string{"level=INFO", "msg=listening", "addr=:8080"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("text record is missing %q:\n%s", want, out)
+		}
+	}
+	if w.Writes == 0 {
+		t.Fatal("logger did not write to the injected writer")
+	}
+}
+
+func TestNewWritesJSONRecords(t *testing.T) {
+	w := &fakeWriter{}
+	logger := New(w, JSONFormat, nil)
+	logger.Info("listening", "addr", ":8080")
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(w.String())), &record); err != nil {
+		t.Fatalf("record is not JSON: %v\n%s", err, w.String())
+	}
+	if record["level"] != "INFO" || record["msg"] != "listening" || record["addr"] != ":8080" {
+		t.Fatalf("record = %v", record)
+	}
+}
+
+func TestNewUnknownFormatFallsBackToText(t *testing.T) {
+	w := &fakeWriter{}
+	logger := New(w, Format("yaml"), nil)
+	logger.Info("hello")
+	if out := w.String(); !strings.Contains(out, "msg=hello") {
+		t.Fatalf("unknown format did not fall back to text:\n%s", out)
+	}
+}
+
+func TestNewRespectsHandlerLevel(t *testing.T) {
+	w := &fakeWriter{}
+	logger := New(w, TextFormat, &slog.HandlerOptions{Level: slog.LevelWarn})
+	logger.Info("quiet")
+	logger.Warn("loud")
+	out := w.String()
+	if strings.Contains(out, "quiet") {
+		t.Fatalf("logger emitted a record below the configured level:\n%s", out)
+	}
+	if !strings.Contains(out, "loud") {
+		t.Fatalf("logger filtered a record at the configured level:\n%s", out)
+	}
+}
+
+func TestNewLogsErrorAttribute(t *testing.T) {
+	w := &fakeWriter{}
+	logger := New(w, JSONFormat, nil)
+	logger.Error("command failed", "error", errors.New("boom"))
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(w.String())), &record); err != nil {
+		t.Fatalf("record is not JSON: %v\n%s", err, w.String())
+	}
+	if record["level"] != "ERROR" || record["msg"] != "command failed" || record["error"] != "boom" {
+		t.Fatalf("record = %v", record)
+	}
+}

@@ -1,0 +1,129 @@
+package httpx
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"mime"
+	"net/http"
+	"strconv"
+	"strings"
+)
+
+// DefaultMaxBytes is the request body limit a caller selects by passing zero to
+// DecodeJSON. One mebibyte is generous for a JSON API and small enough that a
+// streaming client cannot exhaust memory.
+const DefaultMaxBytes = 1 << 20
+
+// DecodeError is a request-binding failure together with the HTTP transport
+// status it maps to and a message that is safe to send to the client.
+//
+// The status is a real transport status (400, 413, 415), never an invented
+// business code; WriteError turns it into the response envelope.
+type DecodeError struct {
+	Status  int
+	Message string
+}
+
+func (e *DecodeError) Error() string { return e.Message }
+
+// DecodeJSON decodes exactly one JSON value of type T from r.Body.
+//
+// It rejects, in order, a request whose Content-Type is not JSON (415), a body
+// larger than maxBytes (413), malformed or empty JSON (400), a second JSON
+// value or trailing data after the first (400), an unknown object field (400),
+// and finally a validator failure (400). A zero maxBytes selects
+// DefaultMaxBytes.
+//
+// validate is optional (nil skips it). When set it is the code-first validator
+// callback: it runs after a successful decode and its error is returned as a
+// client-safe 400. This is how the API wires its go-validate Spec in without
+// this package depending on go-validate.
+func DecodeJSON[T any](r *http.Request, maxBytes int64, validate func(T) error) (T, error) {
+	var value T
+	if err := checkJSONContentType(r.Header.Get("Content-Type")); err != nil {
+		return value, err
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	if err != nil {
+		return value, &DecodeError{Status: http.StatusBadRequest, Message: "could not read request body"}
+	}
+	if int64(len(data)) > maxBytes {
+		return value, &DecodeError{Status: http.StatusRequestEntityTooLarge, Message: "request body too large"}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return value, &DecodeError{Status: http.StatusBadRequest, Message: jsonMessage(err)}
+	}
+	if err := rejectTrailingValue(decoder); err != nil {
+		return value, err
+	}
+	if validate != nil {
+		if err := validate(value); err != nil {
+			return value, &DecodeError{Status: http.StatusBadRequest, Message: err.Error()}
+		}
+	}
+	return value, nil
+}
+
+// QueryInt returns the named query parameter as an int.
+//
+// present reports whether the parameter was given, so a caller can tell "unset"
+// from an explicit zero. A present but non-integer value is a 400 *DecodeError.
+// It exists because a typed integer with absence semantics is genuinely useful;
+// a raw string parameter is read directly with r.URL.Query().Get and a path
+// parameter with r.PathValue, so no further path helper is provided.
+func QueryInt(r *http.Request, name string) (value int, present bool, err error) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return 0, false, nil
+	}
+	parsed, parseErr := strconv.Atoi(raw)
+	if parseErr != nil {
+		return 0, true, &DecodeError{Status: http.StatusBadRequest, Message: name + " must be an integer"}
+	}
+	return parsed, true, nil
+}
+
+// checkJSONContentType enforces a JSON media type, accepting the structured
+// suffix form (application/problem+json) as well. A missing or non-JSON
+// Content-Type is rejected so a form post or a browser simple request cannot be
+// mistaken for a JSON body.
+func checkJSONContentType(contentType string) error {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
+		return &DecodeError{Status: http.StatusUnsupportedMediaType, Message: "Content-Type must be application/json"}
+	}
+	return nil
+}
+
+// rejectTrailingValue fails when the body holds a second JSON value or any
+// trailing non-whitespace data after the first, so a request cannot smuggle a
+// second payload past the decoder.
+func rejectTrailingValue(decoder *json.Decoder) error {
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return &DecodeError{Status: http.StatusBadRequest, Message: "request body must contain exactly one JSON value"}
+	}
+	return nil
+}
+
+// jsonMessage maps a JSON decoder failure to a client-safe message. It never
+// echoes the raw error, which can quote internal type or field information.
+func jsonMessage(err error) string {
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &typeErr):
+		return "request body has a field of the wrong type"
+	case strings.Contains(err.Error(), "unknown field"):
+		return "request body has an unknown field"
+	case errors.Is(err, io.EOF):
+		return "request body is empty"
+	default:
+		return "request body is not valid JSON"
+	}
+}

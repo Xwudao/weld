@@ -1,0 +1,181 @@
+package httpx
+
+import (
+	"bufio"
+	"bytes"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// This file covers the composable middleware: the outer-to-inner Chain order,
+// the request-id, access-log and recovery middlewares, and the optional
+// ResponseWriter interfaces a streaming response depends on.
+
+func testLogger(sink *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(sink, nil))
+}
+
+func TestChainAppliesMiddlewaresOutermostFirst(t *testing.T) {
+	var order []string
+	tag := func(name string) Middleware {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				order = append(order, name)
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+	handler := Chain(tag("outer"), tag("inner"))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		order = append(order, "handler")
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := strings.Join(order, ","); got != "outer,inner,handler" {
+		t.Fatalf("order = %q, want outer,inner,handler", got)
+	}
+	if empty := Chain()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { order = append(order, "passthrough") })); empty == nil {
+		t.Fatal("Chain() returned nil")
+	}
+}
+
+func TestRequestIDAssignsReusesAndEchoes(t *testing.T) {
+	var seen string
+	handler := RequestID()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = RequestIDFrom(r.Context())
+	}))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	generated := recorder.Header().Get(RequestIDHeader)
+	if generated == "" || seen != generated {
+		t.Fatalf("generated id = %q, context id = %q", generated, seen)
+	}
+
+	recorder = httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set(RequestIDHeader, "client-supplied-1")
+	handler.ServeHTTP(recorder, request)
+	if got := recorder.Header().Get(RequestIDHeader); got != "client-supplied-1" {
+		t.Fatalf("well-formed inbound id was not reused: %q", got)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set(RequestIDHeader, "bad id with spaces")
+	handler.ServeHTTP(recorder, request)
+	if got := recorder.Header().Get(RequestIDHeader); got == "bad id with spaces" || got == "" {
+		t.Fatalf("malformed inbound id was not replaced: %q", got)
+	}
+}
+
+func TestAccessLogRecordsStatusWithoutTheBody(t *testing.T) {
+	var sink bytes.Buffer
+	handler := Chain(RequestID(), AccessLog(testLogger(&sink)))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("super-secret-body"))
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/items?token=super-secret-query", nil))
+
+	out := sink.String()
+	for _, want := range []string{"method=GET", "path=/items", "status=200"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("access log is missing %q:\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"super-secret-body", "super-secret-query"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("access log leaked %q:\n%s", forbidden, out)
+		}
+	}
+	if strings.Contains(out, "request_id= ") {
+		t.Errorf("access log did not carry the request id:\n%s", out)
+	}
+}
+
+func TestRecoverTurnsPanicIntoARedacted500(t *testing.T) {
+	var sink bytes.Buffer
+	handler := Chain(RequestID(), Recover(testLogger(&sink)))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("secret panic detail")
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/panics", nil))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), `"msg":"internal error"`) {
+		t.Fatalf("body = %s, want the internal-error envelope", recorder.Body)
+	}
+	if strings.Contains(recorder.Body.String(), "secret panic detail") {
+		t.Fatalf("the panic detail leaked to the client: %s", recorder.Body)
+	}
+	if !strings.Contains(sink.String(), "panic") {
+		t.Fatalf("the panic was not logged server-side:\n%s", sink.String())
+	}
+}
+
+func TestRecoverAbortsInsteadOfAppendingEnvelopeAfterPartialWrite(t *testing.T) {
+	var sink bytes.Buffer
+	handler := Chain(AccessLog(testLogger(&sink)), Recover(testLogger(&sink)))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial stream"))
+		panic("stream failure")
+	}))
+	recorder := httptest.NewRecorder()
+	defer func() {
+		if got := recover(); got != http.ErrAbortHandler {
+			t.Fatalf("panic = %v, want ErrAbortHandler after committed response", got)
+		}
+		if body := recorder.Body.String(); body != "partial stream" {
+			t.Fatalf("partial response was corrupted by an error envelope: %q", body)
+		}
+	}()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/stream", nil))
+}
+
+func TestAccessLogPreservesOptionalInterfaces(t *testing.T) {
+	flushing := httptest.NewRecorder()
+	flushHandler := AccessLog(testLogger(&bytes.Buffer{}))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("the response recorder dropped the Flusher interface")
+			return
+		}
+		flusher.Flush()
+	}))
+	flushHandler.ServeHTTP(flushing, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !flushing.Flushed {
+		t.Fatal("Flush was not forwarded through the response recorder")
+	}
+
+	hijacking := &hijackRecorder{ResponseRecorder: httptest.NewRecorder()}
+	hijackHandler := AccessLog(testLogger(&bytes.Buffer{}))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("the response recorder dropped the Hijacker interface")
+			return
+		}
+		if _, _, err := hijacker.Hijack(); err != nil {
+			t.Errorf("Hijack: %v", err)
+		}
+	}))
+	hijackHandler.ServeHTTP(hijacking, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !hijacking.hijacked {
+		t.Fatal("Hijack was not forwarded through the response recorder")
+	}
+}
+
+// hijackRecorder is a ResponseWriter that also implements http.Hijacker, so the
+// test can prove AccessLog forwards the optional interface it wraps.
+type hijackRecorder struct {
+	*httptest.ResponseRecorder
+	hijacked bool
+}
+
+func (h *hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h.hijacked = true
+	return nil, nil, nil
+}

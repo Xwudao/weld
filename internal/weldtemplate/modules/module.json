@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "files": [
+    { "path": "internal/modules/__modname__/dto.go", "source": "files/dto.go.tmpl" },
+    { "path": "internal/modules/__modname__/service.go", "source": "files/service.go.tmpl" },
+    { "path": "internal/modules/__modname__/module.go", "source": "files/module.go.tmpl" },
+    { "path": "internal/modules/__modname__/module_test.go", "source": "files/module_test.go.tmpl" },
+    { "path": "internal/modules/__modname__/README.md", "source": "files/README.md.tmpl" }
+  ]
+}

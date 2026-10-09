@@ -1,0 +1,243 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"__module__/internal/httpx"
+)
+
+// fakeService is the injectable Service used to exercise the handler without a
+// database. err forces the failure path; created records what reached the
+// service.
+type fakeService struct {
+	created []CreateItemRequest
+	items   map[string]ItemResponse
+	err     error
+}
+
+func newFakeService() *fakeService {
+	return &fakeService{items: map[string]ItemResponse{}}
+}
+
+func (f *fakeService) Create(_ context.Context, req CreateItemRequest) (ItemResponse, error) {
+	if f.err != nil {
+		return ItemResponse{}, f.err
+	}
+	f.created = append(f.created, req)
+	item := ItemResponse{ID: "item-1", Name: req.Name, Quantity: req.Quantity, Status: req.Status}
+	f.items[item.ID] = item
+	return item, nil
+}
+
+func (f *fakeService) List(_ context.Context, limit int) ([]ItemResponse, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	items := make([]ItemResponse, 0, len(f.items))
+	for _, item := range f.items {
+		items = append(items, item)
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+func (f *fakeService) Get(_ context.Context, id string) (ItemResponse, error) {
+	if f.err != nil {
+		return ItemResponse{}, f.err
+	}
+	item, ok := f.items[id]
+	if !ok {
+		return ItemResponse{}, ErrNotFound
+	}
+	return item, nil
+}
+
+// envelope is the decoded response body: the {code,msg,data} shape httpx writes.
+type envelope struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data json.RawMessage `json:"data"`
+}
+
+func serve(t *testing.T, handler http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return serveWithContentType(t, handler, method, target, "application/json", body)
+}
+
+func serveWithContentType(t *testing.T, handler http.Handler, method, target, contentType, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	request := httptest.NewRequest(method, target, reader)
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func decodeEnvelope(t *testing.T, recorder *httptest.ResponseRecorder) envelope {
+	t.Helper()
+	var body envelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v (%s)", err, recorder.Body)
+	}
+	return body
+}
+
+func TestCreateItemSucceeds(t *testing.T) {
+	service := newFakeService()
+	recorder := serve(t, Handler(service), http.MethodPost, "/api/items", `{"name":"widget","quantity":3,"status":"active"}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusCreated, recorder.Body)
+	}
+	body := decodeEnvelope(t, recorder)
+	if body.Code != http.StatusCreated || body.Msg != httpx.SuccessMsg {
+		t.Fatalf("envelope = %+v", body)
+	}
+	var item ItemResponse
+	if err := json.Unmarshal(body.Data, &item); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if item.ID == "" || item.Status != ItemStatusActive {
+		t.Fatalf("item = %+v", item)
+	}
+	if len(service.created) != 1 || service.created[0].Status != ItemStatusActive {
+		t.Fatalf("service did not receive the request: %+v", service.created)
+	}
+}
+
+func TestCreateItemRejectsInvalidRequest(t *testing.T) {
+	cases := map[string]string{
+		"empty name":     `{"name":"","quantity":1,"status":"active"}`,
+		"zero quantity":  `{"name":"widget","quantity":0,"status":"active"}`,
+		"quantity over":  `{"name":"widget","quantity":99999,"status":"active"}`,
+		"unknown status": `{"name":"widget","quantity":1,"status":"bogus"}`,
+		"missing status": `{"name":"widget","quantity":1}`,
+		"unknown field":  `{"name":"widget","quantity":1,"status":"active","extra":true}`,
+		"trailing json":  `{"name":"widget","quantity":1,"status":"active"}{"name":"widget"}`,
+		"bad json":       `{`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			recorder := serve(t, Handler(newFakeService()), http.MethodPost, "/api/items", body)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body)
+			}
+			failure := decodeEnvelope(t, recorder)
+			if failure.Code != http.StatusBadRequest || failure.Msg == "" {
+				t.Fatalf("envelope = %+v, want a coded message", failure)
+			}
+			if string(failure.Data) != "null" {
+				t.Fatalf("error data = %s, want null", failure.Data)
+			}
+		})
+	}
+}
+
+func TestCreateItemRejectsWrongContentType(t *testing.T) {
+	recorder := serveWithContentType(t, Handler(newFakeService()), http.MethodPost, "/api/items", "text/plain", `{"name":"widget","quantity":1,"status":"active"}`)
+	if recorder.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnsupportedMediaType)
+	}
+}
+
+func TestCreateItemRejectsOversizedBody(t *testing.T) {
+	body := `{"name":"` + strings.Repeat("a", httpx.DefaultMaxBytes+1) + `"}`
+	recorder := serve(t, Handler(newFakeService()), http.MethodPost, "/api/items", body)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestGetItemSucceeds(t *testing.T) {
+	service := newFakeService()
+	service.items["item-1"] = ItemResponse{ID: "item-1", Name: "widget", Quantity: 2, Status: ItemStatusDraft}
+	recorder := serve(t, Handler(service), http.MethodGet, "/api/items/item-1", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	var item ItemResponse
+	if err := json.Unmarshal(decodeEnvelope(t, recorder).Data, &item); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if item.ID != "item-1" {
+		t.Fatalf("item = %+v", item)
+	}
+}
+
+func TestGetItemNotFound(t *testing.T) {
+	recorder := serve(t, Handler(newFakeService()), http.MethodGet, "/api/items/missing", "")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestListItemsValidatesLimit(t *testing.T) {
+	handler := Handler(newFakeService())
+	if recorder := serve(t, handler, http.MethodGet, "/api/items?limit=0", ""); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("limit=0 status = %d, want 400", recorder.Code)
+	}
+	if recorder := serve(t, handler, http.MethodGet, "/api/items?limit=abc", ""); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("limit=abc status = %d, want 400", recorder.Code)
+	}
+	if recorder := serve(t, handler, http.MethodGet, "/api/items?limit=5", ""); recorder.Code != http.StatusOK {
+		t.Fatalf("limit=5 status = %d, want 200", recorder.Code)
+	}
+	if recorder := serve(t, handler, http.MethodGet, "/api/items", ""); recorder.Code != http.StatusOK {
+		t.Fatalf("default limit status = %d, want 200", recorder.Code)
+	}
+}
+
+func TestInternalErrorIsNotLeaked(t *testing.T) {
+	service := newFakeService()
+	service.err = errors.New("storage exploded")
+	recorder := serve(t, Handler(service), http.MethodGet, "/api/items/item-1", "")
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", recorder.Code)
+	}
+	failure := decodeEnvelope(t, recorder)
+	if failure.Msg != httpx.ErrorMsg || failure.Code != http.StatusInternalServerError {
+		t.Fatalf("envelope = %+v, want the fixed internal-error message", failure)
+	}
+	if strings.Contains(recorder.Body.String(), "storage exploded") {
+		t.Fatalf("internal error leaked: %s", recorder.Body)
+	}
+	if string(failure.Data) != "null" {
+		t.Fatalf("error data = %s, want null", failure.Data)
+	}
+}
+
+// TestOpenAPIEndpointServesRawDocument proves the OpenAPI artifact is not
+// wrapped: tooling must receive the document itself.
+func TestOpenAPIEndpointServesRawDocument(t *testing.T) {
+	recorder := serve(t, Handler(newFakeService()), http.MethodGet, "/api/openapi.json", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("content-type = %q, want application/json", got)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
+		t.Fatalf("document is not JSON: %v", err)
+	}
+	if document["openapi"] != openAPIVersion {
+		t.Fatalf("openapi = %v, want %s", document["openapi"], openAPIVersion)
+	}
+	if _, wrapped := document["code"]; wrapped {
+		t.Fatalf("the OpenAPI document was wrapped in the response envelope: %v", document)
+	}
+}

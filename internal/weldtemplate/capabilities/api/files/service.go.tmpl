@@ -1,0 +1,84 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"sync"
+)
+
+// ErrNotFound is returned by a Service when an item does not exist. The handler
+// maps it to 404.
+var ErrNotFound = errors.New("item not found")
+
+// Service is the storage the API depends on. It is a small interface so a test
+// can inject a fake without a database and a real implementation can replace
+// the in-memory one without touching the HTTP layer.
+//
+// The interface speaks the API DTOs directly, so no persistence model leaks
+// through the contract.
+type Service interface {
+	Create(ctx context.Context, req CreateItemRequest) (ItemResponse, error)
+	List(ctx context.Context, limit int) ([]ItemResponse, error)
+	Get(ctx context.Context, id string) (ItemResponse, error)
+}
+
+// memoryService is the default in-memory Service: the development demo. It
+// exists so the scaffolded API runs with no database; it is not a persistence
+// layer, holds no state beyond the process, and loses every item on restart.
+// Installing the db capability does not replace it automatically.
+type memoryService struct {
+	mu    sync.Mutex
+	next  int
+	items map[string]ItemResponse
+}
+
+// NewService returns the default in-memory Service, the development demo. Data
+// is lost on restart and no database is required; wire a persistent Service in
+// yourself when you need one.
+func NewService() Service {
+	return &memoryService{items: map[string]ItemResponse{}}
+}
+
+func (s *memoryService) Create(_ context.Context, req CreateItemRequest) (ItemResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.next++
+	item := ItemResponse{
+		ID:       fmt.Sprintf("item-%d", s.next),
+		Name:     req.Name,
+		Quantity: req.Quantity,
+		Status:   req.Status,
+	}
+	s.items[item.ID] = item
+	return item, nil
+}
+
+func (s *memoryService) List(_ context.Context, limit int) ([]ItemResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.items))
+	for id := range s.items {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	items := make([]ItemResponse, 0, len(ids))
+	for _, id := range ids {
+		if len(items) >= limit {
+			break
+		}
+		items = append(items, s.items[id])
+	}
+	return items, nil
+}
+
+func (s *memoryService) Get(_ context.Context, id string) (ItemResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[id]
+	if !ok {
+		return ItemResponse{}, ErrNotFound
+	}
+	return item, nil
+}

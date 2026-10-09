@@ -1,0 +1,7 @@
+	// weld:storage:installed __version__
+	// The AWS SDK for Go v2 is the S3 client the generated objectstore package
+	// builds. Only the core, credentials and S3 service modules are required;
+	// the SDK's transitive dependencies are resolved by go mod tidy.
+	require github.com/aws/aws-sdk-go-v2 v1.47.2
+	require github.com/aws/aws-sdk-go-v2/credentials v1.20.8
+	require github.com/aws/aws-sdk-go-v2/service/s3 v1.114.2

@@ -1,0 +1,44 @@
+// Package httpserver owns the HTTP surface of __name__: the server lifecycle
+// and the composable handler builder.
+//
+// The base CLI never imports this package. The http capability installs it and
+// the Loom server graph (internal/di) composes the routes — the JSON API, the
+// business modules and the SPA — into the mux it serves. NewHandler and Chain
+// remain the injectable seam a test uses to exercise a mux and the middleware
+// chain without a socket.
+package httpserver
+
+import (
+	"log/slog"
+	nethttp "net/http"
+
+	"__module__/internal/httpx"
+)
+
+// Route installs one capability's routes on the application mux.
+type Route func(mux *nethttp.ServeMux)
+
+// Chain applies the application middleware chain to handler.
+//
+// It is the single composition point for middleware: the Loom server graph
+// wraps the mux it builds with it, and NewHandler uses it for injected routes,
+// so every composition serves identical middleware semantics. The stack it
+// applies is declared in middleware.go, the stable project-owned configuration
+// file.
+func Chain(logger *slog.Logger, handler nethttp.Handler) nethttp.Handler {
+	return httpx.Chain(middlewareChain(logger)...)(handler)
+}
+
+// NewHandler builds a handler from the given routes.
+//
+// It is the injectable seam for tests: pass routes directly to exercise the mux
+// — and the real middleware chain — without installing a capability or opening
+// a socket. Production composition happens in the Loom server graph, which
+// registers the API and the business modules on its own mux.
+func NewHandler(logger *slog.Logger, routes ...Route) nethttp.Handler {
+	mux := nethttp.NewServeMux()
+	for _, route := range routes {
+		route(mux)
+	}
+	return Chain(logger, mux)
+}

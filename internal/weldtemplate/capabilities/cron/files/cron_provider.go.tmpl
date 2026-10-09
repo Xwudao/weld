@@ -1,0 +1,61 @@
+package di
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+
+	"github.com/Xwudao/loom"
+
+	"__module__/internal/config"
+	"__module__/internal/cron"
+)
+
+// NewScheduler is the cron scheduler provider the Loom graph binds, and this
+// file is the stable integration seam for wiring the scheduler into the Loom
+// application.
+//
+// weld writes this file once, when both the cron and loom capabilities are
+// installed, and never rewrites it while it regenerates the graph (di.go,
+// loom_gen.go): edits below survive every later `weld add`.
+//
+// The graph's root consumes the returned *cron.Scheduler, so Loom constructs
+// this provider and its lifecycle hooks are registered; without that consumer
+// Loom would prune the provider and nothing would start.
+//
+// server is a deliberate dependency, not an unused parameter: Loom constructs
+// providers in dependency order and appends each lifecycle hook as it
+// constructs the provider, so taking the server here makes the graph bind the
+// HTTP socket before the scheduler starts and stop the scheduler before the
+// server shuts down. Hooks run in registration order on start and reverse order
+// on stop.
+//
+// The scheduler starts no work by itself: internal/cron/register.go is the
+// stable, user-editable file where the application's jobs are registered, and it
+// registers none by default. The scheduler takes no database or Redis lock, so
+// several replicas each run their own copy of every job.
+func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, server *Server) (*cron.Scheduler, error) {
+	location, err := cfg.Cron.Location()
+	if err != nil {
+		return nil, err
+	}
+	scheduler := cron.New(logger, cron.WithLocation(location))
+	if err := cron.Register(scheduler); err != nil {
+		return nil, err
+	}
+	lc.Append(loom.Hook{
+		OnStart: func(ctx context.Context) error {
+			scheduler.Start(ctx)
+			logger.Info("__name__ cron scheduler started")
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			if err := scheduler.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				return err
+			}
+			logger.Info("__name__ cron scheduler stopped")
+			return nil
+		},
+	})
+	return scheduler, nil
+}

@@ -8,29 +8,7 @@ import (
 	"testing"
 
 	"github.com/Xwudao/weld/internal/project"
-	"github.com/Xwudao/weld/internal/template"
 )
-
-// commandLoomSupported reports whether the loaded weld-template payload declares
-// the Loom command graph. The released template pin may predate it while the two
-// repositories are developed together (see README: a temporary workspace or
-// local replace is used for template development), so a test that needs the new
-// payload skips visibly instead of failing against a stale pin.
-func commandLoomSupported(t *testing.T) bool {
-	t.Helper()
-	commandTemplate, err := template.LoadCommands()
-	if err != nil {
-		return false
-	}
-	for _, file := range commandTemplate.Generic.Files {
-		for _, when := range file.When {
-			if when == "loom" {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 // commandGraph is the stable command seam a Loom project gains.
 func commandGraph(name string) string { return filepath.Join("internal", "di", name+"_graph.go") }
@@ -80,9 +58,6 @@ func assertLoomCommandSeam(t *testing.T, dir, name, initializer string) {
 // without dependency injection.
 func TestAddCommandThenLoomMigratesSeam(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	addCommand(t, dir, "orders")
@@ -102,9 +77,6 @@ func TestAddCommandThenLoomMigratesSeam(t *testing.T) {
 // creates the command-specific graph in one step.
 func TestAddLoomThenCommandGeneratesSeam(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "loom")
@@ -124,9 +96,6 @@ func TestAddLoomThenCommandGeneratesSeam(t *testing.T) {
 // command upgrades that group too, keeping the module Service as its root.
 func TestAddModuleThenLoomMigratesSeam(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	addModuleWithCommand(t, dir, "widget")
@@ -155,9 +124,6 @@ func TestAddModuleThenLoomMigratesSeam(t *testing.T) {
 // route seam.
 func TestAddLoomThenModuleCommandGeneratesSeam(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "loom")
@@ -216,9 +182,6 @@ func TestAddCommandOnBaseIsAtomicOnConflict(t *testing.T) {
 // command graph, even when the user has edited it.
 func TestLoomCommandGraphSurvivesLaterCapabilityAdds(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "loom")
@@ -262,9 +225,6 @@ func TestLoomCommandGraphSurvivesLaterCapabilityAdds(t *testing.T) {
 // short command never opens a database.
 func TestLoomCommandGraphDeclaresOptionalBindingsButPrunes(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -302,9 +262,6 @@ func TestLoomCommandGraphDeclaresOptionalBindingsButPrunes(t *testing.T) {
 // root serves, but `orders` shows its own help and exits without listening.
 func TestLoomCommandBareInvocationDoesNotStartServer(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "loom")
@@ -369,9 +326,6 @@ func editInPlace(t *testing.T, path, needle, replacement string) {
 // or a Redis client.
 func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "loom")
@@ -445,9 +399,6 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 // signature.
 func TestLoomModuleServiceSignatureChangeCompiles(t *testing.T) {
 	loomToolAvailable(t)
-	if !commandLoomSupported(t) {
-		t.Skip("weld-template pin predates the Loom command graph; run with a local workspace")
-	}
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, dir string)

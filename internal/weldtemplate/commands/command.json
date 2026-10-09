@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "generic": {
+    "files": [
+      { "path": "internal/commands/__modname__/command.go", "source": "files/generic_command.go.tmpl" },
+      { "path": "internal/commands/__modname__/command_test.go", "source": "files/generic_command_test.go.tmpl" },
+      { "path": "internal/commands/__modname__/README.md", "source": "files/generic_README.md.tmpl" },
+      { "path": "internal/app/__modname___command.go", "source": "files/generic_register.go.tmpl" },
+      { "path": "internal/di/__modname___graph.go", "source": "files/generic_graph.go.tmpl", "when": ["loom"] }
+    ]
+  },
+  "module": {
+    "files": [
+      { "path": "internal/commands/__modname__/command.go", "source": "files/module_command.go.tmpl" },
+      { "path": "internal/commands/__modname__/command_test.go", "source": "files/module_command_test.go.tmpl" },
+      { "path": "internal/commands/__modname__/README.md", "source": "files/module_README.md.tmpl" },
+      { "path": "internal/app/__modname___command.go", "source": "files/module_register.go.tmpl" },
+      { "path": "internal/di/__modname___graph.go", "source": "files/module_graph.go.tmpl", "when": ["loom"] }
+    ]
+  }
+}

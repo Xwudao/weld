@@ -1,0 +1,25 @@
+{
+  "name": "http",
+  "version": "0.2.0",
+  "kind": "add",
+  "summary": "HTTP server lifecycle, the shared JSON/middleware toolkit, a composable handler builder and one serve command.",
+  "requires": ["loom"],
+  "files": [
+    { "path": "internal/httpserver/http.go", "source": "files/http.go.tmpl" },
+    { "path": "internal/httpserver/server.go", "source": "files/server.go.tmpl" },
+    { "path": "internal/httpserver/middleware.go", "source": "files/middleware.go.tmpl" },
+    { "path": "internal/httpserver/http_test.go", "source": "files/http_test.go.tmpl" },
+    { "path": "internal/httpx/httpx.go", "source": "files/httpx/httpx.go.tmpl" },
+    { "path": "internal/httpx/bind.go", "source": "files/httpx/bind.go.tmpl" },
+    { "path": "internal/httpx/middleware.go", "source": "files/httpx/middleware.go.tmpl" },
+    { "path": "internal/httpx/httpx_test.go", "source": "files/httpx/httpx_test.go.tmpl" },
+    { "path": "internal/httpx/bind_test.go", "source": "files/httpx/bind_test.go.tmpl" },
+    { "path": "internal/httpx/middleware_test.go", "source": "files/httpx/middleware_test.go.tmpl" },
+    { "path": "internal/app/serve.go", "source": "files/serve.go.tmpl" },
+    { "path": "internal/app/serve_test.go", "source": "files/serve_test.go.tmpl" }
+  ],
+  "patches": [
+    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
+    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" }
+  ]
+}

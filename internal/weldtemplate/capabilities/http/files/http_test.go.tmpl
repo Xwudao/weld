@@ -1,0 +1,142 @@
+package httpserver
+
+import (
+	"bytes"
+	"context"
+	"log/slog"
+	nethttp "net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// testLogger is the injected logger for tests that do not assert on output.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+}
+
+func TestNewHandlerComposesInjectedRoutes(t *testing.T) {
+	handler := NewHandler(testLogger(), func(mux *nethttp.ServeMux) {
+		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+			w.WriteHeader(nethttp.StatusTeapot)
+		})
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/ping", nil))
+	if recorder.Code != nethttp.StatusTeapot {
+		t.Fatalf("status = %d, want %d", recorder.Code, nethttp.StatusTeapot)
+	}
+}
+
+func TestNewHandlerWithoutRoutesServesNothing(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	NewHandler(testLogger()).ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/", nil))
+	if recorder.Code != nethttp.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, nethttp.StatusNotFound)
+	}
+}
+
+// TestNewHandlerAppliesMiddleware proves the composed handler carries the
+// project middleware chain: the request-id middleware echoes an identifier on
+// every response.
+func TestNewHandlerAppliesMiddleware(t *testing.T) {
+	handler := NewHandler(testLogger(), func(mux *nethttp.ServeMux) {
+		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+			w.WriteHeader(nethttp.StatusOK)
+		})
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/ping", nil))
+	if got := recorder.Header().Get("X-Request-Id"); got == "" {
+		t.Fatal("the middleware chain did not assign a request id")
+	}
+}
+
+// TestNewHandlerRecoversAPanic proves a handler panic is contained: the client
+// receives the internal-error envelope and never the panic detail, which is
+// logged through the injected logger instead.
+func TestNewHandlerRecoversAPanic(t *testing.T) {
+	var sink bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&sink, nil))
+	handler := NewHandler(logger, func(mux *nethttp.ServeMux) {
+		mux.HandleFunc("/boom", func(nethttp.ResponseWriter, *nethttp.Request) {
+			panic("secret panic detail")
+		})
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/boom", nil))
+	if recorder.Code != nethttp.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, nethttp.StatusInternalServerError)
+	}
+	if strings.Contains(recorder.Body.String(), "secret panic detail") {
+		t.Fatalf("the panic detail leaked to the client: %s", recorder.Body)
+	}
+	if !strings.Contains(sink.String(), "panic") {
+		t.Fatalf("the panic was not logged through the injected logger:\n%s", sink.String())
+	}
+}
+
+func TestNewServerConfiguresWithoutListening(t *testing.T) {
+	server := NewServer("127.0.0.1:0", NewHandler(testLogger()))
+	if server.Addr != "127.0.0.1:0" {
+		t.Fatalf("Addr = %q", server.Addr)
+	}
+	if server.Handler == nil {
+		t.Fatal("Handler is nil")
+	}
+	if server.ReadHeaderTimeout <= 0 {
+		t.Fatal("ReadHeaderTimeout is not set")
+	}
+}
+
+// TestListenReportsOccupiedPort covers the ordering regression: the socket is
+// bound synchronously, so an address already in use fails before any listening
+// line is printed. The occupying server is closed by the test, so no socket is
+// leaked.
+func TestListenReportsOccupiedPort(t *testing.T) {
+	occupied := httptest.NewServer(NewHandler(testLogger()))
+	defer occupied.Close()
+
+	listener, err := Listen(occupied.Listener.Addr().String())
+	if err == nil {
+		listener.Close()
+		t.Fatal("Listen succeeded on an occupied port")
+	}
+}
+
+// TestDisplayAddrMakesBarePortsClickable pins the address formatting the
+// listening record uses.
+func TestDisplayAddrMakesBarePortsClickable(t *testing.T) {
+	if got := DisplayAddr(":8080"); got != "localhost:8080" {
+		t.Fatalf("DisplayAddr(\":8080\") = %q", got)
+	}
+	if got := DisplayAddr("127.0.0.1:8080"); got != "127.0.0.1:8080" {
+		t.Fatalf("DisplayAddr kept a bare address unchanged: %q", got)
+	}
+}
+
+// TestServeShutsDownGracefullyOnCancel proves a canceled context stops the
+// server within the shutdown timeout and returns no error, which is what a
+// signal-driven serve relies on.
+func TestServeShutsDownGracefullyOnCancel(t *testing.T) {
+	listener, err := Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	addr := listener.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, addr, listener, NewHandler(testLogger())) }()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v after a graceful shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after the context was canceled")
+	}
+}

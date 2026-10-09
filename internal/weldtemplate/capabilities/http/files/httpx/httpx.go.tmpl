@@ -1,0 +1,130 @@
+// Package httpx is the small HTTP toolkit the generated API and business
+// modules share.
+//
+// It owns three things and nothing else:
+//
+//   - the default JSON response envelope, {code, msg, data}, and the writers
+//     that emit it (JSON, Error) next to the raw writers for responses that must
+//     stay unwrapped (RawJSON, RawText, Bytes, NoContent);
+//   - typed request binding (DecodeJSON, QueryInt) with a configurable body
+//     limit, a content-type check, single-value and unknown-field rejection and
+//     an optional code-first validator callback;
+//   - the composable net/http middleware and the three middlewares the generated
+//     server installs by default (RequestID, AccessLog, Recover).
+//
+// It deliberately depends only on the standard library. In particular it does
+// not import the project's go-validate rules: binding takes a validator
+// callback, so the API wires its Spec in without this package knowing about it.
+package httpx
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+)
+
+// Envelope is the default JSON response body: code, msg and data.
+//
+// Code repeats the HTTP transport status rather than inventing a separate
+// business code, so status 201 is code 201 and status 404 is code 404; msg is
+// SuccessMsg for a success response and a short, client-safe message otherwise;
+// data is the payload, or null when there is none (every error response).
+type Envelope struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data any    `json:"data"`
+}
+
+// SuccessMsg is the message every success envelope carries.
+const SuccessMsg = "success"
+
+// ErrorMsg is the fixed message every unmapped internal error carries, so an
+// internal error can never leak through a response body.
+const ErrorMsg = "internal error"
+
+// ErrorStatus is the transport status an error with no explicit mapping uses.
+const ErrorStatus = http.StatusInternalServerError
+
+// JSON writes data wrapped in the default envelope with the given HTTP status.
+//
+// The body is marshalled before any header is written, so a marshal failure
+// cannot emit a success status with a partial body: it becomes a fixed
+// internal-error envelope instead.
+func JSON(w http.ResponseWriter, status int, data any) {
+	writeEnvelope(w, status, SuccessMsg, data)
+}
+
+// Error writes an error envelope: the same status in code, msg set to the
+// client-safe message and data null.
+func Error(w http.ResponseWriter, status int, message string) {
+	writeEnvelope(w, status, message, nil)
+}
+
+// WriteError maps err to an error envelope. A *DecodeError carries the status
+// and message binding chose; any other error becomes the fixed internal-error
+// envelope, so an unexpected error never leaks its message.
+func WriteError(w http.ResponseWriter, err error) {
+	var decodeErr *DecodeError
+	if errors.As(err, &decodeErr) {
+		Error(w, decodeErr.Status, decodeErr.Message)
+		return
+	}
+	Error(w, ErrorStatus, ErrorMsg)
+}
+
+// internalErrorBody is the constant body writeEnvelope falls back to when data
+// cannot be marshalled. It is a literal so it cannot itself fail.
+var internalErrorBody = []byte(`{"code":500,"msg":"internal error","data":null}`)
+
+func writeEnvelope(w http.ResponseWriter, status int, message string, data any) {
+	body, err := json.Marshal(Envelope{Code: status, Msg: message, Data: data})
+	if err != nil {
+		// The envelope's own fields cannot fail, but data can (a channel, a
+		// func, a cyclic value). Substitute the constant body rather than write
+		// a success status with a broken or partial body.
+		status = ErrorStatus
+		body = internalErrorBody
+	}
+	writeBody(w, status, "application/json; charset=utf-8", body)
+}
+
+// RawJSON writes v as JSON without the envelope. It is for a response that is
+// already a complete document and must stay unwrapped, such as the OpenAPI
+// document served at /api/openapi.json.
+func RawJSON(w http.ResponseWriter, status int, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		// Nothing has been written yet, so the failure is still recoverable:
+		// report it as an internal error rather than a truncated document.
+		writeEnvelope(w, ErrorStatus, ErrorMsg, nil)
+		return
+	}
+	writeBody(w, status, "application/json; charset=utf-8", body)
+}
+
+// RawText writes text as plain text, unwrapped and unescaped. It is for a
+// response that is not JSON; it never adds an envelope.
+func RawText(w http.ResponseWriter, status int, text string) {
+	writeBody(w, status, "text/plain; charset=utf-8", []byte(text))
+}
+
+// Bytes writes data with an explicit content type, unwrapped. It is the escape
+// hatch for a binary response (a file download, an image) that must not be
+// wrapped.
+func Bytes(w http.ResponseWriter, status int, contentType string, data []byte) {
+	writeBody(w, status, contentType, data)
+}
+
+// NoContent writes the status with no body and no content type, as 204 and 304
+// require. It never adds an envelope.
+func NoContent(w http.ResponseWriter, status int) {
+	w.WriteHeader(status)
+}
+
+func writeBody(w http.ResponseWriter, status int, contentType string, body []byte) {
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}

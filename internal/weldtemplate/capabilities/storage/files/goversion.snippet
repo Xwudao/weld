@@ -1,0 +1,5 @@
+// The AWS SDK for Go v2 S3 module requires Go 1.24. This region is set to
+// Loom's 1.25 floor as well, so that when storage and loom are both installed
+// the replace-mode patch can never lower the project's Go directive, whichever
+// capability is installed last.
+go 1.25.0

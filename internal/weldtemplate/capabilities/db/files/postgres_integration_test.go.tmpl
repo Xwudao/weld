@@ -1,0 +1,201 @@
+package data
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// TestPostgresRepositoryIntegration exercises the generated SQL against a real
+// PostgreSQL server. It runs only when PG_TEST_DSN is set.
+//
+// PG_TEST_DSN must point at a dedicated, disposable test database. The test
+// never falls back to the application's own dsn, so it cannot reach a live
+// database by accident, and it never logs a credential. It also never assumes it
+// owns the database: it creates a unique throwaway schema, points the pool's
+// search_path at it, applies the migration there, and drops only that schema
+// (CASCADE) when it finishes. Existing application tables are never dropped or
+// mutated. For example:
+//
+//	PG_TEST_DSN='postgres://user:pw@localhost:5432/app_test?sslmode=disable' go test ./internal/data/...
+func TestPostgresRepositoryIntegration(t *testing.T) {
+	dsn := os.Getenv("PG_TEST_DSN")
+	if dsn == "" {
+		t.Skip("PG_TEST_DSN is not set; skipping the PostgreSQL integration test (needs a dedicated test database)")
+	}
+	requireDistinctTestDatabase(t, dsn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// A per-run schema keeps the test isolated from the database's real tables:
+	// every object it creates lives in this schema and is removed with it.
+	schema := uniqueTestSchema()
+	pool, err := newTestPool(ctx, dsn, schema)
+	if err != nil {
+		t.Fatalf("open test pool: %v", err)
+	}
+	// Registered first so it runs last (cleanups are LIFO) and the schema can
+	// still be dropped before the pool closes.
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, "CREATE SCHEMA "+quoteIdentifier(schema)); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), "DROP SCHEMA "+quoteIdentifier(schema)+" CASCADE"); err != nil {
+			t.Errorf("drop test schema: %v", err)
+		}
+	})
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("connect to PG_TEST_DSN: %v", err)
+	}
+	applyMigrations(t, ctx, pool)
+
+	repository := NewRepository(pool)
+	item := Item{ID: "item-1", Name: "widget", Quantity: 3, Status: "active"}
+
+	created, err := repository.CreateItem(ctx, item)
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	if created.ID != item.ID || created.Name != item.Name || created.Quantity != item.Quantity ||
+		created.Status != item.Status || created.CreatedAt.IsZero() {
+		t.Fatalf("CreateItem returned %+v", created)
+	}
+
+	got, err := repository.GetItem(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("GetItem: %v", err)
+	}
+	if got != created {
+		t.Fatalf("GetItem = %+v, want %+v", got, created)
+	}
+
+	if _, err := repository.GetItem(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetItem(missing) error = %v, want ErrNotFound", err)
+	}
+
+	items, err := repository.ListItems(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListItems: %v", err)
+	}
+	if len(items) != 1 || items[0] != created {
+		t.Fatalf("ListItems = %+v, want [%+v]", items, created)
+	}
+
+	// A committed transaction persists.
+	if err := WithTx(ctx, pool, func(repo *PostgresRepository) error {
+		_, err := repo.CreateItem(ctx, Item{ID: "item-2", Name: "gadget", Quantity: 1, Status: "draft"})
+		return err
+	}); err != nil {
+		t.Fatalf("WithTx commit: %v", err)
+	}
+	if _, err := repository.GetItem(ctx, "item-2"); err != nil {
+		t.Fatalf("committed item is missing: %v", err)
+	}
+
+	// A failed transaction rolls back and reports the original error.
+	rollbackCause := errors.New("rollback on purpose")
+	err = WithTx(ctx, pool, func(repo *PostgresRepository) error {
+		if _, err := repo.CreateItem(ctx, Item{ID: "item-3", Name: "gizmo", Quantity: 2, Status: "draft"}); err != nil {
+			return err
+		}
+		return rollbackCause
+	})
+	if !errors.Is(err, rollbackCause) {
+		t.Fatalf("WithTx error = %v, want %v", err, rollbackCause)
+	}
+	if _, err := repository.GetItem(ctx, "item-3"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rolled-back item error = %v, want ErrNotFound", err)
+	}
+}
+
+// requireDistinctTestDatabase refuses to run when PG_TEST_DSN names the same
+// database as DATABASE_URL. DATABASE_URL is only ever parsed for its database
+// name here; it is never used to connect, so the test still has no application
+// dsn fallback.
+func requireDistinctTestDatabase(t *testing.T, testDSN string) {
+	t.Helper()
+	appDSN := os.Getenv("DATABASE_URL")
+	if appDSN == "" {
+		return
+	}
+	testName, ok := databaseName(testDSN)
+	if !ok {
+		return
+	}
+	appName, ok := databaseName(appDSN)
+	if !ok {
+		return
+	}
+	if testName == appName {
+		t.Fatalf("PG_TEST_DSN and DATABASE_URL both name database %q; point PG_TEST_DSN at a dedicated test database", testName)
+	}
+}
+
+func databaseName(dsn string) (string, bool) {
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil || config.ConnConfig.Database == "" {
+		return "", false
+	}
+	return config.ConnConfig.Database, true
+}
+
+// newTestPool builds the test pool with search_path pinned to schema, so every
+// unqualified statement the generated code runs resolves inside the throwaway
+// schema rather than the database's real tables.
+func newTestPool(ctx context.Context, dsn, schema string) (*pgxpool.Pool, error) {
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		// Do not echo the dsn or the parser error: either may carry a credential.
+		return nil, errors.New("PG_TEST_DSN is not a valid PostgreSQL connection string")
+	}
+	if config.ConnConfig.RuntimeParams == nil {
+		config.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	return pgxpool.NewWithConfig(ctx, config)
+}
+
+// uniqueTestSchema returns a schema name that cannot collide with another run,
+// so the test does not assume it has the database to itself.
+func uniqueTestSchema() string {
+	return fmt.Sprintf("weld_test_%d_%d", os.Getpid(), time.Now().UnixNano())
+}
+
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// applyMigrations builds the schema from the real migration file, so the SQL
+// under test is never duplicated here.
+func applyMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, readMigrationUp(t, "000001_create_items.sql")); err != nil {
+		t.Fatalf("apply up migration: %v", err)
+	}
+}
+
+// readMigrationUp returns only the applied part of a goose migration: the text
+// before the "-- +goose Down" marker. The down section is never run against the
+// test database; the schema is dropped CASCADE instead, which can only ever
+// touch the schema this test created.
+func readMigrationUp(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "db", "migrations", name))
+	if err != nil {
+		t.Fatalf("read migration %s: %v", name, err)
+	}
+	contents := string(raw)
+	if i := strings.Index(contents, "-- +goose Down"); i >= 0 {
+		contents = contents[:i]
+	}
+	return contents
+}

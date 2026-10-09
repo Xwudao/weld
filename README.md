@@ -23,19 +23,13 @@ make build             # builds the frontend, embeds it, builds the app
 make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
 ```
 
-## Versioned templates
+## Embedded templates
 
-| repo | owns |
-| --- | --- |
-| [`../weld-template`](../weld-template) | declarative capability payloads, exposed as an embedded `io/fs.FS` |
-| `weld` (this repo) | CLI: catalog loading, rendering, manifest, planning, safe apply |
-
-`weld` imports the released `github.com/Xwudao/weld-template v0.1.1` and reads
-payloads through `weldtemplate.FS()`. The embedded FS means a built `weld`
-binary carries its whole scaffold — no template checkout, network access or
-environment variable is needed at runtime. During local template development,
-use a temporary Go workspace or local module replacement without committing it.
-The versioned template module is the contract between the two repos.
+The CLI, catalog, planner and declarative payloads live in this repository.
+`internal/weldtemplate` embeds `capabilities/`, `modules/` and `commands/`
+through `weldtemplate.FS()`. A built `weld` carries the whole scaffold; no
+separate template checkout, module replacement or network access is needed at
+runtime. Template changes and the CLI are tested and released together.
 
 ## Commands
 
@@ -614,19 +608,12 @@ Test conventions:
   the `--command` upgrade of an existing module writes only the command files
   and never rewrites a user-edited service, that a Loom module + command builds
   and tests, that reserved names and command/module collisions are rejected
-  before any write, and that a custom command never starts the server. With
-  Loom, they also cover both install orders (`command`↔`loom`,
-  `module --command`↔`loom` and the standalone module upgrade), the
-  non-destructive refusal to overwrite an edited generated command file, the
-  shared `commonModule` being declared but pruned (so a `db`+Loom command never
-  opens a pool), the command graph surviving a later capability add and a user
-  edit, a command root consuming a capability installed *after* the command
-  graph (proving `commonModule` propagates the late binding), a bare Loom command
-  group never starting the server and never opening the database, and a module
-  whose `NewService` signature changes (after `weld add db`) still building and
-  testing in both install orders. These skip visibly when the released template
-  pin predates the Loom command graph; run with a local workspace during template
-  development.
+  before any write, and that a custom command never starts the server. They
+  also cover automatic Loom installation, adding commands before or after other
+  capabilities, stable command graphs surviving later adds and user edits,
+  unused `commonModule` providers being pruned, short commands not opening a
+  database or starting the server, and a module whose `NewService` signature
+  changes after `weld add db` still building and testing.
 - The API integration tests use the published `go-validate v0.2.0`; no sibling
   checkout or local module replacement is needed. Generated projects also
   build independently. Set `WELD_GO_VALIDATE_DIR` only when intentionally

@@ -1,0 +1,162 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// TestLoadReadsMailFromFile proves the mail section, including the username and
+// password, is read from the YAML file.
+func TestLoadReadsMailFromFile(t *testing.T) {
+	loader := fakeLoader(map[string]string{
+		DefaultPath: "mail:\n  host: smtp.example\n  port: 2525\n  username: app\n  password: file-secret\n  from: ops@example\n  tls: implicit\n  timeout_seconds: 30\n",
+	}, nil)
+	cfg, err := loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Mail.Host != "smtp.example" || cfg.Mail.Port != 2525 || cfg.Mail.From != "ops@example" {
+		t.Fatalf("mail = %+v", cfg.Mail)
+	}
+	if cfg.Mail.TLS != MailTLSImplicit || cfg.Mail.TimeoutSeconds != 30 {
+		t.Fatalf("mail security = %+v", cfg.Mail)
+	}
+	if cfg.Mail.Username.Value() != "app" || cfg.Mail.Password.Value() != "file-secret" {
+		t.Fatal("the mail username or password was not loaded")
+	}
+	if err := cfg.ValidateMail(); err != nil {
+		t.Fatalf("ValidateMail: %v", err)
+	}
+}
+
+// TestMailEnvironmentOverridesFile pins the file < environment precedence for
+// the mail section.
+func TestMailEnvironmentOverridesFile(t *testing.T) {
+	loader := fakeLoader(
+		map[string]string{DefaultPath: "mail:\n  host: file.example\n  port: 587\n  tls: starttls\n"},
+		map[string]string{
+			EnvMailHost:           "env.example",
+			EnvMailPort:           "2526",
+			EnvMailUsername:       "env-user",
+			EnvMailPassword:       "env-secret",
+			EnvMailFrom:           "env@example",
+			EnvMailTLS:            "none",
+			EnvMailTimeoutSeconds: "45",
+		},
+	)
+	cfg, err := loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Mail.Host != "env.example" || cfg.Mail.Port != 2526 || cfg.Mail.From != "env@example" {
+		t.Fatalf("mail = %+v, want the environment values", cfg.Mail)
+	}
+	if cfg.Mail.TLS != MailTLSNone || cfg.Mail.TimeoutSeconds != 45 {
+		t.Fatalf("mail security = %+v, want the environment values", cfg.Mail)
+	}
+	if cfg.Mail.Username.Value() != "env-user" || cfg.Mail.Password.Value() != "env-secret" {
+		t.Fatal("the environment did not override the mail username or password")
+	}
+}
+
+// TestMailDefaultsPortAndTimeout proves the non-credential defaults apply and
+// that an explicitly blank MAIL_HOST is an error rather than a silent fallback.
+func TestMailDefaultsPortAndTimeout(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Mail.Port != DefaultMailPort || cfg.Mail.TimeoutSeconds != DefaultMailTimeoutSeconds {
+		t.Fatalf("mail defaults = %+v", cfg.Mail)
+	}
+	if _, err := fakeLoader(map[string]string{DefaultPath: ""}, map[string]string{EnvMailHost: ""}).Load(""); err == nil {
+		t.Fatal("expected an error for an explicit blank MAIL_HOST")
+	}
+}
+
+// TestMailLoadErrorDoesNotLeakSecret proves a mail environment parse error never
+// echoes a credential: the error names the variable, not the password.
+func TestMailLoadErrorDoesNotLeakSecret(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	_, err := fakeLoader(
+		map[string]string{DefaultPath: ""},
+		map[string]string{EnvMailPassword: sentinel, EnvMailPort: "not-a-number"},
+	).Load("")
+	if err == nil {
+		t.Fatal("expected an error for a non-numeric MAIL_PORT")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("the error leaked the mail password: %v", err)
+	}
+}
+
+// TestValidateMailRequiresExplicitTLS proves the policy is closed: an unknown
+// value is rejected and credentials are refused with the unencrypted policy.
+func TestValidateMailRequiresExplicitTLS(t *testing.T) {
+	base := Mail{Host: "smtp.example", Port: 587, From: "ops@example", TimeoutSeconds: 10}
+	unknown := base
+	unknown.TLS = "opportunistic"
+	if err := (&Config{Mail: unknown}).ValidateMail(); err == nil {
+		t.Fatal("expected an error for an unknown mail.tls policy")
+	}
+	unencrypted := base
+	unencrypted.TLS = MailTLSNone
+	unencrypted.Username = Secret("app")
+	unencrypted.Password = Secret("secret")
+	if err := (&Config{Mail: unencrypted}).ValidateMail(); err == nil {
+		t.Fatal("expected an error for credentials with an unencrypted TLS policy")
+	}
+	ok := base
+	ok.TLS = MailTLSStartTLS
+	if err := (&Config{Mail: ok}).ValidateMail(); err != nil {
+		t.Fatalf("ValidateMail: %v", err)
+	}
+}
+
+// TestMailSettingsAccessor proves the config exposes the mail section through
+// the provider method the sender consumes.
+func TestMailSettingsAccessor(t *testing.T) {
+	cfg := &Config{Mail: Mail{Host: "smtp.example"}}
+	if cfg.MailSettings().Host != "smtp.example" {
+		t.Fatalf("MailSettings().Host = %q", cfg.MailSettings().Host)
+	}
+}
+
+// TestMailSecretsRedactEverywhere is the credential-safety sentinel for the mail
+// section: the username and password must not survive fmt, log/slog, JSON or
+// YAML.
+func TestMailSecretsRedactEverywhere(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	cfg := &Config{Mail: Mail{Host: "smtp.example", Username: Secret(sentinel), Password: Secret(sentinel)}}
+
+	if got := cfg.Mail.Username.String(); strings.Contains(got, sentinel) {
+		t.Fatalf("Secret.String leaked the secret: %q", got)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("mail", "username", cfg.Mail.Username, "password", cfg.Mail.Password)
+	if strings.Contains(buf.String(), sentinel) {
+		t.Fatalf("log/slog leaked the mail secret:\n%s", buf.String())
+	}
+
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), sentinel) {
+		t.Fatalf("JSON leaked the mail secret: %s", encoded)
+	}
+
+	yamlEncoded, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if strings.Contains(string(yamlEncoded), sentinel) {
+		t.Fatalf("YAML leaked the mail secret: %s", yamlEncoded)
+	}
+}

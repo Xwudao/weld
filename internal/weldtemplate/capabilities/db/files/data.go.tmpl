@@ -1,0 +1,153 @@
+// Package data is the PostgreSQL persistence layer of __name__.
+//
+// The SQL is the source of truth: db/migrations owns the schema, db/query owns
+// the statements, and sqlc generates internal/data/sqlc from both. This package
+// wraps the generated queries behind a small Repository interface, translates
+// generated rows into a domain Item and exposes the connection pool as an
+// injected dependency.
+//
+// It is independent of the HTTP layer: it imports pgx, not net/http, and its
+// model carries no JSON tags, so the HTTP DTOs in internal/api never see a sqlc
+// row and a schema change cannot silently alter the wire contract.
+package data
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	sqlc "__module__/internal/data/sqlc"
+)
+
+// ErrNotFound is returned when a requested row does not exist.
+var ErrNotFound = errors.New("data: item not found")
+
+// Item is the persistence model of an item.
+//
+// It deliberately has no JSON tags: the HTTP layer owns its own DTOs, so the
+// storage shape and the wire shape stay independent.
+type Item struct {
+	ID        string
+	Name      string
+	Quantity  int
+	Status    string
+	CreatedAt time.Time
+}
+
+// Repository is the persistence contract the application depends on.
+//
+// It is expressed in domain types rather than sqlc rows, and every method takes
+// a context first. PostgresRepository is the generated PostgreSQL
+// implementation; a consumer that needs less can declare a narrower interface
+// of its own against the same methods.
+type Repository interface {
+	CreateItem(ctx context.Context, item Item) (Item, error)
+	GetItem(ctx context.Context, id string) (Item, error)
+	ListItems(ctx context.Context, limit int) ([]Item, error)
+}
+
+// NewPool opens a PostgreSQL connection pool from dsn.
+//
+// The pool is created lazily: NewPool parses the dsn but never connects or
+// pings, so it succeeds with a well-formed dsn even while the database is down.
+// Call pool.Ping(ctx) to verify connectivity and pool.Close() when done. The
+// dsn is a caller-supplied value (for example from an environment variable) and
+// is never read or logged here, so no credential enters this package.
+//
+// A dsn that does not parse reports a fixed error rather than the parser's own:
+// the parser error can quote the dsn and its password, and the caller logs the
+// error it gets back, so this boundary must not carry a credential into a log
+// record.
+func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		// Do not echo the dsn or the parser error: either may carry a credential.
+		return nil, errors.New("data: invalid PostgreSQL dsn")
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("data: create connection pool: %w", err)
+	}
+	return pool, nil
+}
+
+// PostgresRepository is the pgx-backed Repository.
+type PostgresRepository struct {
+	queries *sqlc.Queries
+}
+
+// NewRepository returns the PostgreSQL Repository backed by pool.
+//
+// The pool is injected, so the application owns its lifecycle and a test can
+// supply its own.
+func NewRepository(pool *pgxpool.Pool) *PostgresRepository {
+	return &PostgresRepository{queries: sqlc.New(pool)}
+}
+
+// itemFromSQLC converts a generated row into the domain model. It is the only
+// place that knows the shape of a sqlc row, so generated detail does not leak
+// past this package.
+func itemFromSQLC(row sqlc.Item) Item {
+	return Item{
+		ID:        row.ID,
+		Name:      row.Name,
+		Quantity:  int(row.Quantity),
+		Status:    row.Status,
+		CreatedAt: row.CreatedAt.Time.UTC(),
+	}
+}
+
+// CreateItem inserts item and returns it as stored, including created_at.
+func (r *PostgresRepository) CreateItem(ctx context.Context, item Item) (Item, error) {
+	row, err := r.queries.CreateItem(ctx, sqlc.CreateItemParams{
+		ID:       item.ID,
+		Name:     item.Name,
+		Quantity: int32(item.Quantity),
+		Status:   item.Status,
+	})
+	if err != nil {
+		return Item{}, fmt.Errorf("data: create item: %w", err)
+	}
+	return itemFromSQLC(row), nil
+}
+
+// GetItem returns the item with id, or ErrNotFound when it does not exist.
+func (r *PostgresRepository) GetItem(ctx context.Context, id string) (Item, error) {
+	row, err := r.queries.GetItem(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Item{}, ErrNotFound
+		}
+		return Item{}, fmt.Errorf("data: get item %q: %w", id, err)
+	}
+	return itemFromSQLC(row), nil
+}
+
+// ListItems returns up to limit items, oldest first.
+func (r *PostgresRepository) ListItems(ctx context.Context, limit int) ([]Item, error) {
+	rows, err := r.queries.ListItems(ctx, int32(limit))
+	if err != nil {
+		return nil, fmt.Errorf("data: list items: %w", err)
+	}
+	items := make([]Item, len(rows))
+	for i, row := range rows {
+		items[i] = itemFromSQLC(row)
+	}
+	return items, nil
+}
+
+// WithTx runs fn inside a transaction, committing on success and rolling back
+// when fn returns an error or panics.
+//
+// It is the narrow transaction seam: fn receives a Repository bound to the
+// transaction, so several calls share one connection and commit or roll back
+// together without the caller handling pgx.Tx.
+func WithTx(ctx context.Context, pool *pgxpool.Pool, fn func(repo *PostgresRepository) error) error {
+	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return fn(&PostgresRepository{queries: sqlc.New(tx)})
+	})
+}

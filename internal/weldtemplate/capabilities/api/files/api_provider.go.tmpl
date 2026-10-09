@@ -1,0 +1,32 @@
+package di
+
+import (
+	"__module__/internal/api"
+)
+
+// NewAPIService is the API service provider the Loom graph binds, and this file
+// is the stable seam for wiring persistence into it.
+//
+// weld writes this file once, when both the api and loom capabilities are
+// installed, and never rewrites it while it regenerates the graph (di.go,
+// loom_gen.go): edits below survive every later `weld add`.
+//
+// The default returns the in-memory development service and needs no database:
+// items are lost on restart, and Loom constructs no pool because nothing here
+// depends on data.Repository.
+//
+// To persist the API, install the db capability and change the signature to
+// consume the repository Loom already declares as an available binding:
+//
+//	func NewAPIService(repo data.Repository) api.Service {
+//		return myService{repo: repo} // your repository-backed api.Service
+//	}
+//
+// Add the internal/data import that needs. Loom infers the provider's
+// dependencies from its signature, so it then constructs NewPool and
+// NewRepository too, and the database settings are validated exactly when this
+// provider asks for the repository and never for an unrelated serve. See
+// internal/di/README.md and internal/data/README.md.
+func NewAPIService() api.Service {
+	return api.NewService()
+}

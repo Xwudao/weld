@@ -1,0 +1,32 @@
+package app
+
+import (
+	"context"
+
+	"github.com/spf13/cobra"
+
+	"__module__/internal/commands/__modname__"
+	"__module__/internal/di"
+)
+
+// The __modname__ command group. This file is written once when
+// `weld add command __modname__` runs and is never regenerated, so it is the
+// stable seam for wiring.
+//
+// It supplies __modname__.NewCommand with a lazy builder that runs the
+// command-specific Loom graph (internal/di/__modname___graph.go) only when a
+// real subcommand executes, so help and unrelated commands never construct the
+// group's dependencies.
+func init() {
+	RegisterCommand(new__ModName__Command)
+}
+
+func new__ModName__Command() *cobra.Command {
+	return __modname__.NewCommand(func(ctx context.Context) (*__modname__.Deps, __modname__.Lifecycle, error) {
+		deps, lifecycle, err := di.Init__ModName__(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return deps, lifecycle, nil
+	})
+}

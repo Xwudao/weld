@@ -1,0 +1,42 @@
+// Package redisclient builds the Redis client of __name__ from the typed
+// application configuration.
+//
+// It is opt-in and explicit: nothing in the generated application imports this
+// package or opens a Redis connection on its own. Constructing a client never
+// dials and never pings Redis: go-redis connects on the first command, so New
+// succeeds while Redis is down. The caller owns the returned client's lifecycle
+// and must Close it when the work is done.
+package redisclient
+
+import (
+	"crypto/tls"
+	"strings"
+
+	"github.com/redis/go-redis/v9"
+
+	"__module__/internal/config"
+)
+
+// New builds a Redis client from cfg.
+//
+// It validates the Redis section and maps the typed settings onto the client
+// options. It never dials and never pings: the client connects lazily on first
+// use, so an idle constructor touches no external Redis. The username and
+// password come from the redacting config.Secret and are never logged or echoed
+// in an error. The TLS option enables TLS with a modern minimum version when the
+// configuration asks for it.
+func New(cfg *config.Config) (*redis.Client, error) {
+	if err := cfg.ValidateRedis(); err != nil {
+		return nil, err
+	}
+	options := &redis.Options{
+		Addr:     strings.TrimSpace(cfg.Redis.Addr),
+		Username: cfg.Redis.Username.Value(),
+		Password: cfg.Redis.Password.Value(),
+		DB:       cfg.Redis.DB,
+	}
+	if cfg.Redis.TLS {
+		options.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	return redis.NewClient(options), nil
+}

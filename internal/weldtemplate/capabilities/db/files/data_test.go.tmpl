@@ -1,0 +1,66 @@
+package data
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
+
+	sqlc "__module__/internal/data/sqlc"
+)
+
+// TestItemFromSQLC pins the row-to-domain conversion. The generated row is the
+// part that changes when the schema changes, so the mapping is the unit worth
+// testing without a database; the SQL itself is exercised by the gated
+// PostgreSQL integration test.
+func TestItemFromSQLC(t *testing.T) {
+	created := time.Date(2024, 5, 1, 12, 30, 0, 0, time.UTC)
+	row := sqlc.Item{
+		ID:        "item-1",
+		Name:      "widget",
+		Quantity:  3,
+		Status:    "active",
+		CreatedAt: pgtype.Timestamptz{Time: created, Valid: true},
+	}
+	got := itemFromSQLC(row)
+	want := Item{ID: "item-1", Name: "widget", Quantity: 3, Status: "active", CreatedAt: created}
+	if got != want {
+		t.Fatalf("itemFromSQLC = %+v, want %+v", got, want)
+	}
+}
+
+// TestNewPoolRejectsMalformedDSN covers the only failure NewPool can report
+// without a server: a dsn that does not parse. It never connects, so it runs
+// without PostgreSQL.
+func TestNewPoolRejectsMalformedDSN(t *testing.T) {
+	if _, err := NewPool(context.Background(), "://not-a-dsn"); err == nil {
+		t.Fatal("expected an error for a malformed dsn")
+	}
+}
+
+// TestNewPoolDoesNotEchoDSN guards the credential leak this boundary must never
+// open: a malformed dsn can carry a password, and the caller (the top-level
+// logger) logs the error NewPool returns, so that error must not quote the dsn
+// or the parser detail. Every dsn embeds a sentinel password and is malformed in
+// a way the pgx parser error quotes (a colon or fragment inside the password, or
+// a bad port), so a regression to passing the parser error through fails here.
+func TestNewPoolDoesNotEchoDSN(t *testing.T) {
+	const password = "sentinel-do-not-log"
+	dsns := []string{
+		"postgres://user:" + password + "@host:notaport/db",
+		"postgres://user:" + password + ":extra@host:notaport/db",
+		"postgres://user:" + password + "#fragment@host:notaport/db",
+		"host=host password=" + password + " user=user port=notaport",
+	}
+	for _, dsn := range dsns {
+		_, err := NewPool(context.Background(), dsn)
+		if err == nil {
+			t.Fatalf("NewPool(%q) succeeded, want an error", dsn)
+		}
+		if strings.Contains(err.Error(), password) {
+			t.Errorf("NewPool(%q) error echoes the credential: %v", dsn, err)
+		}
+	}
+}

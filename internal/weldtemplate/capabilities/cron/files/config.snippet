@@ -1,0 +1,7 @@
+# weld:cron:installed __version__
+# Scheduled jobs. Schedules are five-field cron expressions interpreted in this
+# timezone; UTC is the default so a schedule means the same thing on every host.
+# Installing the capability registers no jobs: a job is added at run time with
+# internal/cron and runs only while a long-running command (serve) is running.
+cron:
+  timezone: "UTC"

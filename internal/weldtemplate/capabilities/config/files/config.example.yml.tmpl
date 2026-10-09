@@ -1,0 +1,15 @@
+# __name__ configuration example.
+#
+# config.yml is generated locally and ignored by git; this committed example
+# documents its shape. Copy it to config.yml, or let weld generate config.yml.
+# The loader reads config.yml from the working directory by default; pass
+# --config to point elsewhere.
+#
+# Precedence, highest first: command-line flag, environment variable, this file,
+# built-in defaults. The database password may live in config.yml for local
+# development; a production environment should override DB_PASSWORD or
+# DATABASE_URL instead of committing a credential.
+#
+# Each capability appends only the section it needs inside the marked region.
+# weld:config:begin
+# weld:config:end

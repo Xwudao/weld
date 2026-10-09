@@ -1,0 +1,75 @@
+package app
+
+import (
+	"testing"
+
+	"github.com/spf13/cobra"
+)
+
+// TestRootBuildsAServeCommand proves the http capability contributes one serve
+// command and installs it as the bare root action, so `__name__` and
+// `__name__ serve` are the same invocation. The command is backed by the Loom
+// graph (internal/di), which owns construction and the lifecycle.
+func TestRootBuildsAServeCommand(t *testing.T) {
+	root := NewRootCommand()
+	command, _, err := root.Find([]string{"serve"})
+	if err != nil {
+		t.Fatalf("find serve: %v", err)
+	}
+	if command.Name() != "serve" {
+		t.Fatalf("serve command = %q, want serve", command.Name())
+	}
+	if command.RunE == nil {
+		t.Fatal("serve command has no run function")
+	}
+	if root.RunE == nil {
+		t.Fatal("root has no default run function; a bare invocation would not serve")
+	}
+}
+
+// TestRootRejectsUnknownServeFlag exercises flag parsing without opening a
+// socket: Cobra rejects the unknown flag before the run function is reached.
+func TestRootRejectsUnknownServeFlag(t *testing.T) {
+	root := NewRootCommand()
+	root.SetArgs([]string{"serve", "--nope"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected an error for an unknown flag")
+	}
+}
+
+// TestParseServeRequestReadsSharedFlags proves --config and --addr are shared
+// persistent flags and that an unset --addr reports addrSet false, so it does
+// not shadow the environment or the file with an empty value.
+func TestParseServeRequestReadsSharedFlags(t *testing.T) {
+	cmd := &cobra.Command{Use: "serve"}
+	registerServeFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--config", "custom.yml", "--addr", "127.0.0.1:9999"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	request, err := parseServeRequest(cmd)
+	if err != nil {
+		t.Fatalf("parseServeRequest: %v", err)
+	}
+	if request.configPath != "custom.yml" {
+		t.Errorf("configPath = %q, want custom.yml", request.configPath)
+	}
+	if request.addr != "127.0.0.1:9999" {
+		t.Errorf("addr = %q, want 127.0.0.1:9999", request.addr)
+	}
+	if !request.addrSet {
+		t.Error("addrSet = false after --addr was given")
+	}
+
+	unset := &cobra.Command{Use: "serve"}
+	registerServeFlags(unset)
+	if err := unset.ParseFlags(nil); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	request, err = parseServeRequest(unset)
+	if err != nil {
+		t.Fatalf("parseServeRequest: %v", err)
+	}
+	if request.addrSet || request.addr != "" || request.configPath != "" {
+		t.Errorf("unset request = %+v, want zero flags", request)
+	}
+}

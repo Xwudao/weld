@@ -1,0 +1,126 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"__module__/internal/di"
+)
+
+// shutdownTimeout bounds graceful teardown after the process receives a signal.
+const shutdownTimeout = 10 * time.Second
+
+// configFlag and addrFlag are the persistent flags the root command shares
+// between `__name__ serve` and a bare `__name__`, so both read one definition.
+const (
+	configFlag = "config"
+	addrFlag   = "addr"
+)
+
+func init() {
+	RegisterCommand(newServeCommand)
+	ConfigureRoot(registerServeFlags)
+	SetDefaultRun(runServe)
+}
+
+// registerServeFlags adds the serve flags to the root command as persistent
+// flags, so a subcommand inherits them and a bare invocation (whose default
+// action serves) parses the same set.
+func registerServeFlags(root *cobra.Command) {
+	root.PersistentFlags().String(configFlag, "", "path to config.yml (default ./config.yml)")
+	root.PersistentFlags().String(addrFlag, "", "address to listen on (overrides config and environment)")
+}
+
+// newServeCommand builds the serve command backed by the generated Loom graph.
+func newServeCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "serve",
+		Short: "start the HTTP server from the Loom application graph",
+		Args:  cobra.NoArgs,
+		RunE:  runServe,
+	}
+}
+
+// serveRequest is the resolved configuration of a serve invocation.
+type serveRequest struct {
+	configPath string
+	addr       string
+	// addrSet reports whether --addr was given. An unset flag leaves the
+	// environment and the file in charge, so it is not confused with an
+	// explicit empty value.
+	addrSet bool
+}
+
+// parseServeRequest reads the shared root flags from cmd.
+func parseServeRequest(cmd *cobra.Command) (serveRequest, error) {
+	configPath, err := cmd.Flags().GetString(configFlag)
+	if err != nil {
+		return serveRequest{}, err
+	}
+	addr, err := cmd.Flags().GetString(addrFlag)
+	if err != nil {
+		return serveRequest{}, err
+	}
+	return serveRequest{
+		configPath: configPath,
+		addr:       addr,
+		addrSet:    cmd.Flags().Changed(addrFlag),
+	}, nil
+}
+
+// runServe starts the server through the generated Loom graph.
+//
+// The graph owns construction and the lifecycle; this command only resolves the
+// configuration path and the listen address from the shared root flags, installs
+// signal handling and drives Start/Stop, so context cancellation reaches the
+// managed HTTP server. It returns when a signal arrives or the server fails,
+// then stops the lifecycle gracefully and reports any shutdown error alongside
+// that failure.
+//
+// It is the command that follows a long-running process lifecycle: the graph
+// binds the socket, and its start and stop hooks (the cron scheduler among
+// them) run with the lifecycle. help, version and every short command never
+// reach this code.
+func runServe(cmd *cobra.Command, args []string) (err error) {
+	request, err := parseServeRequest(cmd)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx = di.WithConfigPath(ctx, request.configPath)
+	// A command-line flag outranks the environment and the file, so the graph is
+	// told about the address only when it was actually set.
+	if request.addrSet {
+		ctx = di.WithAddr(ctx, request.addr)
+	}
+
+	application, lifecycle, err := di.InitApp(ctx)
+	if err != nil {
+		return err
+	}
+	if err := lifecycle.Start(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		err = errors.Join(err, lifecycle.Stop(shutdownCtx))
+	}()
+
+	// The graph's injected logger records startup, failure and shutdown from the
+	// server lifecycle, so this command only drives Start/Stop.
+	select {
+	case <-ctx.Done():
+		return nil
+	case serveErr := <-application.Server.Fail():
+		return serveErr
+	}
+}

@@ -1,0 +1,22 @@
+package web
+
+import (
+	"embed"
+	"io/fs"
+)
+
+// webDist embeds the Vite build output. The `all:` prefix keeps the embed valid
+// even when dist only holds the tracked .gitkeep placeholder, so the project
+// compiles before the frontend has ever been built.
+//
+//go:embed all:dist
+var webDist embed.FS
+
+// dist is the embedded build output rooted at dist/.
+var dist = func() fs.FS {
+	sub, err := fs.Sub(webDist, "dist")
+	if err != nil {
+		panic("weld web: embed dist: " + err.Error())
+	}
+	return sub
+}()

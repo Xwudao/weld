@@ -1,0 +1,26 @@
+package cron
+
+// Register installs the application's scheduled work on s. It is the stable,
+// user-editable seam for scheduled jobs: `weld add cron` writes this file once
+// and never regenerates it, so the jobs you add here survive every later
+// `weld add`.
+//
+// The default implementation registers no jobs, which is why installing the cron
+// capability schedules nothing by itself. Add a job with Scheduler.Register: the
+// five-field spec is "minute hour day-of-month month day-of-week", interpreted
+// in the configured cron.timezone (UTC by default). A job runs only while a
+// long-running serve process has started the scheduler, and its context is
+// canceled when the process stops.
+//
+//	func Register(s *Scheduler) error {
+//		return s.Register("nightly-report", "0 3 * * *", func(ctx context.Context) {
+//			// do the work; return promptly when ctx is canceled
+//		})
+//	}
+//
+// Register is called once, when serve starts the scheduler and before the
+// scheduler starts, so a bad spec or a duplicate name fails startup loudly
+// instead of silently never running.
+func Register(s *Scheduler) error {
+	return nil
+}

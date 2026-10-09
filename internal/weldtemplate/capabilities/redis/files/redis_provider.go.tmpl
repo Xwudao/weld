@@ -1,0 +1,39 @@
+package di
+
+import (
+	"context"
+
+	"github.com/Xwudao/loom"
+	"github.com/redis/go-redis/v9"
+
+	"__module__/internal/config"
+	"__module__/internal/redisclient"
+)
+
+// NewRedisClient is the optional Redis client provider, and this file is the
+// stable integration seam for wiring Redis into the Loom application.
+//
+// weld writes this file once, when both the redis and loom capabilities are
+// installed, and never rewrites it while it regenerates the graph (di.go,
+// loom_gen.go): edits below survive every later `weld add`.
+//
+// The client is an available binding, not part of the default composition: the
+// graph declares NewRedisClient, but nothing depends on *redis.Client, so Loom
+// prunes it and an ordinary serve never constructs a client and never needs a
+// Redis setting. To use Redis, make a provider the graph already consumes
+// depend on *redis.Client. For an api+loom project, edit internal/di/api_provider.go
+// (the API service seam) to take *redis.Client; Loom then constructs
+// NewRedisClient, validates the Redis configuration and registers the cleanup
+// that closes the client exactly once.
+//
+// NewRedisClient never dials and never pings: go-redis connects on the first
+// command, so constructing the client succeeds even while Redis is down. The
+// cleanup is registered with the lifecycle only when this provider is actually
+// constructed.
+func NewRedisClient(cfg *config.Config) (*redis.Client, loom.Cleanup, error) {
+	client, err := redisclient.New(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, func(context.Context) error { return client.Close() }, nil
+}

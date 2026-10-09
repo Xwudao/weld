@@ -1,0 +1,278 @@
+// Package objectstore is the S3-compatible object-storage client of __name__.
+//
+// It is opt-in and explicit. `weld add storage` installs the client; it does
+// not create a bucket, does not upload anything and is not imported by the
+// generated application, so building, testing and serving need no object
+// storage. The caller constructs a Store from the typed configuration and owns
+// its lifecycle.
+//
+// The client speaks the S3 protocol through the AWS SDK for Go v2, so it works
+// against Amazon S3 and any S3-compatible server (MinIO, Ceph, ...). It never
+// creates the bucket: the bucket must already exist.
+package objectstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awscredentials "github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"__module__/internal/config"
+)
+
+// MaxPresignExpiry is the S3 protocol's maximum presigned URL lifetime.
+const MaxPresignExpiry = 7 * 24 * time.Hour
+
+// maxKeyLength is the S3 protocol's maximum object key length in bytes.
+const maxKeyLength = 1024
+
+// Provider resolves the object-storage settings a Store is built from.
+//
+// ConfigProvider is the built-in implementation, backed by the typed
+// application configuration. A future DB-backed site-config runtime
+// configuration implements this interface to supply settings resolved at
+// startup, so the client never depends on how or where the settings are stored.
+type Provider interface {
+	ObjectStorageSettings(ctx context.Context) (config.Storage, error)
+}
+
+// ConfigProvider adapts the typed application configuration to a Provider.
+type ConfigProvider struct {
+	cfg *config.Config
+}
+
+// NewConfigProvider returns a Provider backed by cfg.
+func NewConfigProvider(cfg *config.Config) ConfigProvider {
+	return ConfigProvider{cfg: cfg}
+}
+
+// ObjectStorageSettings returns the configured storage section.
+func (p ConfigProvider) ObjectStorageSettings(context.Context) (config.Storage, error) {
+	if p.cfg == nil {
+		return config.Storage{}, errors.New("objectstore: config is nil")
+	}
+	return p.cfg.Storage, nil
+}
+
+// Store is an S3-compatible object store bound to one bucket.
+//
+// It is safe for concurrent use: the underlying AWS SDK client is. The caller
+// owns the Store's lifecycle and calls Close when the work is done.
+type Store struct {
+	client     *s3.Client
+	presigner  *s3.PresignClient
+	httpClient *http.Client
+	bucket     string
+}
+
+// New builds a Store from the typed application configuration.
+//
+// It validates the storage section and maps it onto the S3 client options. It
+// never touches the network: no request is sent until the first operation and
+// the bucket is never created. Construction fails when the configuration is
+// incomplete, but never because the server is unreachable.
+func New(cfg *config.Config) (*Store, error) {
+	return NewWithProvider(context.Background(), NewConfigProvider(cfg))
+}
+
+// NewWithProvider builds a Store from a settings Provider.
+//
+// The provider is resolved exactly once, here, so a Store is bound to the
+// settings it was built with. That is the seam a future DB-backed site-config
+// runtime configuration implements to supply the settings without changing the
+// Store.
+func NewWithProvider(ctx context.Context, provider Provider) (*Store, error) {
+	if provider == nil {
+		return nil, errors.New("objectstore: provider is required")
+	}
+	settings, err := provider.ObjectStorageSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return newStore(settings)
+}
+
+func newStore(settings config.Storage) (*Store, error) {
+	if err := settings.Validate(); err != nil {
+		return nil, err
+	}
+	endpoint, err := settings.EndpointURL()
+	if err != nil {
+		return nil, err
+	}
+	transport := &http.Transport{}
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	}
+	httpClient := &http.Client{Transport: transport}
+	awsConfig := aws.Config{
+		Region:      strings.TrimSpace(settings.Region),
+		Credentials: aws.NewCredentialsCache(awscredentials.NewStaticCredentialsProvider(settings.AccessKeyID.Value(), settings.SecretAccessKey.Value(), "")),
+		HTTPClient:  httpClient,
+		// Checksums are requested only where the S3 protocol requires them, so a
+		// plain streaming upload is not rewritten into a chunked, checksummed
+		// body. S3-compatible servers that do not speak the newer checksum
+		// trailers therefore work unchanged.
+		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
+		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenRequired,
+	}
+	client := s3.NewFromConfig(awsConfig, func(options *s3.Options) {
+		options.UsePathStyle = settings.PathStyle
+		if endpoint != "" {
+			options.BaseEndpoint = aws.String(endpoint)
+		}
+	})
+	return &Store{
+		client:     client,
+		presigner:  s3.NewPresignClient(client),
+		httpClient: httpClient,
+		bucket:     strings.TrimSpace(settings.Bucket),
+	}, nil
+}
+
+// Close releases the store's idle HTTP connections. It deletes nothing. The
+// Store is not used again after Close.
+func (s *Store) Close() error {
+	if s != nil && s.httpClient != nil {
+		s.httpClient.CloseIdleConnections()
+	}
+	return nil
+}
+
+// Upload streams body to key and returns the stored object's ETag.
+//
+// The body is streamed to the server rather than buffered in memory, so a large
+// object never has to fit in RAM. Upload does not create the bucket and does not
+// retry: the caller passes a context to cancel the transfer. The body is
+// single-use, so a non-seekable reader is consumed exactly once over the default
+// TLS endpoint; an endpoint explicitly set to plaintext http signs the payload
+// hash and therefore needs a seekable body.
+func (s *Store) Upload(ctx context.Context, key string, body io.Reader) (string, error) {
+	if body == nil {
+		return "", errors.New("objectstore: upload body is required")
+	}
+	if err := validateKey(key); err != nil {
+		return "", err
+	}
+	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Body:   body,
+	})
+	if err != nil {
+		return "", fmt.Errorf("objectstore: upload %q: %w", key, err)
+	}
+	return aws.ToString(out.ETag), nil
+}
+
+// Download opens key for reading and returns its body.
+//
+// The body is streamed: it is not buffered, and the caller must Close it to
+// release the connection. The caller may read it in chunks and pass the context
+// to cancel the transfer.
+func (s *Store) Download(ctx context.Context, key string) (io.ReadCloser, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("objectstore: download %q: %w", key, err)
+	}
+	return out.Body, nil
+}
+
+// Delete removes key. Deleting a missing key succeeds, matching S3 semantics.
+func (s *Store) Delete(ctx context.Context, key string) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}); err != nil {
+		return fmt.Errorf("objectstore: delete %q: %w", key, err)
+	}
+	return nil
+}
+
+// PresignGet returns a time-limited URL that downloads key without a credential.
+//
+// The expiry is bounded: it must be positive and at most MaxPresignExpiry, the
+// S3 protocol's limit, so a URL can never be effectively permanent.
+func (s *Store) PresignGet(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	if err := validateKey(key); err != nil {
+		return "", err
+	}
+	if err := validateExpiry(expiry); err != nil {
+		return "", err
+	}
+	request, err := s.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(expiry))
+	if err != nil {
+		return "", fmt.Errorf("objectstore: presign download %q: %w", key, err)
+	}
+	return request.URL, nil
+}
+
+// PresignPut returns a time-limited URL that uploads key without a credential.
+//
+// The expiry is bounded exactly as PresignGet's: positive and at most
+// MaxPresignExpiry.
+func (s *Store) PresignPut(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	if err := validateKey(key); err != nil {
+		return "", err
+	}
+	if err := validateExpiry(expiry); err != nil {
+		return "", err
+	}
+	request, err := s.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(expiry))
+	if err != nil {
+		return "", fmt.Errorf("objectstore: presign upload %q: %w", key, err)
+	}
+	return request.URL, nil
+}
+
+// validateKey rejects an object key that is not a usable S3 key: blank,
+// absolute (leading slash) or longer than the protocol allows. S3 keys are
+// otherwise opaque strings.
+func validateKey(key string) error {
+	if strings.TrimSpace(key) == "" {
+		return errors.New("objectstore: key must not be blank")
+	}
+	if strings.HasPrefix(key, "/") {
+		return errors.New("objectstore: key must not start with a slash")
+	}
+	if len(key) > maxKeyLength {
+		return fmt.Errorf("objectstore: key length %d exceeds the %d byte maximum", len(key), maxKeyLength)
+	}
+	if strings.ContainsRune(key, 0) {
+		return errors.New("objectstore: key must not contain a NUL byte")
+	}
+	return nil
+}
+
+// validateExpiry bounds a presigned URL lifetime so it can never be permanent.
+func validateExpiry(expiry time.Duration) error {
+	if expiry <= 0 {
+		return errors.New("objectstore: presign expiry must be positive")
+	}
+	if expiry > MaxPresignExpiry {
+		return fmt.Errorf("objectstore: presign expiry %s exceeds the %s maximum", expiry, MaxPresignExpiry)
+	}
+	return nil
+}

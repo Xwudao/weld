@@ -2,7 +2,7 @@
 //
 // `weld new` creates a minimal Go CLI project and `weld add <capability>`
 // extends that same project one capability at a time. The template payloads
-// live in the github.com/Xwudao/weld-template module and are embedded into this
+// live in the internal/weldtemplate package and are embedded into this
 // binary.
 package main
 

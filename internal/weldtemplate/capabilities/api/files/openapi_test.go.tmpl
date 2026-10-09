@@ -1,0 +1,245 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/Xwudao/go-validate"
+	"github.com/getkin/kin-openapi/openapi3"
+)
+
+// TestDocumentIsValidOpenAPI31 parses the artifact with a standards-based
+// OpenAPI parser (kin-openapi), not just the internal structs, so the emitted
+// document is checked against the OpenAPI 3.1 meta-model.
+func TestDocumentIsValidOpenAPI31(t *testing.T) {
+	raw, err := OpenAPIJSON()
+	if err != nil {
+		t.Fatalf("OpenAPIJSON: %v", err)
+	}
+	loader := openapi3.NewLoader()
+	document, err := loader.LoadFromData(raw)
+	if err != nil {
+		t.Fatalf("load document: %v", err)
+	}
+	if err := document.Validate(context.Background()); err != nil {
+		t.Fatalf("document is not valid OpenAPI 3.1: %v", err)
+	}
+	if document.OpenAPI != "3.1.0" {
+		t.Fatalf("openapi = %q, want 3.1.0", document.OpenAPI)
+	}
+}
+
+func TestDocumentMapsSpecConstraints(t *testing.T) {
+	document, err := Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	create := document.Paths["/api/items"]["post"]
+	if create == nil || create.OperationID != "createItem" {
+		t.Fatalf("createItem operation missing: %+v", create)
+	}
+	body := create.RequestBody
+	if body == nil || !body.Required {
+		t.Fatalf("createItem body = %+v, want a required body", body)
+	}
+	properties := body.Content["application/json"].Schema.Properties
+
+	if name := properties["name"]; name.Type != "string" || *name.MinLength != 1 || *name.MaxLength != 100 {
+		t.Fatalf("name schema = %+v", name)
+	}
+	if quantity := properties["quantity"]; quantity.Type != "integer" || quantity.Minimum != 1 || quantity.Maximum != 1000 {
+		t.Fatalf("quantity schema = %+v", quantity)
+	}
+	if got := strings.Join(body.Content["application/json"].Schema.Required, ","); got != "name,quantity,status" {
+		t.Fatalf("required = %q, want name,quantity,status", got)
+	}
+	if _, ok := create.Responses["201"]; !ok {
+		t.Fatalf("responses = %v, want a 201 success response", create.Responses)
+	}
+	if _, ok := create.Responses["400"]; !ok {
+		t.Fatalf("responses = %v, want a 400 error response", create.Responses)
+	}
+}
+
+// TestDocumentWrapsResponseData proves the documented responses match the wire
+// format: a success response wraps the operation's schema under data, and an
+// error response is the envelope with data null.
+func TestDocumentWrapsResponseData(t *testing.T) {
+	document, err := Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	create := document.Paths["/api/items"]["post"]
+	success := create.Responses["201"].Content["application/json"].Schema
+	if success.Type != "object" {
+		t.Fatalf("success schema = %+v, want an envelope object", success)
+	}
+	if got := strings.Join(success.Required, ","); got != "code,msg,data" {
+		t.Fatalf("envelope required = %q, want code,msg,data", got)
+	}
+	if success.Properties["code"].Type != "integer" || success.Properties["msg"].Type != "string" {
+		t.Fatalf("envelope fields = %+v", success.Properties)
+	}
+	data := success.Properties["data"]
+	if data.Type != "object" || data.Properties["name"] == nil {
+		t.Fatalf("success data = %+v, want the ItemResponse object", data)
+	}
+	failure := create.Responses["400"].Content["application/json"].Schema
+	failureData := failure.Properties["data"]
+	if len(failureData.Enum) != 1 || failureData.Enum[0] != nil {
+		t.Fatalf("error data = %+v, want the single-value enum [null]", failureData)
+	}
+}
+
+func TestDocumentExportsEnumFromSpec(t *testing.T) {
+	// The enum is read back from the very Spec used for validation.
+	schema, err := (CreateItemRequest{}).Spec().Schema()
+	if err != nil {
+		t.Fatalf("Schema: %v", err)
+	}
+	want := schema.Field("status").Enum
+	if !reflect.DeepEqual(want, []any{"draft", "active", "archived"}) {
+		t.Fatalf("status enum in Spec = %v", want)
+	}
+
+	document, err := Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	status := document.Paths["/api/items"]["post"].RequestBody.Content["application/json"].Schema.Properties["status"]
+	if !reflect.DeepEqual(status.Enum, want) {
+		t.Fatalf("OpenAPI enum = %v, want the Spec enum %v", status.Enum, want)
+	}
+}
+
+func TestDocumentDocumentsQueryParameter(t *testing.T) {
+	document, err := Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	list := document.Paths["/api/items"]["get"]
+	if list == nil || list.OperationID != "listItems" {
+		t.Fatalf("listItems operation missing: %+v", list)
+	}
+	if len(list.Parameters) != 1 {
+		t.Fatalf("parameters = %+v, want one limit parameter", list.Parameters)
+	}
+	limit := list.Parameters[0]
+	if limit.Name != "limit" || limit.In != "query" || limit.Required {
+		t.Fatalf("limit parameter = %+v", limit)
+	}
+	if limit.Schema.Type != "integer" || limit.Schema.Minimum != 1 || limit.Schema.Maximum != 100 {
+		t.Fatalf("limit schema = %+v", limit.Schema)
+	}
+}
+
+func TestDocumentDocumentsPathParameter(t *testing.T) {
+	document, err := Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	get := document.Paths["/api/items/{id}"]["get"]
+	if get == nil || len(get.Parameters) != 1 {
+		t.Fatalf("getItem parameters = %+v", get)
+	}
+	id := get.Parameters[0]
+	if id.Name != "id" || id.In != "path" || !id.Required {
+		t.Fatalf("id parameter = %+v", id)
+	}
+}
+
+// TestSpecCoversEveryJSONField guards against drift between a DTO's wire shape
+// (its JSON tags) and its Spec (validation and documentation): the two must
+// name exactly the same fields, or the document would silently describe a
+// different payload than the handler accepts.
+func TestSpecCoversEveryJSONField(t *testing.T) {
+	dtos := []struct {
+		name  string
+		value speced
+	}{
+		{"CreateItemRequest", CreateItemRequest{}},
+		{"ItemResponse", ItemResponse{}},
+		{"listItemsQuery", listItemsQuery{}},
+	}
+	for _, dto := range dtos {
+		jsonNames := jsonFieldNames(dto.value)
+		schema, err := dto.value.Spec().Schema()
+		if err != nil {
+			t.Fatalf("%s: Schema: %v", dto.name, err)
+		}
+		if got := schema.Names(); !reflect.DeepEqual(got, jsonNames) {
+			t.Errorf("%s: Spec names %v, JSON tags %v", dto.name, got, jsonNames)
+		}
+	}
+}
+
+func jsonFieldNames(value any) []string {
+	typ := reflect.TypeOf(value)
+	names := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// TestDocumentRejectsUnsupportedConstraint proves the document is never
+// silently incomplete: a custom rule with no machine-readable form fails the
+// build instead of being dropped.
+func TestDocumentRejectsUnsupportedConstraint(t *testing.T) {
+	operation := Operation{
+		Method:        http.MethodGet,
+		Path:          "/api/broken",
+		OperationID:   "broken",
+		SuccessStatus: http.StatusOK,
+		Success: func() (*JSONSchema, error) {
+			return schemaFromSpec(validate.Spec{
+				validate.String("name", "", validate.Custom(func(string) error { return nil })),
+			})
+		},
+		handle: func(Service) http.HandlerFunc { return func(http.ResponseWriter, *http.Request) {} },
+	}
+	if _, err := buildDocument([]Operation{operation}); err == nil {
+		t.Fatal("expected an error for a constraint without a schema mapping")
+	}
+}
+
+// TestDocumentRejectsMissingOperationID proves an incomplete contract is
+// rejected rather than emitted without an operationId.
+func TestDocumentRejectsMissingOperationID(t *testing.T) {
+	operation := Operation{
+		Method:        http.MethodGet,
+		Path:          "/api/broken",
+		SuccessStatus: http.StatusOK,
+		Success:       objectOf[ItemResponse](),
+		handle:        func(Service) http.HandlerFunc { return func(http.ResponseWriter, *http.Request) {} },
+	}
+	if _, err := buildDocument([]Operation{operation}); err == nil {
+		t.Fatal("expected an error for a missing operationId")
+	}
+}
+
+// TestDocumentCoversEveryRoute keeps the route table and the document in step:
+// every registered operation appears in the document under the same method.
+func TestDocumentCoversEveryRoute(t *testing.T) {
+	document, err := Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	for _, operation := range operations() {
+		path := document.Paths[operation.Path]
+		if path == nil {
+			t.Errorf("%s is not documented", operation.route())
+			continue
+		}
+		if path[strings.ToLower(operation.Method)] == nil {
+			t.Errorf("%s has no %s operation", operation.Path, operation.Method)
+		}
+	}
+}

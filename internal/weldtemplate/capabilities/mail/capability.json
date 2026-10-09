@@ -1,0 +1,24 @@
+{
+  "name": "mail",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "Opt-in SMTP mail: typed, secret-redacted configuration and a sender built on go-mail. It dials once per Send with an explicit TLS policy and verifies the server certificate by default; installing it never sends, never connects and never wires itself into HTTP, the database or Loom.",
+  "requires": ["loom"],
+  "files": [
+    { "path": "internal/config/mail.go", "source": "files/mail_config.go.tmpl" },
+    { "path": "internal/config/mail_test.go", "source": "files/mail_config_test.go.tmpl" },
+    { "path": "internal/mailsender/mailsender.go", "source": "files/mailsender.go.tmpl" },
+    { "path": "internal/mailsender/mailsender_test.go", "source": "files/mailsender_test.go.tmpl" },
+    { "path": "internal/mailsender/README.md", "source": "files/README.md" },
+    { "path": "internal/di/mail_provider.go", "source": "files/mail_provider.go.tmpl", "when": ["loom"] }
+  ],
+  "patches": [
+    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
+    { "path": "go.mod", "marker": "goversion", "mode": "replace", "source": "files/goversion.snippet" },
+    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
+    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" },
+    { "path": "internal/config/config.go", "marker": "configfields", "source": "files/config_fields.snippet" },
+    { "path": "internal/config/config.go", "marker": "configenv", "source": "files/config_env.snippet" },
+    { "path": "internal/config/config.go", "marker": "configdefaults", "source": "files/config_defaults.snippet" }
+  ]
+}

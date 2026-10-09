@@ -1,0 +1,82 @@
+package config
+
+// Cron configuration: the scheduler timezone and the environment, defaults and
+// validation that back it.
+//
+// This file is written once by `weld add cron` and belongs to the config
+// package, so it can define methods on Config. The Config struct field and the
+// loader calls into this file are added by marker patches to
+// internal/config/config.go; the regions that hold them are weld-managed and
+// never rewritten outside the marker.
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// DefaultCronTimezone is the timezone schedules are evaluated in when the
+// configuration names none. UTC keeps a schedule's meaning independent of the
+// host clock and location.
+const DefaultCronTimezone = "UTC"
+
+// EnvCronTimezone overrides cron.timezone. It is not required when the value is
+// in the file or the default is acceptable.
+const EnvCronTimezone = "CRON_TIMEZONE"
+
+// Cron holds the scheduling settings.
+//
+// The timezone is the only setting: jobs are registered at run time through
+// internal/cron, not declared here, so installing the capability never schedules
+// work by itself.
+type Cron struct {
+	Timezone string `yaml:"timezone"`
+}
+
+// applyCronEnv overrides the cron section with the environment. An explicitly
+// blank CRON_TIMEZONE is an error rather than a silent fallback.
+func (c *Config) applyCronEnv(lookupEnv LookupEnvFunc) error {
+	value, ok := lookupEnv(EnvCronTimezone)
+	if !ok {
+		return nil
+	}
+	zone := strings.TrimSpace(value)
+	if zone == "" {
+		return fmt.Errorf("config: %s is set but blank", EnvCronTimezone)
+	}
+	c.Cron.Timezone = zone
+	return nil
+}
+
+// applyCronDefaults fills the explicit cron default after the file and the
+// environment.
+func (c *Config) applyCronDefaults() {
+	if strings.TrimSpace(c.Cron.Timezone) == "" {
+		c.Cron.Timezone = DefaultCronTimezone
+	}
+}
+
+// ValidateCron reports whether the configured timezone can be loaded.
+//
+// It is called only where the scheduler is actually started, so a command that
+// never schedules anything needs no timezone setting.
+func (c *Config) ValidateCron() error {
+	_, err := c.Cron.Location()
+	return err
+}
+
+// Location resolves the configured timezone. An empty or "UTC" value means
+// time.UTC. A named zone is loaded from the host's zoneinfo database, so an
+// unknown name — or a host without zoneinfo and a named zone — is an error
+// rather than a silent fallback to local time.
+func (c *Cron) Location() (*time.Location, error) {
+	zone := strings.TrimSpace(c.Timezone)
+	if zone == "" || strings.EqualFold(zone, "UTC") {
+		return time.UTC, nil
+	}
+	location, err := time.LoadLocation(zone)
+	if err != nil {
+		return nil, fmt.Errorf("config: cron.timezone: unknown timezone %q", zone)
+	}
+	return location, nil
+}

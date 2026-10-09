@@ -1,0 +1,133 @@
+package redisclient
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+
+	"__module__/internal/config"
+)
+
+// miniServer starts an in-process RESP server and returns its address. Tests use
+// the real go-redis client against it, so key, value and TTL semantics are the
+// real command semantics rather than a hand-written fake.
+func miniServer(t *testing.T) string {
+	t.Helper()
+	return miniredis.RunT(t).Addr()
+}
+
+// TestNewDoesNotConnect proves the constructor is idle: the address points at a
+// closed port, yet New succeeds, and Close is safe without a connection.
+func TestNewDoesNotConnect(t *testing.T) {
+	client, err := New(&config.Config{Redis: config.Redis{Addr: "127.0.0.1:1"}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestNewRequiresAnAddress proves the one validation that guards the client: a
+// blank address fails loudly instead of reaching an invented default. The loader
+// fills the default, so this is the only path that can leave it blank.
+func TestNewRequiresAnAddress(t *testing.T) {
+	client, err := New(&config.Config{})
+	if err == nil {
+		_ = client.Close()
+		t.Fatal("expected an error for a blank Redis address")
+	}
+	if client != nil {
+		t.Fatal("New returned a client alongside an error")
+	}
+}
+
+// TestNewAppliesTypedOptions proves the typed configuration reaches the client
+// options, including the redacting username and password. It asserts fields
+// individually and never formats the options, so a failing test cannot leak the
+// credential.
+func TestNewAppliesTypedOptions(t *testing.T) {
+	cfg := &config.Config{Redis: config.Redis{
+		Addr:     "redis.example:6380",
+		Username: "app",
+		Password: "sentinel-password",
+		DB:       3,
+		TLS:      true,
+	}}
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer client.Close()
+
+	options := client.Options()
+	if options.Addr != "redis.example:6380" {
+		t.Fatalf("Addr = %q", options.Addr)
+	}
+	if options.Username != cfg.Redis.Username.Value() {
+		t.Fatalf("Username = %q", options.Username)
+	}
+	if options.Password != cfg.Redis.Password.Value() {
+		t.Fatal("Password was not mapped onto the client options")
+	}
+	if options.DB != 3 {
+		t.Fatalf("DB = %d, want 3", options.DB)
+	}
+	if options.TLSConfig == nil {
+		t.Fatal("TLS was requested but no TLS config was applied")
+	}
+}
+
+// TestClientSetGetTTL exercises the returned client against a real in-process
+// RESP server: SET stores a value with a TTL, GET reads it back, and TTL reports
+// a positive remaining lifetime.
+func TestClientSetGetTTL(t *testing.T) {
+	client, err := New(&config.Config{Redis: config.Redis{Addr: miniServer(t)}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	if err := client.Set(ctx, "demo:key", "value", 2*time.Minute).Err(); err != nil {
+		t.Fatalf("SET: %v", err)
+	}
+	got, err := client.Get(ctx, "demo:key").Result()
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	if got != "value" {
+		t.Fatalf("GET = %q, want value", got)
+	}
+	ttl, err := client.TTL(ctx, "demo:key").Result()
+	if err != nil {
+		t.Fatalf("TTL: %v", err)
+	}
+	if ttl <= 0 || ttl > 2*time.Minute {
+		t.Fatalf("TTL = %v, want within (0, 2m]", ttl)
+	}
+}
+
+// TestClientExpiresKeys proves the TTL is real: after the server advances past
+// it, the key is gone and GET reports redis.Nil.
+func TestClientExpiresKeys(t *testing.T) {
+	server := miniredis.RunT(t)
+	client, err := New(&config.Config{Redis: config.Redis{Addr: server.Addr()}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	if err := client.Set(ctx, "demo:key", "value", time.Minute).Err(); err != nil {
+		t.Fatalf("SET: %v", err)
+	}
+	server.FastForward(time.Minute + time.Second)
+	if _, err := client.Get(ctx, "demo:key").Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("GET after expiry error = %v, want redis.Nil", err)
+	}
+}

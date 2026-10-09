@@ -9,7 +9,7 @@ import (
 	"strings"
 	"text/template"
 
-	weldtemplate "github.com/Xwudao/weld-template"
+	weldtemplate "github.com/Xwudao/weld/internal/weldtemplate"
 )
 
 // CommandVariant is one flavour of the per-name command payload: the
@@ -34,7 +34,7 @@ type CommandTemplate struct {
 	fsys    fs.FS
 }
 
-// LoadCommands returns the command payload embedded in the weld-template module.
+// LoadCommands returns the command payload embedded in this weld module.
 func LoadCommands() (*CommandTemplate, error) {
 	root := weldtemplate.FS()
 	raw, err := fs.ReadFile(root, "commands/command.json")

@@ -1,0 +1,60 @@
+// Package __modname__ is a generated HTTP business module for __name__.
+//
+// weld generated this package once, when `weld add module __modname__` ran, and
+// recorded every file in weld.json. It is a small, replaceable example: a typed
+// request and response, a Service seam, and a Go HTTP handler registered under
+// /api/__modname__. Editing it is expected; weld never regenerates it, so your
+// changes survive later `weld add` commands.
+//
+// The default Service is an in-memory demo. It keeps no state across restarts
+// and is not persistence; replace the body of NewService in service.go with your
+// own implementation, or change its signature to take a dependency (the Loom
+// server graph binds it through loom.Provide, which follows the signature).
+// NewDemoService is the built-in demo constructor, used by this package's own
+// tests so they keep compiling after NewService changes.
+//
+// The handler writes responses through internal/httpx, the shared toolkit the
+// built-in API also uses: httpx.JSON wraps a value in the {code,msg,data}
+// envelope and httpx.Error writes an error envelope with data null. Use
+// httpx.RawText, httpx.Bytes or httpx.NoContent for a response that must stay
+// unwrapped.
+//
+// Wiring is entirely through the generated internal/di graph: the server graph
+// provides __modname__.NewService and registers this module on the composed mux
+// (di.newMux). A module added after Loom appears in the graph without weld
+// editing any file here.
+//
+// Keep the Service interface and the NewService and NewDemoService symbols
+// stable when you replace the demo.
+package __modname__
+
+import (
+	nethttp "net/http"
+
+	"__module__/internal/httpx"
+)
+
+// RoutePrefix is the URL path this module serves. It owns one segment under the
+// reserved /api namespace.
+const RoutePrefix = "/api/__modname__"
+
+// Register installs the module's routes on mux.
+//
+// It takes the Service rather than constructing one, so the caller owns the
+// module's dependencies and a test can inject a fake. The Loom server graph
+// calls it with the Service it provides.
+func Register(mux *nethttp.ServeMux, service Service) {
+	mux.HandleFunc("GET "+RoutePrefix, handle(service))
+}
+
+// handle adapts the Service to net/http.
+func handle(service Service) nethttp.HandlerFunc {
+	return func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		response, err := service.Greet(r.Context(), Request{Name: r.URL.Query().Get("name")})
+		if err != nil {
+			httpx.Error(w, nethttp.StatusInternalServerError, "greeting failed")
+			return
+		}
+		httpx.JSON(w, nethttp.StatusOK, response)
+	}
+}

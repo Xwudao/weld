@@ -1,0 +1,35 @@
+package httpserver
+
+import (
+	"log/slog"
+
+	"__module__/internal/httpx"
+)
+
+// middlewareChain is the project-owned middleware configuration.
+//
+// It is the one place the HTTP middleware stack is declared, and it is written
+// once when the http capability is installed: weld never regenerates this file,
+// so edits here survive every later `weld add`. Reorder the list, remove an
+// entry or append your own middleware; Chain applies whatever this returns, so
+// the Loom composition always serves this stack.
+//
+// The list is applied outer-to-inner: the first entry is the outermost wrapper,
+// so it sees a request first and the response last. The default order is
+//
+//	RequestID  assigns and echoes X-Request-Id and stores it on the context
+//	AccessLog  records one structured line per request (no bodies, no query)
+//	Recover    turns a handler panic into a logged 500 error envelope
+//
+// so every access-log line carries the request id, records the transport status
+// the client sees, and a single panicking request is contained rather than
+// killing the process. No authentication, CORS or rate limiting is enabled by
+// default: add such middleware here when the project needs it. The base CLI
+// installs none of this, because it has no HTTP server.
+func middlewareChain(logger *slog.Logger) []httpx.Middleware {
+	return []httpx.Middleware{
+		httpx.RequestID(),
+		httpx.AccessLog(logger),
+		httpx.Recover(logger),
+	}
+}

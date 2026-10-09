@@ -1,0 +1,318 @@
+package cron
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	robfigcron "github.com/robfig/cron/v3"
+)
+
+// testLogger builds a logger that discards output. Tests that assert on log
+// records build their own logger over a buffer.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// TestJobRunsDirectly proves a Job needs no scheduler and no wall clock: it is
+// invoked directly with a context, so job behavior is checked deterministically.
+func TestJobRunsDirectly(t *testing.T) {
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "value")
+	var seen string
+	job := Job(func(got context.Context) {
+		seen, _ = got.Value(ctxKey{}).(string)
+	})
+	job(ctx)
+	if seen != "value" {
+		t.Fatalf("job saw %q, want the context value", seen)
+	}
+}
+
+// TestNewDefaultsToUTC pins the timezone default: schedules are interpreted in
+// UTC unless WithLocation says otherwise.
+func TestNewDefaultsToUTC(t *testing.T) {
+	if got := New(testLogger()).runner.Location(); got != time.UTC {
+		t.Fatalf("default location = %v, want UTC", got)
+	}
+	// A nil location keeps the default rather than introducing a nil.
+	if got := New(testLogger(), WithLocation(nil)).runner.Location(); got != time.UTC {
+		t.Fatalf("location after WithLocation(nil) = %v, want UTC", got)
+	}
+}
+
+// TestWithLocationIsHonored proves a named timezone is honored when the host can
+// resolve it.
+func TestWithLocationIsHonored(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("host has no zoneinfo for a named zone: %v", err)
+	}
+	if got := New(testLogger(), WithLocation(location)).runner.Location(); got != location {
+		t.Fatalf("location = %v, want %v", got, location)
+	}
+}
+
+// TestRegisterRejectsInvalidInput proves invalid names, jobs and specs fail
+// loudly and register nothing. The spec checks pin the five-field parser: the
+// six-field seconds form and the @descriptor shortcuts are rejected.
+func TestRegisterRejectsInvalidInput(t *testing.T) {
+	s := New(testLogger())
+	job := func(context.Context) {}
+	cases := []struct {
+		name string
+		job  Job
+		spec string
+	}{
+		{name: "", job: job, spec: "* * * * *"},
+		{name: "   ", job: job, spec: "* * * * *"},
+		{name: "nil", job: nil, spec: "* * * * *"},
+		{name: "empty", job: job, spec: ""},
+		{name: "garbage", job: job, spec: "not a spec"},
+		{name: "six-field", job: job, spec: "0 0 0 * * *"},
+		{name: "descriptor", job: job, spec: "@daily"},
+	}
+	for _, tc := range cases {
+		if err := s.Register(tc.name, tc.spec, tc.job); err == nil {
+			t.Errorf("Register(%q, %q) succeeded, want an error", tc.name, tc.spec)
+		}
+	}
+	if len(s.entries) != 0 {
+		t.Fatalf("entries = %d, want none registered", len(s.entries))
+	}
+}
+
+// TestRegisterIsUnique pins the unique-name contract.
+func TestRegisterIsUnique(t *testing.T) {
+	s := New(testLogger())
+	job := func(context.Context) {}
+	if err := s.Register("nightly", "* * * * *", job); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	err := s.Register("nightly", "0 0 * * *", job)
+	if !errors.Is(err, ErrJobExists) {
+		t.Fatalf("duplicate Register error = %v, want ErrJobExists", err)
+	}
+	if len(s.entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(s.entries))
+	}
+}
+
+// TestRemoveAndReschedule pins the registry transitions, including the rule that
+// an invalid reschedule leaves the current schedule untouched.
+func TestRemoveAndReschedule(t *testing.T) {
+	s := New(testLogger())
+	job := func(context.Context) {}
+	if err := s.Register("nightly", "* * * * *", job); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	before := s.entries["nightly"]
+
+	if err := s.Reschedule("nightly", "still not a spec"); err == nil {
+		t.Fatal("Reschedule with an invalid spec succeeded, want an error")
+	}
+	if got := s.entries["nightly"]; got.id != before.id {
+		t.Fatal("an invalid reschedule changed the registered entry")
+	}
+	if err := s.Reschedule("missing", "* * * * *"); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("Reschedule of an unknown job = %v, want ErrJobNotFound", err)
+	}
+
+	if err := s.Reschedule("nightly", "0 0 * * *"); err != nil {
+		t.Fatalf("Reschedule: %v", err)
+	}
+	after := s.entries["nightly"]
+	if after.id == before.id {
+		t.Fatal("Reschedule did not replace the scheduled entry")
+	}
+	if after.run == nil {
+		t.Fatal("Reschedule dropped the job function")
+	}
+
+	if err := s.Remove("nightly"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, ok := s.entries["nightly"]; ok {
+		t.Fatal("Remove left the job registered")
+	}
+	if err := s.Remove("nightly"); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("Remove of an unknown job = %v, want ErrJobNotFound", err)
+	}
+}
+
+// TestDynamicChangesWhileRunning proves jobs can be registered, rescheduled and
+// removed after Start, not only before it.
+func TestDynamicChangesWhileRunning(t *testing.T) {
+	s := New(testLogger())
+	if err := s.Register("first", "0 0 1 1 *", func(context.Context) {}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.Start(context.Background())
+	t.Cleanup(func() { stopScheduler(t, s) })
+
+	before := s.entries["first"]
+	if err := s.Reschedule("first", "0 0 1 1 *"); err != nil {
+		t.Fatalf("Reschedule after Start: %v", err)
+	}
+	if after := s.entries["first"]; after.id == before.id {
+		t.Fatal("Reschedule after Start did not replace the scheduled entry")
+	}
+	if err := s.Register("second", "0 0 1 1 *", func(context.Context) {}); err != nil {
+		t.Fatalf("Register after Start: %v", err)
+	}
+	if err := s.Remove("second"); err != nil {
+		t.Fatalf("Remove after Start: %v", err)
+	}
+}
+
+// TestOverlapIsSkipped proves a tick that arrives while the previous execution is
+// still running is skipped, and that the guard is released once it finishes. It
+// invokes the wrapped job directly, so no schedule has to fire.
+func TestOverlapIsSkipped(t *testing.T) {
+	s := New(testLogger())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var runs atomic.Int32
+	var once sync.Once
+	if err := s.Register("slow", "* * * * *", func(context.Context) {
+		runs.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	wrapped := wrappedJob(s, "slow")
+
+	firstDone := make(chan struct{})
+	go func() {
+		wrapped.Run()
+		close(firstDone)
+	}()
+	<-started
+
+	// The second invocation must return without running the job.
+	wrapped.Run()
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("runs = %d, want 1: the overlapping run was not skipped", got)
+	}
+
+	close(release)
+	<-firstDone
+
+	// Once the first run finished, the guard is free again.
+	wrapped.Run()
+	if got := runs.Load(); got != 2 {
+		t.Fatalf("runs = %d, want 2", got)
+	}
+}
+
+// TestPanicIsRecovered proves a panicking job is logged, never crashes the
+// process, and does not leave the overlap guard permanently held.
+func TestPanicIsRecovered(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(slog.New(slog.NewTextHandler(&buf, nil)))
+	if err := s.Register("boom", "* * * * *", func(context.Context) { panic("kaboom") }); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	wrapped := wrappedJob(s, "boom")
+
+	// Neither invocation may propagate the panic.
+	wrapped.Run()
+	wrapped.Run()
+
+	if got := strings.Count(buf.String(), "msg=panic"); got != 2 {
+		t.Fatalf("recovered panics logged = %d, want 2 (the guard must be released after a panic):\n%s", got, buf.String())
+	}
+}
+
+// TestStopCancelsJobContext proves Stop is graceful: it cancels the context the
+// jobs run under.
+func TestStopCancelsJobContext(t *testing.T) {
+	s := New(testLogger())
+	jobCtx := make(chan context.Context, 1)
+	if err := s.Register("wait", "* * * * *", func(ctx context.Context) { jobCtx <- ctx }); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.Start(context.Background())
+
+	entry := s.runner.Entry(s.entries["wait"].id)
+	if !entry.Valid() {
+		t.Fatal("the registered entry is not valid")
+	}
+	done := make(chan struct{})
+	go func() {
+		entry.WrappedJob.Run()
+		close(done)
+	}()
+	ctx := <-jobCtx
+	<-done
+
+	stopScheduler(t, s)
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not cancel the job context")
+	}
+}
+
+// TestStartStopRunsNothingWithoutJobs proves a scheduler with no jobs — the
+// state right after `weld add cron` — starts and stops cleanly and runs nothing.
+func TestStartStopRunsNothingWithoutJobs(t *testing.T) {
+	s := New(testLogger())
+	s.Start(context.Background())
+	stopScheduler(t, s)
+}
+
+// TestStopBeforeStartIsSafe proves Stop is safe when the scheduler never ran.
+func TestStopBeforeStartIsSafe(t *testing.T) {
+	s := New(testLogger())
+	if err := s.Register("nightly", "0 0 * * *", func(context.Context) {}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	stopScheduler(t, s)
+}
+
+// TestConcurrentRegistration exercises the registry from many goroutines at once
+// and is meaningful under -race.
+func TestConcurrentRegistration(t *testing.T) {
+	s := New(testLogger())
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.Register("job-"+strconv.Itoa(i), "* * * * *", func(context.Context) {}); err != nil {
+				t.Errorf("Register: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(s.entries) != 32 {
+		t.Fatalf("entries = %d, want 32", len(s.entries))
+	}
+}
+
+// wrappedJob returns the decorated function robfig invokes for a registered job,
+// so a test can drive the overlap guard and panic recovery without waiting for a
+// schedule to fire.
+func wrappedJob(s *Scheduler, name string) robfigcron.Job {
+	return s.runner.Entry(s.entries[name].id).WrappedJob
+}
+
+func stopScheduler(t *testing.T, s *Scheduler) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}

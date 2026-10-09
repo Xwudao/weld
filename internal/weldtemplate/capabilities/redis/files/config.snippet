@@ -1,0 +1,10 @@
+# weld:redis:installed __version__
+# Redis connection. The address is the only field with a default; the username
+# and password are optional. A password may live here for local development;
+# production should override REDIS_PASSWORD in the environment.
+redis:
+  addr: "localhost:6379"
+  username: ""
+  password: ""
+  db: 0
+  tls: false

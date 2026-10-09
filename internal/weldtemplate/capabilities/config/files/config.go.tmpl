@@ -1,0 +1,296 @@
+// Package config loads the __name__ configuration.
+//
+// Configuration is a typed Go struct read from a YAML file (config.yml in the
+// working directory by default) and overridden by the environment. Precedence,
+// highest first, is: command-line flag, environment variable, YAML file, then
+// the built-in defaults. The loader takes its file reader and environment
+// lookup as dependencies, so a test exercises every branch without touching the
+// filesystem or the process environment; every Loom graph shares this one
+// loader.
+//
+// The database section is optional and is validated only when the database is
+// actually used, so an http-only project never needs a database setting. A
+// database password may live in the local, git-ignored config.yml for
+// development; the Secret type keeps it out of logs and formatted output, and a
+// production environment overrides it through DB_PASSWORD or DATABASE_URL.
+//
+// The typed sections are closed but extensible: three marker regions
+// (weld:configfields, weld:configenv, weld:configdefaults) let a later
+// capability add its own field, environment overrides and defaults through a
+// marker patch without weld rewriting anything outside the region. A capability
+// that needs a new section adds the field, the redacting type and the accessor
+// in the same package (for example internal/config/redis.go).
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// DefaultPath is the configuration file the loader reads when no explicit path
+// is given. It is resolved relative to the working directory.
+const DefaultPath = "config.yml"
+
+// DefaultHTTPAddr is the listen address used when neither the file, the
+// environment nor a flag sets one.
+const DefaultHTTPAddr = ":8080"
+
+// DefaultDBHost and DefaultDBPort are the connection defaults for an omitted
+// host or port. They are not credentials: the user, password and name have no
+// default, so a database-backed app can never silently reach a local database.
+const (
+	DefaultDBHost = "localhost"
+	DefaultDBPort = 5432
+)
+
+// Environment variable names. A production environment overrides the YAML file
+// through these; none is required when the corresponding setting is in the file.
+const (
+	EnvHTTPAddr    = "HTTP_ADDR"
+	EnvDBHost      = "DB_HOST"
+	EnvDBPort      = "DB_PORT"
+	EnvDBUser      = "DB_USER"
+	EnvDBPassword  = "DB_PASSWORD"
+	EnvDBName      = "DB_NAME"
+	EnvDatabaseURL = "DATABASE_URL"
+)
+
+// Secret is a string that must never be printed.
+//
+// It redacts itself in fmt, log/slog, JSON and YAML output, so a configuration
+// value can be logged or marshalled without leaking a credential. Value is the
+// one accessor that reveals the underlying string.
+type Secret string
+
+// Value returns the underlying secret. It is the only accessor that reveals it.
+func (s Secret) Value() string { return string(s) }
+
+// String redacts the secret for fmt.
+func (Secret) String() string { return "[REDACTED]" }
+
+// GoString redacts the secret for the %#v verb.
+func (Secret) GoString() string { return "[REDACTED]" }
+
+// LogValue redacts the secret for log/slog.
+func (Secret) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
+
+// MarshalJSON redacts the secret in JSON output.
+func (Secret) MarshalJSON() ([]byte, error) { return []byte(`"[REDACTED]"`), nil }
+
+// MarshalYAML redacts the secret in YAML output.
+func (Secret) MarshalYAML() (interface{}, error) { return "[REDACTED]", nil }
+
+// UnmarshalYAML reads the secret from a YAML scalar. Loading is the one place
+// the plaintext is accepted.
+func (s *Secret) UnmarshalYAML(value *yaml.Node) error {
+	var raw string
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*s = Secret(raw)
+	return nil
+}
+
+// Config is the typed application configuration.
+type Config struct {
+	HTTP     HTTP     `yaml:"http"`
+	Database Database `yaml:"database"`
+	// weld:configfields:begin
+	// A capability that extends the typed configuration appends its field here
+	// through a marker patch; weld never rewrites the region's owner. The base
+	// scaffold keeps it empty.
+	// weld:configfields:end
+}
+
+// HTTP holds the HTTP server settings.
+type HTTP struct {
+	Addr string `yaml:"addr"`
+}
+
+// Database holds the PostgreSQL connection settings.
+//
+// It is validated only when the database is actually used, so an http-only
+// project may leave the section empty. DSN, when set, is used verbatim instead
+// of the individual fields.
+type Database struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password Secret `yaml:"password"`
+	Name     string `yaml:"name"`
+	DSN      Secret `yaml:"dsn"`
+}
+
+// ReadFileFunc reads a file. It is a dependency so a test can supply content
+// without touching the filesystem.
+type ReadFileFunc func(name string) ([]byte, error)
+
+// LookupEnvFunc reads an environment variable. It is a dependency so a test can
+// supply values without touching the process environment.
+type LookupEnvFunc func(key string) (value string, ok bool)
+
+// Loader loads configuration from a YAML file and the environment.
+type Loader struct {
+	readFile  ReadFileFunc
+	lookupEnv LookupEnvFunc
+}
+
+// NewLoader builds a loader with explicit dependencies.
+func NewLoader(readFile ReadFileFunc, lookupEnv LookupEnvFunc) *Loader {
+	return &Loader{readFile: readFile, lookupEnv: lookupEnv}
+}
+
+// NewOsLoader builds the loader ordinary endpoints use: the filesystem and the
+// process environment. Every Loom graph uses it, so there is one
+// configuration path.
+func NewOsLoader() *Loader {
+	return NewLoader(os.ReadFile, os.LookupEnv)
+}
+
+// Load reads configuration. path is the explicit --config value; an empty path
+// means DefaultPath in the working directory.
+//
+// A missing or unreadable file and an invalid file are both errors: an absent
+// config.yml is never silently replaced with defaults, and a malformed file is
+// never partially applied. The error never quotes the file content, so a
+// malformed secret cannot reach a log record. Environment variables then
+// override the file, and the caller applies command-line flags last.
+func (l *Loader) Load(path string) (*Config, error) {
+	if l == nil || l.readFile == nil || l.lookupEnv == nil {
+		return nil, errors.New("config: loader needs a file reader and an environment lookup")
+	}
+	if strings.TrimSpace(path) == "" {
+		path = DefaultPath
+	}
+	raw, err := l.readFile(path)
+	switch {
+	case err == nil:
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf("config: %s: file not found", path)
+	default:
+		return nil, fmt.Errorf("config: read %s: %w", path, err)
+	}
+	cfg := &Config{}
+	if err := yaml.Unmarshal(raw, cfg); err != nil {
+		// The parser error can quote the offending line, so it is not included.
+		return nil, fmt.Errorf("config: %s: invalid YAML", path)
+	}
+	if err := l.applyEnv(cfg); err != nil {
+		return nil, err
+	}
+	l.applyDefaults(cfg)
+	return cfg, nil
+}
+
+// applyEnv overrides the file with environment variables. A variable that
+// cannot be parsed is an error rather than a silent fallback.
+func (l *Loader) applyEnv(cfg *Config) error {
+	if value, ok := l.lookupEnv(EnvHTTPAddr); ok {
+		addr := strings.TrimSpace(value)
+		if addr == "" {
+			// An explicitly set but blank variable must not silently fall back to
+			// the default: the operator set it and the value is invalid.
+			return fmt.Errorf("config: %s is set but blank", EnvHTTPAddr)
+		}
+		cfg.HTTP.Addr = addr
+	}
+	if value, ok := l.lookupEnv(EnvDBHost); ok {
+		cfg.Database.Host = strings.TrimSpace(value)
+	}
+	if value, ok := l.lookupEnv(EnvDBPort); ok {
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a number", EnvDBPort)
+		}
+		cfg.Database.Port = port
+	}
+	if value, ok := l.lookupEnv(EnvDBUser); ok {
+		cfg.Database.User = strings.TrimSpace(value)
+	}
+	if value, ok := l.lookupEnv(EnvDBPassword); ok {
+		cfg.Database.Password = Secret(value)
+	}
+	if value, ok := l.lookupEnv(EnvDBName); ok {
+		cfg.Database.Name = strings.TrimSpace(value)
+	}
+	if value, ok := l.lookupEnv(EnvDatabaseURL); ok {
+		cfg.Database.DSN = Secret(strings.TrimSpace(value))
+	}
+	// weld:configenv:begin
+	// A capability that extends the typed configuration applies its environment
+	// overrides here through a marker patch.
+	// weld:configenv:end
+	return nil
+}
+
+// applyDefaults fills the explicit code defaults, after the file and the
+// environment. It never invents a database credential.
+func (l *Loader) applyDefaults(cfg *Config) {
+	if strings.TrimSpace(cfg.HTTP.Addr) == "" {
+		cfg.HTTP.Addr = DefaultHTTPAddr
+	}
+	if strings.TrimSpace(cfg.Database.Host) == "" {
+		cfg.Database.Host = DefaultDBHost
+	}
+	if cfg.Database.Port == 0 {
+		cfg.Database.Port = DefaultDBPort
+	}
+	// weld:configdefaults:begin
+	// A capability that extends the typed configuration applies its defaults
+	// here through a marker patch.
+	// weld:configdefaults:end
+}
+
+// Validate reports whether the HTTP settings are usable.
+func (c *Config) Validate() error {
+	if strings.TrimSpace(c.HTTP.Addr) == "" {
+		return errors.New("config: http.addr must not be blank")
+	}
+	return nil
+}
+
+// ValidateDatabase reports whether the database settings are usable.
+//
+// It is called only where the database is actually used, so a project that
+// installs the db capability but never opens a pool does not need a database
+// setting. It never invents a credential.
+func (c *Config) ValidateDatabase() error {
+	if strings.TrimSpace(c.Database.DSN.Value()) != "" {
+		return nil
+	}
+	switch {
+	case strings.TrimSpace(c.Database.Host) == "":
+		return errors.New("config: database.host is required")
+	case c.Database.Port <= 0:
+		return errors.New("config: database.port is required")
+	case strings.TrimSpace(c.Database.User) == "":
+		return errors.New("config: database.user is required (set it in config.yml, " + EnvDBUser + " or " + EnvDatabaseURL + ")")
+	case strings.TrimSpace(c.Database.Name) == "":
+		return errors.New("config: database.name is required (set it in config.yml or " + EnvDBName + ")")
+	}
+	return nil
+}
+
+// DSN returns the PostgreSQL connection string: the explicit dsn when set,
+// otherwise one built from the individual fields. It is the one place the
+// password is read, and the caller must not log the result.
+func (c *Config) DSN() string {
+	if dsn := strings.TrimSpace(c.Database.DSN.Value()); dsn != "" {
+		return dsn
+	}
+	return (&url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(c.Database.User, c.Database.Password.Value()),
+		Host:   net.JoinHostPort(c.Database.Host, strconv.Itoa(c.Database.Port)),
+		Path:   c.Database.Name,
+	}).String()
+}

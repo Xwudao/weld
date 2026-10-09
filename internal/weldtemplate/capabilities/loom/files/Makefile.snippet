@@ -1,0 +1,12 @@
+# weld:loom:installed __version__
+.PHONY: generate
+
+# generate rebuilds internal/di/loom_gen.go with the generator pinned in
+# tools/loom. `weld add` already runs this when an installed capability changes
+# the graph. Wire providers in internal/di/api_provider.go, the stable seam; do
+# not edit di.go (regenerated from the installed capabilities) or loom_gen.go
+# (generated) by hand.
+generate: ## Regenerate the Loom graph initializer (pinned tool)
+	cd tools/loom && go build -o ../../bin/loom-gen github.com/Xwudao/loom/cmd/loom
+	./bin/loom-gen generate ./internal/di
+	rm -f bin/loom-gen

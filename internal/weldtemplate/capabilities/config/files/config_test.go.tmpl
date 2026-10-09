@@ -1,0 +1,197 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// fakeLoader builds a loader over in-memory files and environment, so every
+// test exercises the real loader without touching the filesystem or the process
+// environment.
+func fakeLoader(files, env map[string]string) *Loader {
+	readFile := func(name string) ([]byte, error) {
+		content, ok := files[name]
+		if !ok {
+			return nil, fs.ErrNotExist
+		}
+		return []byte(content), nil
+	}
+	lookupEnv := func(key string) (string, bool) {
+		value, ok := env[key]
+		return value, ok
+	}
+	return NewLoader(readFile, lookupEnv)
+}
+
+func TestLoadAppliesDefaultsWhenFileOmitsValues(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HTTP.Addr != DefaultHTTPAddr {
+		t.Fatalf("HTTP.Addr = %q, want %q", cfg.HTTP.Addr, DefaultHTTPAddr)
+	}
+}
+
+// TestLoadMissingFileIsAnError proves an absent config.yml is not silently
+// replaced with defaults, whether the path is the default or explicit.
+func TestLoadMissingFileIsAnError(t *testing.T) {
+	if _, err := fakeLoader(nil, nil).Load(""); err == nil {
+		t.Fatal("expected an error for a missing default config.yml")
+	}
+	if _, err := fakeLoader(nil, nil).Load("explicit.yml"); err == nil {
+		t.Fatal("expected an error for a missing explicit config file")
+	}
+}
+
+// TestLoadInvalidYAMLIsAnErrorWithoutEchoingContent proves an invalid file is an
+// error distinct from an absent one, and that the error never quotes the file
+// content (which may hold a password).
+func TestLoadInvalidYAMLIsAnErrorWithoutEchoingContent(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	loader := fakeLoader(map[string]string{
+		DefaultPath: "database:\n  password: [unterminated\n  note: " + sentinel + "\n",
+	}, nil)
+	_, err := loader.Load("")
+	if err == nil {
+		t.Fatal("expected an error for invalid YAML")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("error echoed file content: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid YAML") {
+		t.Fatalf("error = %v, want it to name invalid YAML", err)
+	}
+}
+
+// TestBlankHTTPAddrEnvIsAnError proves an explicitly set but blank HTTP_ADDR is
+// an error rather than a silent fallback to the default address.
+func TestBlankHTTPAddrEnvIsAnError(t *testing.T) {
+	loader := fakeLoader(map[string]string{DefaultPath: ""}, map[string]string{EnvHTTPAddr: ""})
+	if _, err := loader.Load(""); err == nil {
+		t.Fatal("expected an error for an explicit blank HTTP_ADDR")
+	}
+}
+
+// TestEnvironmentOverridesFile pins the file < environment precedence.
+func TestEnvironmentOverridesFile(t *testing.T) {
+	loader := fakeLoader(
+		map[string]string{DefaultPath: "http:\n  addr: \":1111\"\n"},
+		map[string]string{EnvHTTPAddr: ":2222"},
+	)
+	cfg, err := loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HTTP.Addr != ":2222" {
+		t.Fatalf("HTTP.Addr = %q, want the environment value", cfg.HTTP.Addr)
+	}
+}
+
+func TestLoadReadsDatabaseFromFile(t *testing.T) {
+	loader := fakeLoader(map[string]string{
+		DefaultPath: "database:\n  host: db.example\n  port: 6543\n  user: app\n  password: file-secret\n  name: appdb\n",
+	}, nil)
+	cfg, err := loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.Host != "db.example" || cfg.Database.Port != 6543 || cfg.Database.User != "app" || cfg.Database.Name != "appdb" {
+		t.Fatalf("database = %+v", cfg.Database)
+	}
+	if cfg.Database.Password.Value() != "file-secret" {
+		t.Fatal("the password was not loaded")
+	}
+	if err := cfg.ValidateDatabase(); err != nil {
+		t.Fatalf("ValidateDatabase: %v", err)
+	}
+}
+
+// TestValidateDatabaseRequiresCredentials proves the loader never invents a
+// credential: an empty database section is invalid only when the database is
+// used.
+func TestValidateDatabaseRequiresCredentials(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := cfg.ValidateDatabase(); err == nil {
+		t.Fatal("expected an error when the database has no credentials")
+	}
+}
+
+func TestDSNUsesFieldsOrExplicitValue(t *testing.T) {
+	cfg := &Config{Database: Database{Host: "db", Port: 5432, User: "app", Password: "pw", Name: "appdb"}}
+	dsn := cfg.DSN()
+	if !strings.HasPrefix(dsn, "postgres://app:") || !strings.Contains(dsn, "@db:5432/appdb") {
+		t.Fatalf("DSN = %q", dsn)
+	}
+	cfg.Database.DSN = "postgres://explicit"
+	if dsn := cfg.DSN(); dsn != "postgres://explicit" {
+		t.Fatalf("DSN = %q, want the explicit value", dsn)
+	}
+}
+
+// TestSecretRedactsEverywhere is the credential-safety sentinel: the secret must
+// not survive fmt, log/slog, JSON or YAML.
+func TestSecretRedactsEverywhere(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	secret := Secret(sentinel)
+
+	for _, got := range []string{
+		fmt.Sprintf("%v", secret),
+		fmt.Sprintf("%s", secret),
+		fmt.Sprintf("%#v", secret),
+		secret.String(),
+	} {
+		if strings.Contains(got, sentinel) {
+			t.Fatalf("fmt leaked the secret: %q", got)
+		}
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("config", "secret", secret)
+	if strings.Contains(buf.String(), sentinel) {
+		t.Fatalf("log/slog leaked the secret:\n%s", buf.String())
+	}
+
+	encoded, err := json.Marshal(secret)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), sentinel) {
+		t.Fatalf("JSON leaked the secret: %s", encoded)
+	}
+
+	yamlEncoded, err := yaml.Marshal(secret)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if strings.Contains(string(yamlEncoded), sentinel) {
+		t.Fatalf("YAML leaked the secret: %s", yamlEncoded)
+	}
+}
+
+// TestConfigFormattingRedactsSecret proves dumping the whole config does not
+// leak the password either.
+func TestConfigFormattingRedactsSecret(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	cfg := &Config{Database: Database{User: "app", Password: Secret(sentinel)}}
+	if got := fmt.Sprintf("%+v", cfg); strings.Contains(got, sentinel) {
+		t.Fatalf("formatting the config leaked the secret: %s", got)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), sentinel) {
+		t.Fatalf("marshalling the config leaked the secret: %s", encoded)
+	}
+}

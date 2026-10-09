@@ -1,0 +1,19 @@
+{
+  "name": "base",
+  "version": "0.2.0",
+  "kind": "base",
+  "summary": "Minimal Go CLI on a Cobra command tree with a root-command contribution seam and a log/slog logger factory.",
+  "requires": [],
+  "files": [
+    { "path": "go.mod", "source": "files/go.mod.tmpl" },
+    { "path": "go.sum", "source": "files/go.sum" },
+    { "path": "main.go", "source": "files/main.go.tmpl" },
+    { "path": "internal/app/app.go", "source": "files/app.go.tmpl" },
+    { "path": "internal/logging/logging.go", "source": "files/logging.go.tmpl" },
+    { "path": "internal/logging/logging_test.go", "source": "files/logging_test.go.tmpl" },
+    { "path": "Makefile", "source": "files/Makefile.tmpl" },
+    { "path": "README.md", "source": "files/README.md.tmpl" },
+    { "path": ".gitignore", "source": "files/gitignore.txt" }
+  ],
+  "patches": []
+}

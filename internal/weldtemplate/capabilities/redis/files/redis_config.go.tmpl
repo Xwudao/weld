@@ -1,0 +1,101 @@
+package config
+
+// Redis configuration: the typed connection settings and the environment,
+// defaults and validation that back them.
+//
+// This file is written once by `weld add redis` and belongs to the config
+// package, so it can define methods on Config and reuse the redacting Secret
+// type. The Config struct field and the loader calls into this file are added by
+// marker patches to internal/config/config.go; the regions that hold them are
+// weld-managed and never rewritten outside the marker.
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// DefaultRedisAddr is the connection address used when neither the file nor the
+// environment sets one. Like the PostgreSQL host it is not a credential, so a
+// local default can never silently reach a remote server.
+const DefaultRedisAddr = "localhost:6379"
+
+// Redis environment variable names. The environment overrides the YAML file;
+// none is required when the corresponding setting is in the file.
+const (
+	EnvRedisAddr     = "REDIS_ADDR"
+	EnvRedisUsername = "REDIS_USERNAME"
+	EnvRedisPassword = "REDIS_PASSWORD"
+	EnvRedisDB       = "REDIS_DB"
+	EnvRedisTLS      = "REDIS_TLS"
+)
+
+// Redis holds the Redis connection settings.
+//
+// The address has a default; the username and password are optional and are
+// held as Secret so they never reach a log or a formatted dump. The connection
+// is never opened here: internal/redisclient builds the lazy client from these
+// fields and the caller owns its lifecycle.
+type Redis struct {
+	Addr     string `yaml:"addr"`
+	Username Secret `yaml:"username"`
+	Password Secret `yaml:"password"`
+	DB       int    `yaml:"db"`
+	TLS      bool   `yaml:"tls"`
+}
+
+// applyRedisEnv overrides the Redis section with the environment. A variable
+// that cannot be parsed, or an explicitly blank address, is an error rather than
+// a silent fallback.
+func (c *Config) applyRedisEnv(lookupEnv LookupEnvFunc) error {
+	if value, ok := lookupEnv(EnvRedisAddr); ok {
+		addr := strings.TrimSpace(value)
+		if addr == "" {
+			// An explicitly set but blank address must not silently fall back to
+			// the default: the operator set it and the value is invalid.
+			return fmt.Errorf("config: %s is set but blank", EnvRedisAddr)
+		}
+		c.Redis.Addr = addr
+	}
+	if value, ok := lookupEnv(EnvRedisUsername); ok {
+		c.Redis.Username = Secret(value)
+	}
+	if value, ok := lookupEnv(EnvRedisPassword); ok {
+		c.Redis.Password = Secret(value)
+	}
+	if value, ok := lookupEnv(EnvRedisDB); ok {
+		db, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a number", EnvRedisDB)
+		}
+		c.Redis.DB = db
+	}
+	if value, ok := lookupEnv(EnvRedisTLS); ok {
+		tlsEnabled, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a boolean", EnvRedisTLS)
+		}
+		c.Redis.TLS = tlsEnabled
+	}
+	return nil
+}
+
+// applyRedisDefaults fills the explicit Redis defaults after the file and the
+// environment. It never invents a credential.
+func (c *Config) applyRedisDefaults() {
+	if strings.TrimSpace(c.Redis.Addr) == "" {
+		c.Redis.Addr = DefaultRedisAddr
+	}
+}
+
+// ValidateRedis reports whether the Redis settings are usable.
+//
+// It is called only where the Redis client is actually built, so a project that
+// installs redis but never constructs a client needs no Redis setting.
+func (c *Config) ValidateRedis() error {
+	if strings.TrimSpace(c.Redis.Addr) == "" {
+		return errors.New("config: redis.addr must not be blank")
+	}
+	return nil
+}

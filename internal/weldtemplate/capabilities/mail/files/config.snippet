@@ -1,0 +1,14 @@
+# weld:mail:installed __version__
+# Outgoing SMTP mail. Opt-in: nothing sends at startup and nothing connects
+# until a Send. `tls` is the explicit transport policy and must be one of
+# "none", "starttls" or "implicit"; the sender never upgrades opportunistically.
+# A password may live here for local development; production should override
+# MAIL_PASSWORD in the environment instead of committing a credential.
+mail:
+  host: "localhost"
+  port: 587
+  username: ""
+  password: ""
+  from: "no-reply@example.com"
+  tls: "starttls"
+  timeout_seconds: 10

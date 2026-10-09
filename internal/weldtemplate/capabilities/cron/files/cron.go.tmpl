@@ -1,0 +1,284 @@
+// Package cron owns the scheduled work of __name__.
+//
+// It is the in-process scheduler: a long-running command (serve) constructs one
+// Scheduler, registers the work the application needs, starts it and stops it
+// with the rest of the process. Installing the cron capability schedules
+// nothing by itself — a process that never calls Start runs no jobs — so help,
+// version and every short command are unaffected.
+//
+// The scheduler wraps github.com/robfig/cron/v3 and fixes the policy this
+// project wants:
+//
+//   - five-field cron expressions ("minute hour day-of-month month day-of-week"),
+//     interpreted in one timezone (UTC unless WithLocation says otherwise);
+//   - unique, human-readable job names, so a job can be removed or rescheduled
+//     at run time;
+//   - an execution that is still running when the next tick arrives is skipped,
+//     never queued;
+//   - a panic inside a job is recovered and logged, never crashes the process;
+//   - Start and Stop are explicit, and Stop waits for running jobs up to the
+//     caller's deadline.
+//
+// The scheduler is safe for concurrent use: jobs may be registered, removed and
+// rescheduled from any goroutine, including while it is running.
+//
+// A scheduler is per process. It keeps no state outside the process and takes no
+// distributed lock, so several replicas of __name__ each run their own copy of
+// every job. When a job must run on exactly one replica, elect the leader
+// yourself (for example with a database or Redis lock); the scheduler
+// deliberately does not depend on either.
+package cron
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	robfigcron "github.com/robfig/cron/v3"
+)
+
+// Job is a unit of scheduled work.
+//
+// The context is cancelled when the scheduler stops, so a job that respects it
+// can return promptly during shutdown. A Job is an ordinary function, so a test
+// invokes it directly without a scheduler or a wall clock.
+type Job func(ctx context.Context)
+
+// Errors returned by the job registry. Test them with errors.Is.
+var (
+	// ErrJobExists reports that a name is already registered.
+	ErrJobExists = errors.New("cron: job already registered")
+	// ErrJobNotFound reports that no job is registered under a name.
+	ErrJobNotFound = errors.New("cron: job not registered")
+)
+
+// Scheduler runs named jobs on cron schedules.
+type Scheduler struct {
+	logger *slog.Logger
+	runner *robfigcron.Cron
+
+	mu      sync.Mutex
+	entries map[string]entry
+	baseCtx context.Context
+	cancel  context.CancelFunc
+	running bool
+}
+
+// entry is the registry record for one named job. run is the decorated function
+// robfig invokes; it is retained across a reschedule so the overlap guard keeps
+// its state instead of handing an in-flight job a second guard.
+type entry struct {
+	id  robfigcron.EntryID
+	run func()
+}
+
+// Option configures a Scheduler.
+type Option func(*settings)
+
+type settings struct {
+	location *time.Location
+}
+
+// WithLocation sets the timezone schedules are interpreted in. A nil location
+// keeps the UTC default, so the zero configuration is deterministic.
+func WithLocation(location *time.Location) Option {
+	return func(s *settings) {
+		if location != nil {
+			s.location = location
+		}
+	}
+}
+
+// New builds a scheduler that logs through logger. A nil logger discards output
+// rather than reaching for a process-global one. No job runs until Start is
+// called, and a scheduler with no registered jobs runs nothing at all.
+//
+// The spec parser accepts exactly the five standard fields: the six-field
+// seconds form and the @descriptor shortcuts are rejected, so a malformed
+// schedule fails at registration rather than silently never firing.
+func New(logger *slog.Logger, options ...Option) *Scheduler {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	configured := settings{location: time.UTC}
+	for _, option := range options {
+		option(&configured)
+	}
+	log := cronLogger{logger: logger}
+	runner := robfigcron.New(
+		robfigcron.WithLocation(configured.location),
+		robfigcron.WithParser(robfigcron.NewParser(
+			robfigcron.Minute|robfigcron.Hour|robfigcron.Dom|robfigcron.Month|robfigcron.Dow,
+		)),
+		robfigcron.WithLogger(log),
+		// SkipIfStillRunning is outermost so it still releases its guard when
+		// Recover, one layer in, swallows a panic: robfig's skip guard refills
+		// its channel after the wrapped job returns, and Recover makes a panicking
+		// job return.
+		robfigcron.WithChain(
+			robfigcron.SkipIfStillRunning(log),
+			robfigcron.Recover(log),
+		),
+	)
+	return &Scheduler{
+		logger:  logger,
+		runner:  runner,
+		entries: make(map[string]entry),
+		baseCtx: context.Background(),
+	}
+}
+
+// Start begins running the registered jobs. ctx is the parent of every job's
+// context: cancelling it, or calling Stop, asks a running job to return.
+//
+// Start is idempotent while running and safe to call again after Stop, which is
+// how a process that reuses its scheduler across restarts resumes the registered
+// jobs. It never runs a job that was not registered.
+func (s *Scheduler) Start(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return
+	}
+	if s.cancel != nil {
+		// Release the context of a previous run before replacing it.
+		s.cancel()
+	}
+	s.baseCtx, s.cancel = context.WithCancel(ctx)
+	s.running = true
+	s.mu.Unlock()
+	s.runner.Start()
+}
+
+// Stop cancels the jobs' context, stops scheduling new runs and waits for
+// running jobs to return, up to ctx's deadline. It reports ctx.Err() when a job
+// overruns the deadline; scheduling has already stopped by then, so a stuck job
+// cannot keep the scheduler running.
+//
+// Stop does not clear the registry: a later Start resumes the same jobs.
+func (s *Scheduler) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	cancel := s.cancel
+	s.cancel = nil
+	s.running = false
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	done := s.runner.Stop()
+	if ctx == nil {
+		<-done.Done()
+		return nil
+	}
+	select {
+	case <-done.Done():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Register adds job under name with the given cron spec. Names are unique: a
+// duplicate is ErrJobExists, so use Reschedule to change an existing job. A
+// blank name, a nil job or an invalid spec is an error and registers nothing.
+//
+// Register works before or after Start: a job added to a running scheduler
+// begins on its next matching time, never retroactively.
+func (s *Scheduler) Register(name, spec string, job Job) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("cron: job name must not be blank")
+	}
+	if job == nil {
+		return fmt.Errorf("cron: job %q has no function", name)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.entries[name]; exists {
+		return fmt.Errorf("%w: %q", ErrJobExists, name)
+	}
+	run := s.wrap(job)
+	id, err := s.runner.AddFunc(spec, run)
+	if err != nil {
+		return fmt.Errorf("cron: register %q: %w", name, err)
+	}
+	s.entries[name] = entry{id: id, run: run}
+	return nil
+}
+
+// Remove stops scheduling name and forgets it. It is ErrJobNotFound when the
+// name is unknown. An execution already running is not interrupted; it is
+// cancelled only by Stop.
+func (s *Scheduler) Remove(name string) error {
+	name = strings.TrimSpace(name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.entries[name]
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrJobNotFound, name)
+	}
+	s.runner.Remove(record.id)
+	delete(s.entries, name)
+	return nil
+}
+
+// Reschedule replaces the spec of an existing job. The job function and its
+// overlap guard are preserved, so a running execution is not disturbed and is
+// not doubled by the new schedule. An invalid spec leaves the current schedule
+// untouched; an unknown name is ErrJobNotFound.
+func (s *Scheduler) Reschedule(name, spec string) error {
+	name = strings.TrimSpace(name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.entries[name]
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrJobNotFound, name)
+	}
+	id, err := s.runner.AddFunc(spec, record.run)
+	if err != nil {
+		return fmt.Errorf("cron: reschedule %q: %w", name, err)
+	}
+	s.runner.Remove(record.id)
+	s.entries[name] = entry{id: id, run: record.run}
+	return nil
+}
+
+// wrap adapts a Job to robfig's func(), supplying the scheduler's current base
+// context. The context is read on each run so a restart after Stop hands the
+// jobs the new context.
+func (s *Scheduler) wrap(job Job) func() {
+	return func() {
+		s.mu.Lock()
+		ctx := s.baseCtx
+		s.mu.Unlock()
+		job(ctx)
+	}
+}
+
+// cronLogger adapts the injected *slog.Logger to robfig's Logger interface, so
+// schedule wake-ups, skipped overlaps and recovered panics all go through the
+// one logging protocol the process owns. No global logger is installed.
+type cronLogger struct {
+	logger *slog.Logger
+}
+
+// Info logs a routine message from robfig.
+func (l cronLogger) Info(msg string, keysAndValues ...any) {
+	l.logger.Info(msg, keysAndValues...)
+}
+
+// Error logs a robfig error condition, such as a recovered panic.
+func (l cronLogger) Error(err error, msg string, keysAndValues ...any) {
+	args := make([]any, 0, len(keysAndValues)+2)
+	args = append(args, "error", err)
+	args = append(args, keysAndValues...)
+	l.logger.Error(msg, args...)
+}

@@ -1,0 +1,26 @@
+# weld:db:installed __version__
+.PHONY: sqlc require-dsn migrate-up migrate-status migrate-down
+
+# The sqlc generator and the goose migration tool are pinned in the nested
+# db/tools module, so their large dependency graphs never enter the application
+# go.mod. Both tools run from db/tools; -dir is relative to that directory.
+sqlc: ## Regenerate internal/data/sqlc from db/migrations and db/query
+	cd db/tools && go tool sqlc generate -f ../../sqlc.yaml
+
+# require-dsn refuses to run when DATABASE_URL is unset or empty. Without it
+# goose would silently fall back to a local database, so the guard is not
+# optional.
+require-dsn:
+	@test -n "$$DATABASE_URL" || { echo "DATABASE_URL is not set; refusing to touch a database"; exit 1; }
+
+migrate-up: require-dsn ## Apply every pending db/migrations change (idempotent)
+	cd db/tools && go tool goose -dir ../migrations -table goose_db_version postgres "$$DATABASE_URL" up
+
+migrate-status: require-dsn ## Show which db/migrations changes are applied
+	cd db/tools && go tool goose -dir ../migrations -table goose_db_version postgres "$$DATABASE_URL" status
+
+# migrate-down reverts exactly one change and requires CONFIRM=1, so a typo can
+# never roll the whole schema back.
+migrate-down: require-dsn ## Revert only the most recent migration (needs CONFIRM=1)
+	@test "$$CONFIRM" = "1" || { echo "migrate-down reverts the latest migration; re-run with CONFIRM=1"; exit 1; }
+	cd db/tools && go tool goose -dir ../migrations -table goose_db_version postgres "$$DATABASE_URL" down

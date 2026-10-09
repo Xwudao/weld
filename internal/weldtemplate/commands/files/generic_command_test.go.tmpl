@@ -1,0 +1,61 @@
+package __modname__
+
+import (
+	"context"
+	"io"
+	"testing"
+)
+
+// stubLifecycle records that the graph was started and stopped.
+type stubLifecycle struct {
+	started bool
+	stopped bool
+}
+
+func (l *stubLifecycle) Start(context.Context) error { l.started = true; return nil }
+func (l *stubLifecycle) Stop(context.Context) error  { l.stopped = true; return nil }
+
+// stubBuild returns a Deps and a lifecycle without resolving any real graph.
+func stubBuild() (*Deps, *stubLifecycle, error) {
+	return &Deps{}, &stubLifecycle{}, nil
+}
+
+// TestNewCommandBuildsGroup checks the generated factory builds a real command
+// group: it carries the expected name and rejects an unknown subcommand instead
+// of silently succeeding.
+func TestNewCommandBuildsGroup(t *testing.T) {
+	cmd := NewCommand(func(context.Context) (*Deps, Lifecycle, error) {
+		deps, lifecycle, err := stubBuild()
+		return deps, lifecycle, err
+	})
+	if cmd.Name() != "__modname__" {
+		t.Fatalf("command name = %q, want %q", cmd.Name(), "__modname__")
+	}
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"definitely-not-a-subcommand"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("an unknown subcommand unexpectedly succeeded")
+	}
+}
+
+// TestNewCommandDoesNotResolveTheGraph proves building the root command and
+// showing its help never calls the lazy builder, so a bare invocation or help
+// stays free of the group's dependencies.
+func TestNewCommandDoesNotResolveTheGraph(t *testing.T) {
+	resolved := false
+	cmd := NewCommand(func(context.Context) (*Deps, Lifecycle, error) {
+		resolved = true
+		deps, lifecycle, err := stubBuild()
+		return deps, lifecycle, err
+	})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("bare command: %v", err)
+	}
+	if resolved {
+		t.Fatal("building the command or showing help resolved the graph")
+	}
+}

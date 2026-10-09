@@ -1,0 +1,76 @@
+package web
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"testing/fstest"
+)
+
+func testAssets() fstest.MapFS {
+	return fstest.MapFS{
+		"index.html":  {Data: []byte("<html>app</html>")},
+		"assets/a.js": {Data: []byte("console.log(1)")},
+	}
+}
+
+func TestHandlerServesEmbeddedFiles(t *testing.T) {
+	h := handler(testAssets())
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/a.js", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "console.log(1)") {
+		t.Fatalf("body = %q, want the asset", recorder.Body.String())
+	}
+}
+
+func TestHandlerFallsBackToIndexForBrowserNavigation(t *testing.T) {
+	h := handler(testAssets())
+	request := httptest.NewRequest(http.MethodGet, "/some/client/route", nil)
+	request.Header.Set("Accept", "text/html,application/xhtml+xml")
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "app") {
+		t.Fatalf("body = %q, want the SPA shell", recorder.Body.String())
+	}
+}
+
+func TestHandlerDoesNotFallBackForAPIPaths(t *testing.T) {
+	h := handler(testAssets())
+	request := httptest.NewRequest(http.MethodGet, "/api/missing", nil)
+	request.Header.Set("Accept", "text/html")
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "<html>") {
+		t.Fatalf("API path received the SPA: %q", recorder.Body.String())
+	}
+}
+
+func TestHandlerDoesNotFallBackForNonBrowserRequests(t *testing.T) {
+	h := handler(testAssets())
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/missing.json", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+}
+
+func TestHandlerDoesNotFallBackWithoutIndex(t *testing.T) {
+	h := handler(fstest.MapFS{"assets/a.js": {Data: []byte("x")}})
+	request := httptest.NewRequest(http.MethodGet, "/some/client/route", nil)
+	request.Header.Set("Accept", "text/html")
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+}

@@ -1,0 +1,37 @@
+// Package logging builds the __name__ logger.
+//
+// It is a small factory over log/slog: callers inject an io.Writer, so a test
+// captures records in a buffer and no package reaches for os.Stderr or
+// slog.Default. There is no custom logger interface — code depends on
+// *slog.Logger directly and replaces the sink by supplying a different Writer.
+package logging
+
+import (
+	"io"
+	"log/slog"
+)
+
+// Format selects how a logger encodes records.
+type Format string
+
+const (
+	// TextFormat writes human-readable key=value records.
+	TextFormat Format = "text"
+	// JSONFormat writes one JSON object per record.
+	JSONFormat Format = "json"
+)
+
+// New returns a *slog.Logger that writes records to w.
+//
+// format selects the handler encoding; any value other than JSONFormat selects
+// the text handler, so the zero Format is a working default. options configures
+// the handler — for example its Level — and a nil options uses slog's defaults.
+func New(w io.Writer, format Format, options *slog.HandlerOptions) *slog.Logger {
+	if options == nil {
+		options = &slog.HandlerOptions{}
+	}
+	if format == JSONFormat {
+		return slog.New(slog.NewJSONHandler(w, options))
+	}
+	return slog.New(slog.NewTextHandler(w, options))
+}

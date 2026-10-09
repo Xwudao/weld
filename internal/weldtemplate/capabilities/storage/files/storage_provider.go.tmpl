@@ -1,0 +1,38 @@
+package di
+
+import (
+	"context"
+
+	"github.com/Xwudao/loom"
+
+	"__module__/internal/config"
+	"__module__/internal/objectstore"
+)
+
+// NewObjectStore is the optional S3-compatible object-storage provider, and
+// this file is the stable integration seam for wiring it into the Loom
+// application.
+//
+// weld writes this file once, when both the storage and loom capabilities are
+// installed, and never rewrites it while it regenerates the graph (di.go,
+// loom_gen.go): edits below survive every later `weld add`.
+//
+// The store is an available binding, not part of the default composition: the
+// graph declares NewObjectStore only where the matching loom-side provider
+// entry is installed, and nothing depends on *objectstore.Store, so Loom prunes
+// it and an ordinary serve never constructs a store and never needs a storage
+// setting. To use it, make a provider the graph already consumes depend on
+// *objectstore.Store; Loom then constructs NewObjectStore, validates the
+// storage configuration and registers the cleanup that releases the store's
+// idle connections exactly once.
+//
+// NewObjectStore never connects and never creates the bucket: the AWS SDK sends
+// its first request on the first operation, so constructing the store succeeds
+// while the server is unreachable. The cleanup deletes nothing.
+func NewObjectStore(cfg *config.Config) (*objectstore.Store, loom.Cleanup, error) {
+	store, err := objectstore.New(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, func(context.Context) error { return store.Close() }, nil
+}

@@ -1,0 +1,165 @@
+package config
+
+// Mail configuration: the typed SMTP settings and the environment, defaults and
+// validation that back them.
+//
+// This file is written once by `weld add mail` and belongs to the config
+// package, so it can define the MailTLS type, the redacting Secret fields and
+// the accessor the sender consumes. The Config struct field and the loader calls
+// into this file are added by marker patches to internal/config/config.go; the
+// regions that hold them are weld-managed and never rewritten outside the
+// marker.
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// DefaultMailPort and DefaultMailTimeoutSeconds are used only when neither the
+// file nor the environment sets them. The port is not a credential, so a local
+// default is safe; the timeout only bounds a dial.
+const (
+	DefaultMailPort           = 587
+	DefaultMailTimeoutSeconds = 10
+)
+
+// Mail environment variable names. The environment overrides the YAML file; none
+// is required when the corresponding setting is in the file.
+const (
+	EnvMailHost           = "MAIL_HOST"
+	EnvMailPort           = "MAIL_PORT"
+	EnvMailUsername       = "MAIL_USERNAME"
+	EnvMailPassword       = "MAIL_PASSWORD"
+	EnvMailFrom           = "MAIL_FROM"
+	EnvMailTLS            = "MAIL_TLS"
+	EnvMailTimeoutSeconds = "MAIL_TIMEOUT_SECONDS"
+)
+
+// MailTLS is the explicit transport security policy for the SMTP connection.
+//
+// It is a closed set rather than two independent booleans so the operator states
+// exactly what the sender must do. The sender never upgrades a connection
+// opportunistically: it applies the named policy or fails.
+type MailTLS string
+
+const (
+	// MailTLSNone opens an unencrypted connection. Credentials are refused with
+	// this policy so they can never cross the wire in the clear.
+	MailTLSNone MailTLS = "none"
+	// MailTLSStartTLS opens a plain connection, requires the server to advertise
+	// STARTTLS and upgrades before any credential is sent.
+	MailTLSStartTLS MailTLS = "starttls"
+	// MailTLSImplicit wraps the connection in TLS from the first byte.
+	MailTLSImplicit MailTLS = "implicit"
+)
+
+// Mail holds the outgoing SMTP settings.
+//
+// The username and password are optional and are held as Secret so they never
+// reach a log or a formatted dump. Nothing here connects: internal/mailsender
+// dials the server once per Send and the caller owns that call.
+type Mail struct {
+	Host           string  `yaml:"host"`
+	Port           int     `yaml:"port"`
+	Username       Secret  `yaml:"username"`
+	Password       Secret  `yaml:"password"`
+	From           string  `yaml:"from"`
+	TLS            MailTLS `yaml:"tls"`
+	TimeoutSeconds int     `yaml:"timeout_seconds"`
+}
+
+// MailSettings returns the SMTP settings. It is the one method that lets the
+// sender consume the YAML configuration through an interface, so a future
+// database-backed site configuration can replace it without changing the
+// sender. See internal/mailsender.
+func (c *Config) MailSettings() Mail { return c.Mail }
+
+// applyMailEnv overrides the Mail section with the environment. A variable that
+// cannot be parsed, or an explicitly blank host or sender, is an error rather
+// than a silent fallback.
+func (c *Config) applyMailEnv(lookupEnv LookupEnvFunc) error {
+	if value, ok := lookupEnv(EnvMailHost); ok {
+		host := strings.TrimSpace(value)
+		if host == "" {
+			// An explicitly set but blank host must not silently fall back to a
+			// value from the file: the operator set it and the value is invalid.
+			return fmt.Errorf("config: %s is set but blank", EnvMailHost)
+		}
+		c.Mail.Host = host
+	}
+	if value, ok := lookupEnv(EnvMailPort); ok {
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a number", EnvMailPort)
+		}
+		c.Mail.Port = port
+	}
+	if value, ok := lookupEnv(EnvMailUsername); ok {
+		c.Mail.Username = Secret(value)
+	}
+	if value, ok := lookupEnv(EnvMailPassword); ok {
+		c.Mail.Password = Secret(value)
+	}
+	if value, ok := lookupEnv(EnvMailFrom); ok {
+		from := strings.TrimSpace(value)
+		if from == "" {
+			return fmt.Errorf("config: %s is set but blank", EnvMailFrom)
+		}
+		c.Mail.From = from
+	}
+	if value, ok := lookupEnv(EnvMailTLS); ok {
+		c.Mail.TLS = MailTLS(strings.TrimSpace(value))
+	}
+	if value, ok := lookupEnv(EnvMailTimeoutSeconds); ok {
+		seconds, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a number", EnvMailTimeoutSeconds)
+		}
+		c.Mail.TimeoutSeconds = seconds
+	}
+	return nil
+}
+
+// applyMailDefaults fills the explicit Mail defaults after the file and the
+// environment. It never invents a credential and never chooses a TLS policy:
+// the policy must be stated by the operator.
+func (c *Config) applyMailDefaults() {
+	if c.Mail.Port == 0 {
+		c.Mail.Port = DefaultMailPort
+	}
+	if c.Mail.TimeoutSeconds == 0 {
+		c.Mail.TimeoutSeconds = DefaultMailTimeoutSeconds
+	}
+}
+
+// ValidateMail reports whether the Mail settings are usable.
+//
+// It is called only where the sender is actually built, so a project that
+// installs mail but never sends needs no mail setting. It never invents a
+// credential and never silently relaxes transport security: credentials with an
+// unencrypted policy are rejected rather than sent in the clear.
+func (c *Config) ValidateMail() error {
+	if strings.TrimSpace(c.Mail.Host) == "" {
+		return errors.New("config: mail.host is required")
+	}
+	if c.Mail.Port <= 0 || c.Mail.Port > 65535 {
+		return errors.New("config: mail.port must be between 1 and 65535")
+	}
+	if strings.TrimSpace(c.Mail.From) == "" {
+		return errors.New("config: mail.from is required")
+	}
+	switch c.Mail.TLS {
+	case MailTLSNone, MailTLSStartTLS, MailTLSImplicit:
+	default:
+		return fmt.Errorf("config: mail.tls must be one of %q, %q or %q", MailTLSNone, MailTLSStartTLS, MailTLSImplicit)
+	}
+	if c.Mail.TLS == MailTLSNone && (c.Mail.Username.Value() != "" || c.Mail.Password.Value() != "") {
+		return fmt.Errorf("config: mail credentials require mail.tls to be %q or %q", MailTLSStartTLS, MailTLSImplicit)
+	}
+	if c.Mail.TimeoutSeconds <= 0 {
+		return errors.New("config: mail.timeout_seconds must be positive")
+	}
+	return nil
+}

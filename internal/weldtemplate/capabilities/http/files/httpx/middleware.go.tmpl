@@ -1,0 +1,238 @@
+package httpx
+
+import (
+	"bufio"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"runtime/debug"
+	"time"
+)
+
+// Middleware is one net/http middleware: a function that wraps a handler. The
+// type is the standard net/http shape, so any third-party
+// func(http.Handler) http.Handler composes with the ones here.
+type Middleware func(http.Handler) http.Handler
+
+// Chain composes middlewares into a single middleware, outermost first.
+//
+// middlewares[0] is the outermost wrapper: it sees a request first and the
+// response last, and the last entry sits closest to the handler. Chain() with no
+// middlewares is a pass-through, so an empty configuration changes nothing.
+func Chain(middlewares ...Middleware) Middleware {
+	return func(next http.Handler) http.Handler {
+		for i := len(middlewares) - 1; i >= 0; i-- {
+			next = middlewares[i](next)
+		}
+		return next
+	}
+}
+
+// RequestIDHeader is the request and response header that carries the request
+// identifier.
+const RequestIDHeader = "X-Request-Id"
+
+// maxRequestIDLen bounds an inbound identifier so a client cannot stuff an
+// arbitrary amount of data into the header or a log line.
+const maxRequestIDLen = 128
+
+type requestIDKey struct{}
+
+// RequestID assigns every request an identifier: a well-formed inbound
+// X-Request-Id is reused so a caller can trace a request across services, and
+// anything else (missing, malformed or oversized) is replaced with a generated
+// one. The id is stored on the request context and echoed on the response, so a
+// client can quote it and an AccessLog line can be correlated with it.
+func RequestID() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id := r.Header.Get(RequestIDHeader)
+			if !validRequestID(id) {
+				id = newRequestID()
+			}
+			w.Header().Set(RequestIDHeader, id)
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
+		})
+	}
+}
+
+// RequestIDFrom returns the identifier RequestID stored on ctx, or "" when the
+// middleware is not installed.
+func RequestIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDKey{}).(string)
+	return id
+}
+
+// AccessLog records one structured line per request through the injected
+// logger: method, path, transport status, response bytes, duration and the
+// request id. It never logs a request or response body, and it logs the path
+// without its query string so a credential in a query parameter cannot reach
+// the log. A nil logger makes it a pass-through.
+func AccessLog(logger *slog.Logger) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if logger == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			start := time.Now()
+			recorder := &responseRecorder{ResponseWriter: w}
+			next.ServeHTTP(recorder, r)
+			logger.Info("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", recorder.statusCode(),
+				"bytes", recorder.bytes,
+				"duration", time.Since(start),
+				"request_id", RequestIDFrom(r.Context()),
+			)
+		})
+	}
+}
+
+// Recover turns a panic in the wrapped handler into a logged 500 error
+// envelope, so a single broken request cannot take the process down.
+//
+// The panic value and stack are logged server-side through the injected logger
+// and are never sent to the client, whose response is the fixed internal-error
+// envelope. http.ErrAbortHandler is re-panicked so net/http's own abort path is
+// preserved.
+func Recover(logger *slog.Logger) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				recovered := recover()
+				if recovered == nil {
+					return
+				}
+				if recovered == http.ErrAbortHandler {
+					panic(recovered)
+				}
+				if logger != nil {
+					logger.Error("http handler panic",
+						"error", fmt.Sprint(recovered),
+						"path", r.URL.Path,
+						"request_id", RequestIDFrom(r.Context()),
+						"stack", string(debug.Stack()),
+					)
+				}
+				// Once the outer access logger has observed a write or flush, HTTP
+				// cannot change the status to 500. Abort the connection rather than
+				// append a JSON error envelope to a partial response (notably SSE).
+				if recorder, ok := w.(*responseRecorder); ok && recorder.status != 0 {
+					panic(http.ErrAbortHandler)
+				}
+				Error(w, http.StatusInternalServerError, ErrorMsg)
+			}()
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLen {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func newRequestID() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// crypto/rand does not fail in practice; fall back to a time-based id
+		// rather than fail the request.
+		return fmt.Sprintf("t-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf[:])
+}
+
+// responseRecorder records the transport status and the number of bytes written
+// for AccessLog while preserving the optional interfaces a ResponseWriter may
+// implement.
+//
+// It does not buffer the body: Write passes straight through. Flush and Hijack
+// forward to the wrapped writer, so a streaming or SSE response and a WebSocket
+// upgrade keep working when AccessLog is installed; Push forwards the HTTP/2
+// server-push call. When the wrapped writer does not implement one of those
+// interfaces the wrapper reports it the way net/http's own
+// httptest.ResponseRecorder does (a no-op Flush, an ErrNotSupported Push, a
+// clear Hijack error), and Unwrap exposes the original writer to
+// http.ResponseController.
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *responseRecorder) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *responseRecorder) Write(p []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	n, err := r.ResponseWriter.Write(p)
+	r.bytes += n
+	return n, err
+}
+
+func (r *responseRecorder) statusCode() int {
+	if r.status == 0 {
+		// A handler that writes neither a status nor a body still yields a 200
+		// from net/http, so the log records the status the client sees.
+		return http.StatusOK
+	}
+	return r.status
+}
+
+// Flush forwards to the wrapped writer when it supports flushing.
+func (r *responseRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		if r.status == 0 {
+			r.status = http.StatusOK // Flush commits the default response status.
+		}
+		flusher.Flush()
+	}
+}
+
+// Hijack forwards to the wrapped writer when it supports hijacking.
+func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("httpx: underlying ResponseWriter is not a Hijacker")
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err == nil && r.status == 0 {
+		r.status = http.StatusSwitchingProtocols // The writer is no longer ours.
+	}
+	return conn, rw, err
+}
+
+// Push forwards to the wrapped writer when it supports HTTP/2 server push.
+func (r *responseRecorder) Push(target string, opts *http.PushOptions) error {
+	pusher, ok := r.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return pusher.Push(target, opts)
+}
+
+// Unwrap exposes the wrapped writer to http.ResponseController.
+func (r *responseRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }

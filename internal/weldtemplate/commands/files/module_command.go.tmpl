@@ -1,0 +1,122 @@
+// Package __modname__ is a generated command group for __name__.
+//
+// `weld add module __modname__ --command` exposes the __modname__ business
+// module on the command line. It receives the same Service interface the HTTP
+// handler uses, so the command and the HTTP handler share one business layer.
+// weld writes this file once; later adds never overwrite your subcommands.
+package __modname__
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	module "__module__/internal/modules/__modname__"
+)
+
+// stopTimeout bounds lifecycle teardown after a subcommand has run, so a
+// provider that registers an OnStop hook cannot hang the command.
+const stopTimeout = 10 * time.Second
+
+// Lifecycle is the start/stop contract of the resolved dependency graph. The
+// generated graph's *loom.Lifecycle satisfies it; this package deliberately
+// does not import the Loom runtime, so the command depends only on Start and
+// Stop.
+type Lifecycle interface {
+	Start(context.Context) error
+	Stop(context.Context) error
+}
+
+// Build resolves the module's dependencies on demand. internal/app delegates it
+// to the generated internal/di initializer, so nothing here constructs the
+// graph.
+type Build func(context.Context) (*Deps, Lifecycle, error)
+
+// Deps is the dependency set the group's subcommands consume. It carries the
+// module's Service; add a field and a NewDeps parameter for anything else a
+// subcommand needs and declare the matching provider in
+// internal/di/__modname___graph.go.
+type Deps struct {
+	Service module.Service
+}
+
+// NewDeps builds the dependency set from the module's Service. The generated
+// graph provides module.NewService, so Loom constructs the service (and prunes
+// the shared providers this group does not consume) per invocation.
+func NewDeps(service module.Service) *Deps { return &Deps{Service: service} }
+
+// group is the command group and its lazy dependency builder.
+type group struct {
+	*cobra.Command
+	build Build
+}
+
+// NewCommand builds the module's Cobra command group from a lazy dependency
+// builder. A subcommand resolves it through g.resolve on execution, so building
+// the root command (or showing help) never constructs the module's dependencies.
+func NewCommand(build Build) *cobra.Command {
+	g := &group{
+		Command: &cobra.Command{
+			Use:   "__modname__",
+			Short: "the __modname__ business module on the command line",
+			Args:  cobra.NoArgs,
+			RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+		},
+		build: build,
+	}
+	g.Command.AddCommand(newGreetCommand(g))
+	return g.Command
+}
+
+// resolve builds the group's graph, starts it, runs fn with the resolved
+// dependencies, and stops it within a bounded deadline, joining any teardown
+// failure onto fn's error.
+func (g *group) resolve(ctx context.Context, fn func(context.Context, *Deps) error) (err error) {
+	deps, lifecycle, err := g.build(ctx)
+	if err != nil {
+		return err
+	}
+	// Start the resolved graph before use. A failed start still gets a bounded
+	// stop of whatever started, and both errors are preserved.
+	if err := lifecycle.Start(ctx); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
+		defer cancel()
+		return errors.Join(err, lifecycle.Stop(stopCtx))
+	}
+	// Stop within a bounded deadline and join any stop failure onto the
+	// subcommand's own error, so a failed teardown is never swallowed.
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
+		defer cancel()
+		err = errors.Join(err, lifecycle.Stop(stopCtx))
+	}()
+	return fn(ctx, deps)
+}
+
+// newGreetCommand is the focused example that demonstrates the seam: it calls
+// the module's Greet through the lazily resolved graph, so the command and the
+// HTTP handler share one Service. Replace or extend it with real subcommands.
+func newGreetCommand(g *group) *cobra.Command {
+	return &cobra.Command{
+		Use:   "greet [name]",
+		Short: "greet someone through the module's service",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			return g.resolve(cmd.Context(), func(ctx context.Context, deps *Deps) error {
+				response, err := deps.Service.Greet(ctx, module.Request{Name: name})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), response.Message)
+				return nil
+			})
+		},
+	}
+}

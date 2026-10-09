@@ -1,0 +1,23 @@
+{
+  "name": "redis",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "Opt-in Redis client: typed connection configuration and a lazy go-redis client the caller owns. Installing the client never connects it to any service.",
+  "requires": ["loom"],
+  "files": [
+    { "path": "internal/config/redis.go", "source": "files/redis_config.go.tmpl" },
+    { "path": "internal/config/redis_test.go", "source": "files/redis_config_test.go.tmpl" },
+    { "path": "internal/redisclient/redisclient.go", "source": "files/redisclient.go.tmpl" },
+    { "path": "internal/redisclient/redisclient_test.go", "source": "files/redisclient_test.go.tmpl" },
+    { "path": "internal/redisclient/README.md", "source": "files/README.md" },
+    { "path": "internal/di/redis_provider.go", "source": "files/redis_provider.go.tmpl", "when": ["loom"] }
+  ],
+  "patches": [
+    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
+    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
+    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" },
+    { "path": "internal/config/config.go", "marker": "configfields", "source": "files/config_fields.snippet" },
+    { "path": "internal/config/config.go", "marker": "configenv", "source": "files/config_env.snippet" },
+    { "path": "internal/config/config.go", "marker": "configdefaults", "source": "files/config_defaults.snippet" }
+  ]
+}

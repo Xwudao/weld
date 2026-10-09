@@ -1,0 +1,179 @@
+package config
+
+// Storage configuration: the typed S3-compatible object-storage settings and
+// the environment, defaults and validation that back them.
+//
+// This file is written once by `weld add storage` and belongs to the config
+// package, so it can define methods on Config and reuse the redacting Secret
+// type. The Config struct field and the loader calls into this file are added by
+// marker patches to internal/config/config.go; the regions that hold them are
+// weld-managed and never rewritten outside the marker.
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
+)
+
+// DefaultStorageRegion is the region used when neither the file nor the
+// environment sets one. Like the Redis address it is not a credential, so a
+// default can never silently reach a remote server.
+const DefaultStorageRegion = "us-east-1"
+
+// Storage environment variable names. The environment overrides the YAML file;
+// none is required when the corresponding setting is in the file.
+const (
+	EnvStorageEndpoint        = "STORAGE_ENDPOINT"
+	EnvStorageRegion          = "STORAGE_REGION"
+	EnvStorageBucket          = "STORAGE_BUCKET"
+	EnvStorageAccessKeyID     = "STORAGE_ACCESS_KEY_ID"
+	EnvStorageSecretAccessKey = "STORAGE_SECRET_ACCESS_KEY"
+	EnvStoragePathStyle       = "STORAGE_PATH_STYLE"
+	EnvStorageTLS             = "STORAGE_TLS"
+)
+
+// Storage holds the S3-compatible object-storage connection settings.
+//
+// The region defaults; the endpoint, bucket and credentials have none, so a
+// project can never silently reach an object store it was not configured for.
+// The access key and secret are held as Secret so they never reach a log or a
+// formatted dump. TLS is a pointer so its secure default of true is
+// distinguishable from an explicit false, which a local S3-compatible server
+// reached over plain HTTP needs.
+type Storage struct {
+	Endpoint        string `yaml:"endpoint"`
+	Region          string `yaml:"region"`
+	Bucket          string `yaml:"bucket"`
+	AccessKeyID     Secret `yaml:"access_key_id"`
+	SecretAccessKey Secret `yaml:"secret_access_key"`
+	PathStyle       bool   `yaml:"path_style"`
+	TLS             *bool  `yaml:"tls"`
+}
+
+// UseTLS reports whether the endpoint is reached over TLS. TLS defaults to true
+// when it is unset, so an omitted setting is secure by default.
+func (s Storage) UseTLS() bool {
+	if s.TLS == nil {
+		return true
+	}
+	return *s.TLS
+}
+
+// EndpointURL returns the S3 endpoint URL.
+//
+// An endpoint that already carries a scheme is used verbatim, minus a trailing
+// slash, except that an explicit plaintext http scheme with credentials is
+// rejected unless TLS is explicitly disabled: an omitted tls defaults to true,
+// and a credential must never cross the wire in the clear because of that
+// contradiction. A scheme-less endpoint is given https, or http when TLS is
+// explicitly disabled. An empty endpoint returns an empty string, which leaves
+// the AWS SDK on Amazon S3's default endpoint.
+func (s Storage) EndpointURL() (string, error) {
+	raw := strings.TrimSpace(s.Endpoint)
+	if raw == "" {
+		return "", nil
+	}
+	if strings.Contains(raw, "://") {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return "", fmt.Errorf("config: storage.endpoint %q is not a valid URL", raw)
+		}
+		if strings.EqualFold(parsed.Scheme, "http") && s.UseTLS() && (s.AccessKeyID.Value() != "" || s.SecretAccessKey.Value() != "") {
+			return "", fmt.Errorf("config: storage.endpoint %q is plaintext http while storage.tls defaults to true; set storage.tls: false to allow a plaintext endpoint", raw)
+		}
+		return strings.TrimRight(raw, "/"), nil
+	}
+	scheme := "https"
+	if !s.UseTLS() {
+		scheme = "http"
+	}
+	return scheme + "://" + strings.TrimRight(raw, "/"), nil
+}
+
+// applyStorageEnv overrides the storage section with the environment. A
+// variable that cannot be parsed, or an explicitly blank endpoint, region or
+// bucket, is an error rather than a silent fallback.
+func (c *Config) applyStorageEnv(lookupEnv LookupEnvFunc) error {
+	if value, ok := lookupEnv(EnvStorageEndpoint); ok {
+		endpoint := strings.TrimSpace(value)
+		if endpoint == "" {
+			// An explicitly set but blank endpoint must not silently fall back
+			// to Amazon S3: the operator set it and the value is invalid.
+			return fmt.Errorf("config: %s is set but blank", EnvStorageEndpoint)
+		}
+		c.Storage.Endpoint = endpoint
+	}
+	if value, ok := lookupEnv(EnvStorageRegion); ok {
+		region := strings.TrimSpace(value)
+		if region == "" {
+			return fmt.Errorf("config: %s is set but blank", EnvStorageRegion)
+		}
+		c.Storage.Region = region
+	}
+	if value, ok := lookupEnv(EnvStorageBucket); ok {
+		bucket := strings.TrimSpace(value)
+		if bucket == "" {
+			return fmt.Errorf("config: %s is set but blank", EnvStorageBucket)
+		}
+		c.Storage.Bucket = bucket
+	}
+	if value, ok := lookupEnv(EnvStorageAccessKeyID); ok {
+		c.Storage.AccessKeyID = Secret(value)
+	}
+	if value, ok := lookupEnv(EnvStorageSecretAccessKey); ok {
+		c.Storage.SecretAccessKey = Secret(value)
+	}
+	if value, ok := lookupEnv(EnvStoragePathStyle); ok {
+		pathStyle, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a boolean", EnvStoragePathStyle)
+		}
+		c.Storage.PathStyle = pathStyle
+	}
+	if value, ok := lookupEnv(EnvStorageTLS); ok {
+		useTLS, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a boolean", EnvStorageTLS)
+		}
+		c.Storage.TLS = &useTLS
+	}
+	return nil
+}
+
+// applyStorageDefaults fills the explicit storage defaults after the file and
+// the environment. It never invents an endpoint, a bucket or a credential.
+func (c *Config) applyStorageDefaults() {
+	if strings.TrimSpace(c.Storage.Region) == "" {
+		c.Storage.Region = DefaultStorageRegion
+	}
+}
+
+// ValidateStorage reports whether the storage settings are usable.
+//
+// It is called only where an object-store client is actually built, so a
+// project that installs storage but never constructs a client needs no storage
+// setting.
+func (c *Config) ValidateStorage() error {
+	return c.Storage.Validate()
+}
+
+// Validate reports whether the storage settings are complete. The endpoint may
+// be empty to use Amazon S3's default endpoint; the region, the bucket and both
+// credentials are required.
+func (s Storage) Validate() error {
+	if strings.TrimSpace(s.Region) == "" {
+		return errors.New("config: storage.region is required")
+	}
+	if strings.TrimSpace(s.Bucket) == "" {
+		return errors.New("config: storage.bucket is required (set it in config.yml or " + EnvStorageBucket + ")")
+	}
+	if s.AccessKeyID.Value() == "" || s.SecretAccessKey.Value() == "" {
+		return errors.New("config: storage.access_key_id and storage.secret_access_key are required (set them in config.yml or the " + EnvStorageAccessKeyID + " and " + EnvStorageSecretAccessKey + " environment)")
+	}
+	if _, err := s.EndpointURL(); err != nil {
+		return err
+	}
+	return nil
+}

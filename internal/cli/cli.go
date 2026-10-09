@@ -14,11 +14,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	weldtemplate "github.com/Xwudao/weld-template"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/scaffold"
 	"github.com/Xwudao/weld/internal/skills"
 	"github.com/Xwudao/weld/internal/template"
+	weldtemplate "github.com/Xwudao/weld/internal/weldtemplate"
 )
 
 const (

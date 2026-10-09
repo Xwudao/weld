@@ -1,0 +1,60 @@
+package __modname__
+
+import (
+	"encoding/json"
+	nethttp "net/http"
+	"net/http/httptest"
+	"testing"
+
+	"__module__/internal/httpx"
+)
+
+// envelope is the decoded {code,msg,data} response body.
+type envelope struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data json.RawMessage `json:"data"`
+}
+
+// TestRegisterServesGreeting exercises the module handler in process with
+// net/http/httptest: no socket and no database. It builds the service through
+// NewDemoService, the always zero-argument demo constructor, so it keeps
+// compiling after NewService gains a dependency for the Loom graph. It also
+// pins the shared response envelope.
+func TestRegisterServesGreeting(t *testing.T) {
+	mux := nethttp.NewServeMux()
+	Register(mux, NewDemoService())
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, RoutePrefix+"?name=Ada", nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d: %s", RoutePrefix, recorder.Code, recorder.Body)
+	}
+	var body envelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if body.Code != nethttp.StatusOK || body.Msg != httpx.SuccessMsg {
+		t.Fatalf("envelope = %+v", body)
+	}
+	var response Response
+	if err := json.Unmarshal(body.Data, &response); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if response.Module != "__modname__" || response.Message != "Hello, Ada!" {
+		t.Fatalf("response = %+v, want the module greeting", response)
+	}
+}
+
+// TestRegisterGreetsWorldByDefault checks the endpoint works without the
+// optional query parameter, so an unconfigured deployment still answers.
+func TestRegisterGreetsWorldByDefault(t *testing.T) {
+	mux := nethttp.NewServeMux()
+	Register(mux, NewDemoService())
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, RoutePrefix, nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d", RoutePrefix, recorder.Code)
+	}
+}

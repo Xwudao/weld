@@ -1,0 +1,86 @@
+package httpserver
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	nethttp "net/http"
+	"time"
+)
+
+// readHeaderTimeout bounds how long a client may take to send request headers.
+const readHeaderTimeout = 5 * time.Second
+
+// shutdownTimeout bounds the graceful shutdown a canceled Serve performs.
+const shutdownTimeout = 10 * time.Second
+
+// NewServer builds the HTTP server for handler without starting it.
+//
+// handler is expected to already carry the application middleware chain, which
+// Chain applies; NewHandler and the Loom graph both build their handler through
+// Chain, so every composition serves identical middleware. NewServer is separate from Serve so tests can inspect the
+// configured server without binding a socket.
+func NewServer(addr string, handler nethttp.Handler) *nethttp.Server {
+	return &nethttp.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+	}
+}
+
+// Listen binds addr and returns the listener.
+//
+// The socket is bound synchronously, so an address already in use fails here —
+// before a caller starts any long-running work — and a failed startup never
+// prints a listening line. It is separate from Serve so a command can bind the
+// socket first and only then start work that depends on the server being up.
+func Listen(addr string) (net.Listener, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("httpserver: listen on %s: %w", addr, err)
+	}
+	return listener, nil
+}
+
+// Serve serves handler on a listener bound for addr until the server fails or
+// ctx is canceled.
+//
+// A canceled ctx is a graceful stop: it shuts the server down within
+// shutdownTimeout and returns nil. A serve failure is returned so the caller can
+// report it. Serve deliberately logs nothing: the caller owns the sink, the
+// format and the ordering of the listening and shutdown records relative to the
+// runtimes it starts and stops around the server.
+func Serve(ctx context.Context, addr string, listener net.Listener, handler nethttp.Handler) error {
+	server := NewServer(addr, handler)
+
+	failed := make(chan error, 1)
+	go func() {
+		err := server.Serve(listener)
+		if errors.Is(err, nethttp.ErrServerClosed) {
+			err = nil
+		}
+		failed <- err
+	}()
+
+	select {
+	case err := <-failed:
+		return err
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+	return <-failed
+}
+
+// DisplayAddr turns a listen address into something clickable. A bare ":port"
+// becomes "localhost:port"; anything else is returned unchanged.
+func DisplayAddr(addr string) string {
+	if addr != "" && addr[0] == ':' {
+		return "localhost" + addr
+	}
+	return addr
+}

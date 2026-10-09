@@ -6,7 +6,7 @@ import (
 	"io/fs"
 	"strings"
 
-	weldtemplate "github.com/Xwudao/weld-template"
+	weldtemplate "github.com/Xwudao/weld/internal/weldtemplate"
 )
 
 // ModuleFile is one payload of the per-name business-module or command template.
@@ -44,7 +44,7 @@ type DIModule struct {
 }
 
 // LoadModules returns the business-module payload embedded in the
-// weld-template module.
+// embedded weldtemplate package.
 func LoadModules() (*ModuleTemplate, error) {
 	root := weldtemplate.FS()
 	raw, err := fs.ReadFile(root, "modules/module.json")

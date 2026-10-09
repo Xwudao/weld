@@ -1,0 +1,22 @@
+// This nested module pins the Loom command-line generator
+// (tool github.com/Xwudao/loom/cmd/loom). It is deliberately not part of the
+// application module, so the generator's x/tools dependency never enters the
+// app's go.mod or its go test ./.... Run it from here:
+//
+//	cd tools/loom && go build -o ../../bin/loom-gen github.com/Xwudao/loom/cmd/loom
+//	./bin/loom-gen generate ./internal/di
+//
+// or, from the project root: make generate
+
+module __module__/tools/loom
+
+go 1.25.0
+
+tool github.com/Xwudao/loom/cmd/loom
+
+require (
+	github.com/Xwudao/loom v0.3.1 // indirect
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/tools v0.45.0 // indirect
+)

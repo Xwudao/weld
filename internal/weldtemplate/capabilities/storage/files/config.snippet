@@ -1,0 +1,15 @@
+# weld:storage:installed __version__
+# S3-compatible object storage. The endpoint is any S3-compatible server; leave
+# it blank to use Amazon S3. The bucket must already exist: the client never
+# creates it. Credentials may live here for local development; production
+# should override STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY in the
+# environment. TLS defaults to true; a local server over plain HTTP needs an
+# explicit tls: false.
+storage:
+  endpoint: "localhost:9000"
+  region: "us-east-1"
+  bucket: "app"
+  access_key_id: ""
+  secret_access_key: ""
+  path_style: true
+  tls: false

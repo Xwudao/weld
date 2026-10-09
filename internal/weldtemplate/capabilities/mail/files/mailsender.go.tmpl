@@ -1,0 +1,205 @@
+// Package mailsender sends mail through an SMTP server built from the typed
+// application configuration.
+//
+// It is opt-in and explicit: nothing in the generated application imports this
+// package, and constructing a Sender sends nothing and opens no connection.
+// Every Send builds a go-mail client, applies the configured TLS policy,
+// submits the message and quits, so the SMTP session and the MIME message are
+// the maintained library's job rather than hand-written protocol code. There is
+// no connection pool, no background goroutine, no queue and no outbox. The
+// caller owns the lifecycle of each call and passes a context that bounds it.
+package mailsender
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/wneessen/go-mail"
+
+	"__module__/internal/config"
+)
+
+// Provider supplies the SMTP settings the sender uses.
+//
+// *config.Config satisfies it today through MailSettings, so the sender reads
+// config.yml and the environment without knowing either. A future
+// database-backed site configuration implements this one method and replaces the
+// YAML source without changing the sender, this package or its tests.
+type Provider interface {
+	MailSettings() config.Mail
+}
+
+// Message is one outgoing message. From is optional: when empty the configured
+// sender address is used. Bcc recipients receive the message but never appear in
+// its headers.
+type Message struct {
+	From    string
+	To      []string
+	Cc      []string
+	Bcc     []string
+	Subject string
+	Text    string
+	HTML    string
+}
+
+// Sender sends messages through the configured SMTP server. It is safe to keep
+// and reuse: it holds only the settings, and Send builds a fresh client and
+// opens a fresh connection each time.
+type Sender struct {
+	settings config.Mail
+}
+
+// New builds a Sender from provider. It validates the mail section, sends
+// nothing and opens no connection: the server is dialed only inside Send. The
+// username and password come from the redacting config.Secret and are never
+// logged or echoed in an error.
+func New(provider Provider) (*Sender, error) {
+	if provider == nil {
+		return nil, errors.New("mailsender: provider is required")
+	}
+	settings := provider.MailSettings()
+	if err := (&config.Config{Mail: settings}).ValidateMail(); err != nil {
+		return nil, err
+	}
+	return &Sender{settings: settings}, nil
+}
+
+// Send delivers one message over SMTP. It dials, applies the configured TLS
+// policy, submits the message and quits. ctx bounds the whole call; the
+// configured timeout bounds the dial and each network exchange.
+func (s *Sender) Send(ctx context.Context, msg Message) error {
+	if s == nil {
+		return errors.New("mailsender: nil sender")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settings := s.settings
+	if err := (&config.Config{Mail: settings}).ValidateMail(); err != nil {
+		return err
+	}
+	message, err := buildMessage(msg, settings.From)
+	if err != nil {
+		return err
+	}
+	client, err := s.client(settings)
+	if err != nil {
+		return err
+	}
+	if err := client.DialAndSendWithContext(ctx, message); err != nil {
+		// The server's reply is attacker-controlled and can echo the base64
+		// credential it received during AUTH, so go-mail's error text never
+		// reaches the caller. A canceled or expired context is preserved so the
+		// caller can still match it.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("mailsender: send: %w", ctxErr)
+		}
+		return errors.New("mailsender: send failed")
+	}
+	return nil
+}
+
+// client builds the go-mail client for one send. It only maps the explicit TLS
+// policy and the credentials onto the library's options: it never sets
+// InsecureSkipVerify, so the server certificate is verified by default and the
+// configured timeout bounds the dial and each exchange.
+func (s *Sender) client(settings config.Mail) (*mail.Client, error) {
+	timeout := time.Duration(settings.TimeoutSeconds) * time.Second
+	options := []mail.Option{
+		mail.WithPort(settings.Port),
+		mail.WithTimeout(timeout),
+	}
+	if settings.Username.Value() != "" || settings.Password.Value() != "" {
+		options = append(options,
+			mail.WithUsername(settings.Username.Value()),
+			mail.WithPassword(settings.Password.Value()),
+			mail.WithSMTPAuth(mail.SMTPAuthPlain),
+		)
+	}
+	switch settings.TLS {
+	case config.MailTLSImplicit:
+		options = append(options, mail.WithSSL())
+	case config.MailTLSStartTLS:
+		options = append(options, mail.WithTLSPolicy(mail.TLSMandatory))
+	default: // config.MailTLSNone
+		options = append(options, mail.WithTLSPolicy(mail.NoTLS))
+	}
+	client, err := mail.NewClient(strings.TrimSpace(settings.Host), options...)
+	if err != nil {
+		return nil, fmt.Errorf("mailsender: configure SMTP client: %w", err)
+	}
+	return client, nil
+}
+
+// buildMessage validates the message and converts it into a go-mail Msg. It
+// checks the envelope shape and the header-injection guard before go-mail parses
+// anything, so a crafted subject, sender or recipient cannot inject a header;
+// address parsing and MIME assembly are the library's job. When both Text and
+// HTML are set the message is multipart/alternative with the text part first.
+func buildMessage(msg Message, configuredFrom string) (*mail.Msg, error) {
+	from := strings.TrimSpace(msg.From)
+	if from == "" {
+		from = strings.TrimSpace(configuredFrom)
+	}
+	if err := headerSafe("from", from); err != nil {
+		return nil, err
+	}
+	for _, recipient := range append(append(append([]string{}, msg.To...), msg.Cc...), msg.Bcc...) {
+		if err := headerSafe("recipient", recipient); err != nil {
+			return nil, err
+		}
+	}
+	if err := headerSafe("subject", msg.Subject); err != nil {
+		return nil, err
+	}
+	if len(msg.To)+len(msg.Cc)+len(msg.Bcc) == 0 {
+		return nil, errors.New("mailsender: at least one recipient is required")
+	}
+	if msg.Text == "" && msg.HTML == "" {
+		return nil, errors.New("mailsender: a message needs text or HTML content")
+	}
+
+	message := mail.NewMsg()
+	if err := message.From(from); err != nil {
+		return nil, fmt.Errorf("mailsender: from: %w", err)
+	}
+	if len(msg.To) > 0 {
+		if err := message.To(msg.To...); err != nil {
+			return nil, fmt.Errorf("mailsender: to: %w", err)
+		}
+	}
+	if len(msg.Cc) > 0 {
+		if err := message.Cc(msg.Cc...); err != nil {
+			return nil, fmt.Errorf("mailsender: cc: %w", err)
+		}
+	}
+	if len(msg.Bcc) > 0 {
+		if err := message.Bcc(msg.Bcc...); err != nil {
+			return nil, fmt.Errorf("mailsender: bcc: %w", err)
+		}
+	}
+	message.Subject(msg.Subject)
+	switch {
+	case msg.Text != "" && msg.HTML != "":
+		message.SetBodyString(mail.TypeTextPlain, msg.Text)
+		message.AddAlternativeString(mail.TypeTextHTML, msg.HTML)
+	case msg.HTML != "":
+		message.SetBodyString(mail.TypeTextHTML, msg.HTML)
+	default:
+		message.SetBodyString(mail.TypeTextPlain, msg.Text)
+	}
+	return message, nil
+}
+
+// headerSafe rejects a value that would break out of its header before it
+// reaches go-mail. It is the header-injection guard for the subject, the sender
+// and each recipient.
+func headerSafe(field, value string) error {
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("mailsender: %s must not contain a header newline", field)
+	}
+	return nil
+}

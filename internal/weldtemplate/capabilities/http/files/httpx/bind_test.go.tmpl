@@ -1,0 +1,110 @@
+package httpx
+
+import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// This file covers typed request binding: the content-type check, the body
+// limit, single-value and unknown-field rejection, the optional validator
+// callback and the typed query helper.
+
+type bindPayload struct {
+	Name string `json:"name"`
+}
+
+func jsonRequest(method, target, body string) *http.Request {
+	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
+func TestDecodeJSONReadsOneValueAndRunsTheValidator(t *testing.T) {
+	var validated string
+	value, err := DecodeJSON(jsonRequest(http.MethodPost, "/", `{"name":"widget"}`), DefaultMaxBytes, func(v bindPayload) error {
+		validated = v.Name
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("DecodeJSON: %v", err)
+	}
+	if value.Name != "widget" || validated != "widget" {
+		t.Fatalf("value = %+v, validated = %q", value, validated)
+	}
+}
+
+func TestDecodeJSONRejectsBadRequestsWithTransportStatus(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        string
+		contentType string
+		status      int
+	}{
+		{"wrong content type", `{"name":"x"}`, "text/plain", http.StatusUnsupportedMediaType},
+		{"missing content type", `{"name":"x"}`, "", http.StatusUnsupportedMediaType},
+		{"malformed json", `{`, "application/json", http.StatusBadRequest},
+		{"empty body", ``, "application/json", http.StatusBadRequest},
+		{"unknown field", `{"nope":1}`, "application/json", http.StatusBadRequest},
+		{"trailing json", `{"name":"x"}{"name":"y"}`, "application/json", http.StatusBadRequest},
+		{"trailing garbage", `{"name":"x"} }`, "application/json", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
+			if tc.contentType != "" {
+				request.Header.Set("Content-Type", tc.contentType)
+			}
+			_, err := DecodeJSON[bindPayload](request, DefaultMaxBytes, nil)
+			var decodeErr *DecodeError
+			if !errors.As(err, &decodeErr) {
+				t.Fatalf("err = %v, want a *DecodeError", err)
+			}
+			if decodeErr.Status != tc.status {
+				t.Fatalf("status = %d, want %d (%s)", decodeErr.Status, tc.status, decodeErr.Message)
+			}
+			if decodeErr.Message == "" {
+				t.Fatal("the decode error has no client-safe message")
+			}
+		})
+	}
+}
+
+func TestDecodeJSONEnforcesTheBodyLimit(t *testing.T) {
+	const limit = 16
+	request := jsonRequest(http.MethodPost, "/", `{"name":"`+strings.Repeat("a", limit)+`"}`)
+	_, err := DecodeJSON[bindPayload](request, limit, nil)
+	var decodeErr *DecodeError
+	if !errors.As(err, &decodeErr) || decodeErr.Status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("err = %v, want a 413 DecodeError", err)
+	}
+}
+
+func TestDecodeJSONValidatorFailureIsAClientError(t *testing.T) {
+	_, err := DecodeJSON(jsonRequest(http.MethodPost, "/", `{"name":""}`), DefaultMaxBytes, func(bindPayload) error {
+		return errors.New("name must not be empty")
+	})
+	var decodeErr *DecodeError
+	if !errors.As(err, &decodeErr) || decodeErr.Status != http.StatusBadRequest {
+		t.Fatalf("err = %v, want a 400 DecodeError", err)
+	}
+	if decodeErr.Message != "name must not be empty" {
+		t.Fatalf("message = %q, want the validator message", decodeErr.Message)
+	}
+}
+
+func TestQueryIntDistinguishesAbsentFromValue(t *testing.T) {
+	if value, present, err := QueryInt(httptest.NewRequest(http.MethodGet, "/?limit=5", nil), "limit"); err != nil || !present || value != 5 {
+		t.Fatalf("present limit = %d, %v, %v", value, present, err)
+	}
+	if value, present, err := QueryInt(httptest.NewRequest(http.MethodGet, "/", nil), "limit"); err != nil || present || value != 0 {
+		t.Fatalf("absent limit = %d, %v, %v", value, present, err)
+	}
+	_, present, err := QueryInt(httptest.NewRequest(http.MethodGet, "/?limit=abc", nil), "limit")
+	var decodeErr *DecodeError
+	if !present || !errors.As(err, &decodeErr) || decodeErr.Status != http.StatusBadRequest {
+		t.Fatalf("non-integer limit = present %v, err %v", present, err)
+	}
+}

@@ -1,0 +1,230 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// TestLoadReadsStorageFromFile proves the storage section, including the access
+// key and secret, is read from the YAML file.
+func TestLoadReadsStorageFromFile(t *testing.T) {
+	loader := fakeLoader(map[string]string{
+		DefaultPath: "storage:\n  endpoint: localhost:9000\n  region: eu-west-1\n  bucket: uploads\n  access_key_id: file-key\n  secret_access_key: file-secret\n  path_style: true\n  tls: false\n",
+	}, nil)
+	cfg, err := loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.Endpoint != "localhost:9000" || cfg.Storage.Region != "eu-west-1" || cfg.Storage.Bucket != "uploads" {
+		t.Fatalf("storage = %+v", cfg.Storage)
+	}
+	if !cfg.Storage.PathStyle {
+		t.Fatal("storage.path_style was not loaded")
+	}
+	if cfg.Storage.UseTLS() {
+		t.Fatal("storage.tls: false was not honored")
+	}
+	if cfg.Storage.AccessKeyID.Value() != "file-key" || cfg.Storage.SecretAccessKey.Value() != "file-secret" {
+		t.Fatal("the storage credentials were not loaded")
+	}
+	if err := cfg.ValidateStorage(); err != nil {
+		t.Fatalf("ValidateStorage: %v", err)
+	}
+}
+
+// TestStorageEnvironmentOverridesFile pins the file < environment precedence for
+// the storage section.
+func TestStorageEnvironmentOverridesFile(t *testing.T) {
+	loader := fakeLoader(
+		map[string]string{DefaultPath: "storage:\n  endpoint: file:9000\n  region: file-region\n  bucket: file-bucket\n  path_style: false\n  tls: false\n"},
+		map[string]string{
+			EnvStorageEndpoint:        "env:9000",
+			EnvStorageRegion:          "env-region",
+			EnvStorageBucket:          "env-bucket",
+			EnvStorageAccessKeyID:     "env-key",
+			EnvStorageSecretAccessKey: "env-secret",
+			EnvStoragePathStyle:       "true",
+			EnvStorageTLS:             "true",
+		},
+	)
+	cfg, err := loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.Endpoint != "env:9000" || cfg.Storage.Region != "env-region" || cfg.Storage.Bucket != "env-bucket" {
+		t.Fatalf("storage = %+v, want the environment values", cfg.Storage)
+	}
+	if !cfg.Storage.PathStyle || !cfg.Storage.UseTLS() {
+		t.Fatal("the environment did not override the storage booleans")
+	}
+	if cfg.Storage.AccessKeyID.Value() != "env-key" || cfg.Storage.SecretAccessKey.Value() != "env-secret" {
+		t.Fatal("the environment did not override the storage credentials")
+	}
+}
+
+// TestStorageDefaults proves the region default and the secure TLS default
+// apply, and that an explicitly blank STORAGE_REGION is an error rather than a
+// silent fallback.
+func TestStorageDefaults(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.Region != DefaultStorageRegion {
+		t.Fatalf("Region = %q, want %q", cfg.Storage.Region, DefaultStorageRegion)
+	}
+	if !cfg.Storage.UseTLS() {
+		t.Fatal("TLS did not default to true")
+	}
+	if _, err := fakeLoader(map[string]string{DefaultPath: ""}, map[string]string{EnvStorageRegion: ""}).Load(""); err == nil {
+		t.Fatal("expected an error for an explicit blank STORAGE_REGION")
+	}
+}
+
+// TestStorageLoadErrorDoesNotLeakSecret proves a storage environment parse error
+// never echoes a credential: the error names the variable, not the secret.
+func TestStorageLoadErrorDoesNotLeakSecret(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	_, err := fakeLoader(
+		map[string]string{DefaultPath: ""},
+		map[string]string{EnvStorageSecretAccessKey: sentinel, EnvStoragePathStyle: "not-a-boolean"},
+	).Load("")
+	if err == nil {
+		t.Fatal("expected an error for a non-boolean STORAGE_PATH_STYLE")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("the error leaked the storage secret: %v", err)
+	}
+}
+
+// TestStorageSecretsRedactEverywhere is the credential-safety sentinel for the
+// storage section: the access key and secret must not survive fmt, log/slog,
+// JSON or YAML.
+func TestStorageSecretsRedactEverywhere(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	cfg := &Config{Storage: Storage{
+		Endpoint:        "localhost:9000",
+		Region:          "us-east-1",
+		Bucket:          "uploads",
+		AccessKeyID:     Secret(sentinel),
+		SecretAccessKey: Secret(sentinel),
+	}}
+
+	if got := cfg.Storage.AccessKeyID.String(); strings.Contains(got, sentinel) {
+		t.Fatalf("Secret.String leaked the secret: %q", got)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("storage", "access_key_id", cfg.Storage.AccessKeyID, "secret_access_key", cfg.Storage.SecretAccessKey)
+	if strings.Contains(buf.String(), sentinel) {
+		t.Fatalf("log/slog leaked the storage secret:\n%s", buf.String())
+	}
+
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), sentinel) {
+		t.Fatalf("JSON leaked the storage secret: %s", encoded)
+	}
+
+	yamlEncoded, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if strings.Contains(string(yamlEncoded), sentinel) {
+		t.Fatalf("YAML leaked the storage secret: %s", yamlEncoded)
+	}
+}
+
+// TestStorageValidationRequiresBucketAndCredentials proves validation fails
+// loudly on a missing bucket or credential rather than inventing one.
+func TestStorageValidationRequiresBucketAndCredentials(t *testing.T) {
+	base := Storage{Region: "us-east-1", Bucket: "uploads", AccessKeyID: "key", SecretAccessKey: "secret"}
+
+	missingBucket := base
+	missingBucket.Bucket = ""
+	if err := missingBucket.Validate(); err == nil {
+		t.Fatal("expected an error for a blank bucket")
+	}
+
+	missingKey := base
+	missingKey.AccessKeyID = ""
+	if err := missingKey.Validate(); err == nil {
+		t.Fatal("expected an error for a blank access key")
+	}
+
+	missingSecret := base
+	missingSecret.SecretAccessKey = ""
+	if err := missingSecret.Validate(); err == nil {
+		t.Fatal("expected an error for a blank secret")
+	}
+
+	if err := base.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestStorageEndpointURL derives the endpoint URL from the typed settings: an
+// endpoint with a scheme is verbatim, a scheme-less one follows TLS, and an
+// empty one stays empty for Amazon S3's default.
+func TestStorageEndpointURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		storage Storage
+		want    string
+		wantErr bool
+	}{
+		{name: "scheme preserved", storage: Storage{Endpoint: "http://localhost:9000/"}, want: "http://localhost:9000"},
+		{name: "scheme-less tls default", storage: Storage{Endpoint: "s3.example.com"}, want: "https://s3.example.com"},
+		{name: "scheme-less tls off", storage: Storage{Endpoint: "localhost:9000", TLS: boolPtr(false)}, want: "http://localhost:9000"},
+		{name: "plaintext http with credentials needs tls off", storage: Storage{Endpoint: "http://localhost:9000", AccessKeyID: "key", SecretAccessKey: "secret"}, wantErr: true},
+		{name: "plaintext http with credentials and tls off", storage: Storage{Endpoint: "http://localhost:9000", TLS: boolPtr(false), AccessKeyID: "key", SecretAccessKey: "secret"}, want: "http://localhost:9000"},
+		{name: "empty stays empty", storage: Storage{}, want: ""},
+		{name: "malformed", storage: Storage{Endpoint: "http://"}, wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := tc.storage.EndpointURL()
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s: expected an error", tc.name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: EndpointURL: %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: EndpointURL = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestStorageRejectsPlaintextHTTPWithCredentials proves an explicit http
+// endpoint with credentials fails validation unless TLS is explicitly disabled,
+// so the secure TLS default cannot silently send a credential in the clear.
+func TestStorageRejectsPlaintextHTTPWithCredentials(t *testing.T) {
+	base := Storage{
+		Endpoint: "http://localhost:9000", Region: "us-east-1", Bucket: "uploads",
+		AccessKeyID: "key", SecretAccessKey: "secret",
+	}
+	if err := base.Validate(); err == nil {
+		t.Fatal("expected validation to reject plaintext http with the default TLS")
+	}
+	allowed := base
+	allowed.TLS = boolPtr(false)
+	if err := allowed.Validate(); err != nil {
+		t.Fatalf("explicit tls: false must permit a local plaintext endpoint: %v", err)
+	}
+	if endpoint, err := allowed.EndpointURL(); err != nil || endpoint != "http://localhost:9000" {
+		t.Fatalf("EndpointURL = %q, %v", endpoint, err)
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }

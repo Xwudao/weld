@@ -1,0 +1,245 @@
+package mailsender
+
+// The tests are focused: they prove the constructor is idle, that message
+// validation rejects a malformed envelope before any connection, and that one
+// send reaches a real in-process SMTP server. The SMTP session and the MIME
+// message are go-mail's job, so there is no protocol implementation to test here.
+
+import (
+	"bufio"
+	"context"
+	"net"
+	"strings"
+	"sync"
+	"testing"
+
+	"__module__/internal/config"
+)
+
+// staticProvider is a Provider fixed in the test. It also proves the sender
+// depends on the interface rather than *config.Config, so a database-backed
+// site configuration can replace YAML without changing the sender.
+type staticProvider struct{ settings config.Mail }
+
+func (p staticProvider) MailSettings() config.Mail { return p.settings }
+
+// newSenderFor builds a sender from the settings and fails the test if the
+// section is rejected.
+func newSenderFor(t *testing.T, settings config.Mail) *Sender {
+	t.Helper()
+	sender, err := New(staticProvider{settings: settings})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return sender
+}
+
+// TestNewDoesNotConnect proves the constructor is idle: the host points at a
+// port nothing listens on, yet New succeeds without dialing.
+func TestNewDoesNotConnect(t *testing.T) {
+	sender, err := New(staticProvider{settings: config.Mail{
+		Host: "127.0.0.1", Port: 1, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 1,
+	}})
+	if err != nil {
+		t.Fatalf("New must not connect: %v", err)
+	}
+	if sender == nil {
+		t.Fatal("New returned a nil sender")
+	}
+}
+
+// TestNewRequiresAProviderAndAValidSection proves the two guards: a nil provider
+// fails and an invalid section fails loudly instead of inventing a default.
+func TestNewRequiresAProviderAndAValidSection(t *testing.T) {
+	if _, err := New(nil); err == nil {
+		t.Fatal("expected an error for a nil provider")
+	}
+	if _, err := New(staticProvider{settings: config.Mail{}}); err == nil {
+		t.Fatal("expected an error for an empty mail section")
+	}
+}
+
+// TestSendRejectsMissingRecipientAndBody proves the sender refuses an envelope
+// with no recipient or a message with no body before it opens any connection:
+// the host is a dead port, so a dial attempt would fail differently.
+func TestSendRejectsMissingRecipientAndBody(t *testing.T) {
+	sender := newSenderFor(t, config.Mail{
+		Host: "127.0.0.1", Port: 1, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
+	})
+
+	if err := sender.Send(context.Background(), Message{Subject: "x", Text: "y"}); err == nil {
+		t.Fatal("expected an error for a message with no recipient")
+	}
+	if err := sender.Send(context.Background(), Message{To: []string{"user@example.com"}, Subject: "x"}); err == nil {
+		t.Fatal("expected an error for a message with no body")
+	}
+}
+
+// TestSendRejectsHeaderInjection proves a carriage return or a line feed in the
+// subject, the sender or a recipient fails the send instead of injecting a
+// header. The host is a dead port, so only the pre-dial guard can produce these
+// errors.
+func TestSendRejectsHeaderInjection(t *testing.T) {
+	sender := newSenderFor(t, config.Mail{
+		Host: "127.0.0.1", Port: 1, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
+	})
+
+	cases := map[string]Message{
+		"subject":   {To: []string{"user@example.com"}, Subject: "ok\r\nBcc: victim@example.com", Text: "body"},
+		"recipient": {To: []string{"user@example.com>\r\nBcc: victim@example.com"}, Subject: "ok", Text: "body"},
+		"from":      {From: "no-reply@example.com\r\nBcc: victim@example.com", To: []string{"user@example.com"}, Subject: "ok", Text: "body"},
+	}
+	for name, msg := range cases {
+		if err := sender.Send(context.Background(), msg); err == nil {
+			t.Errorf("%s: expected a header-injection error", name)
+		}
+	}
+}
+
+// TestSendDeliversOverLocalSMTP proves a real send end to end through the
+// library against an in-process server, checking the envelope and the body.
+func TestSendDeliversOverLocalSMTP(t *testing.T) {
+	host, port, server := startSMTPServer(t)
+	sender := newSenderFor(t, config.Mail{
+		Host: host, Port: port, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
+	})
+
+	if err := sender.Send(context.Background(), Message{
+		To:      []string{"user@example.com"},
+		Subject: "Hello",
+		Text:    "plain body",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	from, to, data := server.snapshot()
+	if from != "no-reply@example.com" {
+		t.Fatalf("envelope from = %q", from)
+	}
+	if len(to) != 1 || to[0] != "user@example.com" {
+		t.Fatalf("envelope to = %v", to)
+	}
+	text := string(data)
+	for _, want := range []string{"Subject: Hello", "plain body"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("message is missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// smtpServer is a minimal but real SMTP server: it speaks the greeting, EHLO,
+// NOOP, MAIL, RCPT, DATA, RSET and QUIT commands go-mail uses, and records the
+// envelope and the body it saw.
+type smtpServer struct {
+	listener net.Listener
+
+	mu   sync.Mutex
+	from string
+	to   []string
+	data []byte
+}
+
+// startSMTPServer starts the server on loopback and returns its host, port and
+// the recorder. It stops on test cleanup.
+func startSMTPServer(t *testing.T) (string, int, *smtpServer) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &smtpServer{listener: listener}
+	go server.serve()
+	t.Cleanup(func() { _ = listener.Close() })
+	addr := listener.Addr().(*net.TCPAddr)
+	return addr.IP.String(), addr.Port, server
+}
+
+func (s *smtpServer) serve() {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		go s.handle(conn)
+	}
+}
+
+func (s *smtpServer) handle(conn net.Conn) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+	writeLine := func(line string) {
+		_, _ = writer.WriteString(line + "\r\n")
+		_ = writer.Flush()
+	}
+	writeLine("220 test ESMTP")
+
+	inData := false
+	var body strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if inData {
+			if line == "." {
+				inData = false
+				s.mu.Lock()
+				s.data = []byte(body.String())
+				s.mu.Unlock()
+				writeLine("250 OK: queued")
+				continue
+			}
+			if strings.HasPrefix(line, "..") {
+				line = line[1:]
+			}
+			body.WriteString(line + "\r\n")
+			continue
+		}
+		upper := strings.ToUpper(line)
+		switch {
+		case strings.HasPrefix(upper, "EHLO"), strings.HasPrefix(upper, "HELO"):
+			writeLine("250 test")
+		case upper == "NOOP":
+			writeLine("250 OK")
+		case strings.HasPrefix(upper, "MAIL FROM:"):
+			s.mu.Lock()
+			s.from = envelopeAddress(line)
+			s.mu.Unlock()
+			writeLine("250 OK")
+		case strings.HasPrefix(upper, "RCPT TO:"):
+			s.mu.Lock()
+			s.to = append(s.to, envelopeAddress(line))
+			s.mu.Unlock()
+			writeLine("250 OK")
+		case upper == "DATA":
+			body.Reset()
+			inData = true
+			writeLine("354 End data with <CR><LF>.<CR><LF>")
+		case upper == "RSET":
+			writeLine("250 OK")
+		case upper == "QUIT":
+			writeLine("221 Bye")
+			return
+		default:
+			writeLine("250 OK")
+		}
+	}
+}
+
+func (s *smtpServer) snapshot() (from string, to []string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.from, append([]string(nil), s.to...), append([]byte(nil), s.data...)
+}
+
+// envelopeAddress extracts the address from a MAIL FROM or RCPT TO command.
+func envelopeAddress(line string) string {
+	start := strings.Index(line, ":")
+	if start < 0 {
+		return ""
+	}
+	value := strings.TrimSpace(line[start+1:])
+	return strings.Trim(value, "<>")
+}

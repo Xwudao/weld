@@ -1,0 +1,27 @@
+{
+  "name": "db",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "PostgreSQL persistence: SQL migrations and queries, sqlc-generated code, an injectable pool and repository.",
+  "requires": ["loom"],
+  "files": [
+    { "path": "sqlc.yaml", "source": "files/sqlc.yaml" },
+    { "path": "db/migrations/000001_create_items.sql", "source": "files/migrations/000001_create_items.sql" },
+    { "path": "db/query/items.sql", "source": "files/query/items.sql" },
+    { "path": "db/tools/go.mod", "source": "files/tools/go.mod.tmpl" },
+    { "path": "db/tools/go.sum", "source": "files/tools/go.sum" },
+    { "path": "internal/data/data.go", "source": "files/data.go.tmpl" },
+    { "path": "internal/data/sqlc/db.go", "source": "files/sqlc/db.go.tmpl" },
+    { "path": "internal/data/sqlc/models.go", "source": "files/sqlc/models.go.tmpl" },
+    { "path": "internal/data/sqlc/items.sql.go", "source": "files/sqlc/items.sql.go.tmpl" },
+    { "path": "internal/data/data_test.go", "source": "files/data_test.go.tmpl" },
+    { "path": "internal/data/postgres_integration_test.go", "source": "files/postgres_integration_test.go.tmpl" },
+    { "path": "internal/data/README.md", "source": "files/README.md" }
+  ],
+  "patches": [
+    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
+    { "path": "Makefile", "marker": "db", "source": "files/Makefile.snippet" },
+    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
+    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" }
+  ]
+}

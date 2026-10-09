@@ -1,0 +1,38 @@
+# `__modname__` business module
+
+`weld add module __modname__` generated this package. weld writes it once and
+records every file in `weld.json`; it does not regenerate them, so your edits
+survive later `weld add` commands.
+
+## What it is
+
+An HTTP business module wired under `GET /api/__modname__`:
+
+- `dto.go` — the typed `Request` and `Response`.
+- `service.go` — the `Service` interface, the default `NewService`, and the
+  `NewDemoService` demo constructor the package's tests use.
+- `module.go` — `Register` and the HTTP handler.
+
+The handler writes through `internal/httpx`, the shared toolkit: `httpx.JSON`
+wraps a value in the `{code, msg, data}` envelope and `httpx.Error` writes an
+error envelope with `data: null`. Use `httpx.RawText`, `httpx.Bytes` or
+`httpx.NoContent` for a response that must stay unwrapped.
+
+## Replaceable example, not persistence
+
+The default `Service` is an in-memory development demo. It writes nothing to
+disk and keeps no state across restarts. Replace the body of `NewService` (or
+return your own implementation) to add real behaviour. Keep the `Service`
+interface and the `NewService` symbol stable.
+
+## How it is wired
+
+Generating this module installed `http` and `loom` (and the `config` they
+require). The generated Loom server graph in `internal/di` provides
+`__modname__.NewService` and registers the module on the composed mux
+(`di.newMux`), so you may change `NewService`'s signature — for example to take
+`data.Repository` after `weld add db`. Nothing in this package quotes the graph,
+and no separate route file is written.
+
+To change the wire format or add endpoints, edit this package; the route prefix
+and registration live in `module.go`.

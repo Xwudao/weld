@@ -1,0 +1,409 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/Xwudao/go-validate"
+)
+
+// openAPIVersion is the emitted document version. The field metadata is
+// expressed with JSON Schema 2020-12 keywords, which is the dialect OpenAPI 3.1
+// uses, so no translation layer is needed between go-validate and the document.
+const openAPIVersion = "3.1.0"
+
+// projectName and apiVersion label the document. They are substituted when the
+// project is scaffolded.
+const (
+	projectName = "__name__"
+	apiVersion  = "__version__"
+)
+
+// JSONSchema is the small, bounded subset of JSON Schema that go-validate field
+// metadata can express. There is deliberately no broader schema system here: if
+// a Spec carries a constraint without a mapping, schemaFromSpec fails instead
+// of emitting a document that silently omits the rule.
+type JSONSchema struct {
+	Type       any                    `json:"type,omitempty"`
+	Properties map[string]*JSONSchema `json:"properties,omitempty"`
+	Items      *JSONSchema            `json:"items,omitempty"`
+	Required   []string               `json:"required,omitempty"`
+	MinLength  *int                   `json:"minLength,omitempty"`
+	MaxLength  *int                   `json:"maxLength,omitempty"`
+	Minimum    any                    `json:"minimum,omitempty"`
+	Maximum    any                    `json:"maximum,omitempty"`
+	Format     string                 `json:"format,omitempty"`
+	Enum       []any                  `json:"enum,omitempty"`
+}
+
+// schemaFunc produces a schema on demand so a contract error can be returned
+// instead of panicking at package initialization.
+type schemaFunc func() (*JSONSchema, error)
+
+// Operation is one API endpoint. The route table and the OpenAPI document are
+// both derived from it, so the handler and the documented contract cannot
+// drift. Method and Path are explicit and OperationID is required.
+type Operation struct {
+	Method        string
+	Path          string
+	OperationID   string
+	Summary       string
+	PathParams    []string
+	Query         []QueryParameter
+	Body          schemaFunc
+	BodyRequired  bool
+	SuccessStatus int
+	Success       schemaFunc
+	Errors        []OperationError
+
+	handle func(service Service) http.HandlerFunc
+}
+
+// QueryParameter is one query parameter, documented from the same Spec field
+// that validates it.
+type QueryParameter struct {
+	Name string
+	Spec func() validate.Spec
+}
+
+// OperationError is one non-success response. Its body is the shared
+// {code,msg,data} envelope with data null, so only the transport status and a
+// description are needed.
+type OperationError struct {
+	Status      int
+	Description string
+}
+
+// route is the ServeMux pattern for the operation.
+func (o Operation) route() string {
+	return o.Method + " " + o.Path
+}
+
+// operations is the explicit route table: the single source for mux
+// registration and for the OpenAPI document.
+func operations() []Operation {
+	return []Operation{
+		{
+			Method:        http.MethodPost,
+			Path:          "/api/items",
+			OperationID:   "createItem",
+			Summary:       "Create an item",
+			Body:          objectOf[CreateItemRequest](),
+			BodyRequired:  true,
+			SuccessStatus: http.StatusCreated,
+			Success:       objectOf[ItemResponse](),
+			Errors: []OperationError{
+				{Status: http.StatusBadRequest, Description: "Invalid request"},
+				{Status: http.StatusInternalServerError, Description: "Internal error"},
+			},
+			handle: createItemHandler,
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/api/items",
+			OperationID: "listItems",
+			Summary:     "List items",
+			Query: []QueryParameter{
+				{Name: "limit", Spec: func() validate.Spec { return listItemsQuery{}.Spec() }},
+			},
+			SuccessStatus: http.StatusOK,
+			Success:       arrayOf[ItemResponse](),
+			Errors: []OperationError{
+				{Status: http.StatusBadRequest, Description: "Invalid request"},
+				{Status: http.StatusInternalServerError, Description: "Internal error"},
+			},
+			handle: listItemsHandler,
+		},
+		{
+			Method:        http.MethodGet,
+			Path:          "/api/items/{id}",
+			OperationID:   "getItem",
+			Summary:       "Get an item",
+			PathParams:    []string{"id"},
+			SuccessStatus: http.StatusOK,
+			Success:       objectOf[ItemResponse](),
+			Errors: []OperationError{
+				{Status: http.StatusNotFound, Description: "Item not found"},
+				{Status: http.StatusInternalServerError, Description: "Internal error"},
+			},
+			handle: getItemHandler,
+		},
+	}
+}
+
+// objectOf renders a DTO Spec as a JSON Schema object.
+func objectOf[T speced]() schemaFunc {
+	return func() (*JSONSchema, error) {
+		var zero T
+		return schemaFromSpec(zero.Spec())
+	}
+}
+
+// arrayOf renders a JSON array whose items are the DTO's object schema, so a
+// list response reuses the very same field constraints as its element.
+func arrayOf[T speced]() schemaFunc {
+	element := objectOf[T]()
+	return func() (*JSONSchema, error) {
+		schema, err := element()
+		if err != nil {
+			return nil, err
+		}
+		return &JSONSchema{Type: "array", Items: schema}, nil
+	}
+}
+
+// schemaFromSpec renders a DTO Spec as a JSON Schema object. It rejects any
+// Spec that carries a constraint go-validate cannot express, so the document
+// never silently drops a rule.
+func schemaFromSpec(spec validate.Spec) (*JSONSchema, error) {
+	schema, err := spec.Schema()
+	if err != nil {
+		return nil, err
+	}
+	object := &JSONSchema{
+		Type:       "object",
+		Properties: make(map[string]*JSONSchema, len(schema.Fields)),
+	}
+	for _, field := range schema.Fields {
+		object.Properties[field.Name] = schemaFromField(field, field.Nullable)
+		if field.Required {
+			object.Required = append(object.Required, field.Name)
+		}
+	}
+	return object, nil
+}
+
+// schemaFromField renders one field's static metadata. nullable widens the JSON
+// type to include null; query parameters pass false because absence is
+// expressed by the parameter's required flag, not by a null type.
+func schemaFromField(field validate.FieldSchema, nullable bool) *JSONSchema {
+	schema := &JSONSchema{
+		MinLength: field.MinLength,
+		MaxLength: field.MaxLength,
+		Minimum:   field.Minimum,
+		Maximum:   field.Maximum,
+		Format:    field.Format,
+		Enum:      field.Enum,
+	}
+	if nullable {
+		schema.Type = []string{field.Type, "null"}
+	} else {
+		schema.Type = field.Type
+	}
+	return schema
+}
+
+// Document builds the OpenAPI 3.1 document from the route table. It fails when
+// the contract is incomplete or uses a constraint the document cannot express,
+// so a broken contract is rejected rather than documented incorrectly.
+func Document() (*OpenAPIDocument, error) {
+	return buildDocument(operations())
+}
+
+// OpenAPIJSON returns the document as indented JSON: the artifact served at
+// /api/openapi.json.
+func OpenAPIJSON() ([]byte, error) {
+	document, err := Document()
+	if err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(document, "", "  ")
+}
+
+// OpenAPIDocument is the OpenAPI 3.1 root object.
+type OpenAPIDocument struct {
+	OpenAPI string              `json:"openapi"`
+	Info    Info                `json:"info"`
+	Paths   map[string]PathItem `json:"paths"`
+}
+
+// Info is the OpenAPI info object.
+type Info struct {
+	Title   string `json:"title"`
+	Version string `json:"version"`
+}
+
+// PathItem maps a lower-case HTTP method to its operation.
+type PathItem map[string]*OperationDocument
+
+// OperationDocument is the OpenAPI operation object.
+type OperationDocument struct {
+	OperationID string                      `json:"operationId"`
+	Summary     string                      `json:"summary,omitempty"`
+	Parameters  []ParameterDocument         `json:"parameters,omitempty"`
+	RequestBody *RequestBodyDocument        `json:"requestBody,omitempty"`
+	Responses   map[string]ResponseDocument `json:"responses"`
+}
+
+// ParameterDocument is one path or query parameter.
+type ParameterDocument struct {
+	Name     string      `json:"name"`
+	In       string      `json:"in"`
+	Required bool        `json:"required,omitempty"`
+	Schema   *JSONSchema `json:"schema"`
+}
+
+// RequestBodyDocument is the JSON request body object.
+type RequestBodyDocument struct {
+	Required bool                 `json:"required"`
+	Content  map[string]MediaType `json:"content"`
+}
+
+// MediaType binds a schema to a media type.
+type MediaType struct {
+	Schema *JSONSchema `json:"schema"`
+}
+
+// ResponseDocument is one response object.
+type ResponseDocument struct {
+	Description string               `json:"description"`
+	Content     map[string]MediaType `json:"content,omitempty"`
+}
+
+func buildDocument(ops []Operation) (*OpenAPIDocument, error) {
+	document := &OpenAPIDocument{
+		OpenAPI: openAPIVersion,
+		Info: Info{
+			Title:   projectName + " API",
+			Version: apiVersion,
+		},
+		Paths: make(map[string]PathItem, len(ops)),
+	}
+	seen := make(map[string]bool, len(ops))
+	for _, operation := range ops {
+		if err := validateOperation(operation, seen); err != nil {
+			return nil, err
+		}
+		built, err := buildOperation(operation)
+		if err != nil {
+			return nil, fmt.Errorf("operation %q: %w", operation.OperationID, err)
+		}
+		path := document.Paths[operation.Path]
+		if path == nil {
+			path = PathItem{}
+			document.Paths[operation.Path] = path
+		}
+		path[strings.ToLower(operation.Method)] = built
+	}
+	return document, nil
+}
+
+// validateOperation rejects an incomplete contract instead of emitting a
+// document that quietly omits it.
+func validateOperation(operation Operation, seen map[string]bool) error {
+	if operation.Method == "" || operation.Path == "" {
+		return fmt.Errorf("operation %q: method and path are required", operation.OperationID)
+	}
+	if operation.OperationID == "" {
+		return fmt.Errorf("%s %s: operationId is required", operation.Method, operation.Path)
+	}
+	if seen[operation.OperationID] {
+		return fmt.Errorf("duplicate operationId %q", operation.OperationID)
+	}
+	seen[operation.OperationID] = true
+	if operation.handle == nil {
+		return fmt.Errorf("operation %q: no handler", operation.OperationID)
+	}
+	if operation.SuccessStatus == 0 || operation.Success == nil {
+		return fmt.Errorf("operation %q: a success response is required", operation.OperationID)
+	}
+	for _, response := range operation.Errors {
+		if response.Status == 0 {
+			return fmt.Errorf("operation %q: error responses need a status", operation.OperationID)
+		}
+	}
+	return nil
+}
+
+func buildOperation(operation Operation) (*OperationDocument, error) {
+	document := &OperationDocument{
+		OperationID: operation.OperationID,
+		Summary:     operation.Summary,
+		Responses:   make(map[string]ResponseDocument, len(operation.Errors)+1),
+	}
+	for _, name := range operation.PathParams {
+		document.Parameters = append(document.Parameters, ParameterDocument{
+			Name:     name,
+			In:       "path",
+			Required: true,
+			Schema:   &JSONSchema{Type: validate.TypeString},
+		})
+	}
+	for _, parameter := range operation.Query {
+		if parameter.Spec == nil {
+			return nil, fmt.Errorf("query parameter %q: missing spec", parameter.Name)
+		}
+		schema, err := parameter.Spec().Schema()
+		if err != nil {
+			return nil, fmt.Errorf("query parameter %q: %w", parameter.Name, err)
+		}
+		field := schema.Field(parameter.Name)
+		if field == nil {
+			return nil, fmt.Errorf("query parameter %q is not declared as a Spec field", parameter.Name)
+		}
+		document.Parameters = append(document.Parameters, ParameterDocument{
+			Name:     field.Name,
+			In:       "query",
+			Required: field.Required,
+			Schema:   schemaFromField(*field, false),
+		})
+	}
+	if operation.Body != nil {
+		schema, err := operation.Body()
+		if err != nil {
+			return nil, fmt.Errorf("request body: %w", err)
+		}
+		document.RequestBody = &RequestBodyDocument{
+			Required: operation.BodyRequired,
+			Content:  map[string]MediaType{"application/json": {Schema: schema}},
+		}
+	}
+	if operation.Success != nil {
+		schema, err := operation.Success()
+		if err != nil {
+			return nil, fmt.Errorf("success response: %w", err)
+		}
+		document.Responses[strconv.Itoa(operation.SuccessStatus)] = ResponseDocument{
+			Description: "Success",
+			Content:     map[string]MediaType{"application/json": {Schema: successEnvelope(schema)}},
+		}
+	}
+	for _, response := range operation.Errors {
+		document.Responses[strconv.Itoa(response.Status)] = ResponseDocument{
+			Description: response.Description,
+			Content:     map[string]MediaType{"application/json": {Schema: errorEnvelope()}},
+		}
+	}
+	return document, nil
+}
+
+// successEnvelope wraps a success data schema in the {code,msg,data} envelope
+// the handler writes, so the documented response matches the wire format: data
+// carries the operation's own schema and code repeats the transport status.
+func successEnvelope(data *JSONSchema) *JSONSchema {
+	return envelopeSchema(data)
+}
+
+// errorEnvelope is the envelope every non-success response carries: code repeats
+// the transport status, msg is a short client-safe message and data is always
+// null. data is documented as the single-value enum [null], which is the precise
+// JSON Schema 2020-12 form (a bare type: null is not accepted by every OpenAPI
+// 3.1 parser).
+func errorEnvelope() *JSONSchema {
+	return envelopeSchema(&JSONSchema{Enum: []any{nil}})
+}
+
+func envelopeSchema(data *JSONSchema) *JSONSchema {
+	return &JSONSchema{
+		Type: "object",
+		Properties: map[string]*JSONSchema{
+			"code": {Type: "integer"},
+			"msg":  {Type: "string"},
+			"data": data,
+		},
+		Required: []string{"code", "msg", "data"},
+	}
+}

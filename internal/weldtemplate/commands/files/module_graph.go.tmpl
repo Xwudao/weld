@@ -1,0 +1,42 @@
+// Command-specific Loom graph for the `__modname__` command group.
+//
+// This file is the stable command seam: weld writes it once and never
+// regenerates it, so wiring here survives later `weld add` commands. Loom
+// generates the initializer `Init__ModName__` from the graph declaration below
+// into internal/di/loom_gen.go; edit the graph here, never that generated file.
+//
+// The graph binds the module's own Service through module.NewService — the same
+// stable factory the HTTP graph binds — so the command and the HTTP handler
+// share one business layer, and it includes commonModule, the shared provider
+// set di.go declares and `weld add` regenerates (configuration, logger and the
+// installed db/redis/mail/storage bindings). It does not copy those providers,
+// so a capability installed after this file was written still reaches the
+// command. Loom prunes every provider the command's root does not use, so
+// resolving the group never constructs the HTTP server, the application root,
+// the cron scheduler or a database pool, and there is no process-wide
+// singleton: each graph keeps its own instance cache.
+package di
+
+import (
+	command "__module__/internal/commands/__modname__"
+	module "__module__/internal/modules/__modname__"
+	"github.com/Xwudao/loom"
+)
+
+// __modname__Graph produces Init__ModName__. Only the providers a real
+// __modname__ subcommand needs are constructed; the rest are declared through
+// commonModule and pruned otherwise.
+var __modname__Graph = loom.Graph[*command.Deps](
+	loom.Name("Init__ModName__"),
+	loom.WithContext(),
+	// The shared providers every graph includes. They are declared once in
+	// di.go, which `weld add` regenerates when the capability set changes, so a
+	// capability installed after this command still reaches it. Loom constructs
+	// them only when the command's root consumes them, and the module never
+	// carries the HTTP server or the cron scheduler.
+	commonModule,
+	// The module's Service, the same stable factory the HTTP graph binds.
+	loom.Provide(module.NewService),
+	// The command's dependency root, which consumes the module Service.
+	loom.Provide(command.NewDeps),
+)

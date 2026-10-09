@@ -1,0 +1,17 @@
+// Command __name__ is a minimal Go CLI scaffolded by weld.
+package main
+
+import (
+	"os"
+
+	"__module__/internal/app"
+	"__module__/internal/logging"
+)
+
+func main() {
+	logger := logging.New(os.Stderr, logging.TextFormat, nil)
+	if err := app.Run(os.Args[1:]); err != nil {
+		logger.Error("__name__ failed", "error", err)
+		os.Exit(1)
+	}
+}

@@ -1,5 +1,5 @@
 // Package template loads weld capability payloads bundled by the
-// weld-template module and substitutes their placeholders.
+// internal/weldtemplate package and substitutes their placeholders.
 package template
 
 import (
@@ -9,7 +9,7 @@ import (
 	"path"
 	"sort"
 
-	weldtemplate "github.com/Xwudao/weld-template"
+	weldtemplate "github.com/Xwudao/weld/internal/weldtemplate"
 )
 
 // Kind classifies how a capability applies to a project.
@@ -78,12 +78,12 @@ type DISpec struct {
 	Test string `json:"test,omitempty"`
 }
 
-// Catalog is the set of capabilities bundled by the template module.
+// Catalog is the set of capabilities embedded in this weld module.
 type Catalog struct {
 	root fs.FS
 }
 
-// Load returns the catalog embedded in the weld-template module.
+// Load returns the catalog embedded in this weld module.
 func Load() *Catalog {
 	return &Catalog{root: weldtemplate.FS()}
 }

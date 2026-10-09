@@ -1,0 +1,122 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// TestLoadReadsRedisFromFile proves the Redis section, including the username
+// and password, is read from the YAML file.
+func TestLoadReadsRedisFromFile(t *testing.T) {
+	loader := fakeLoader(map[string]string{
+		DefaultPath: "redis:\n  addr: redis.example:6380\n  username: app\n  password: file-secret\n  db: 2\n  tls: true\n",
+	}, nil)
+	cfg, err := loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Redis.Addr != "redis.example:6380" || cfg.Redis.DB != 2 || !cfg.Redis.TLS {
+		t.Fatalf("redis = %+v", cfg.Redis)
+	}
+	if cfg.Redis.Username.Value() != "app" || cfg.Redis.Password.Value() != "file-secret" {
+		t.Fatal("the Redis username or password was not loaded")
+	}
+	if err := cfg.ValidateRedis(); err != nil {
+		t.Fatalf("ValidateRedis: %v", err)
+	}
+}
+
+// TestRedisEnvironmentOverridesFile pins the file < environment precedence for
+// the Redis section.
+func TestRedisEnvironmentOverridesFile(t *testing.T) {
+	loader := fakeLoader(
+		map[string]string{DefaultPath: "redis:\n  addr: file:6379\n  db: 1\n  tls: false\n"},
+		map[string]string{
+			EnvRedisAddr:     "env:6380",
+			EnvRedisUsername: "env-user",
+			EnvRedisPassword: "env-secret",
+			EnvRedisDB:       "4",
+			EnvRedisTLS:      "true",
+		},
+	)
+	cfg, err := loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Redis.Addr != "env:6380" || cfg.Redis.DB != 4 || !cfg.Redis.TLS {
+		t.Fatalf("redis = %+v, want the environment values", cfg.Redis)
+	}
+	if cfg.Redis.Username.Value() != "env-user" || cfg.Redis.Password.Value() != "env-secret" {
+		t.Fatal("the environment did not override the Redis username or password")
+	}
+}
+
+// TestRedisDefaultsToLocalhost proves the address default applies and that an
+// explicitly blank REDIS_ADDR is an error rather than a silent fallback.
+func TestRedisDefaultsToLocalhost(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Redis.Addr != DefaultRedisAddr {
+		t.Fatalf("Redis.Addr = %q, want %q", cfg.Redis.Addr, DefaultRedisAddr)
+	}
+	if _, err := fakeLoader(map[string]string{DefaultPath: ""}, map[string]string{EnvRedisAddr: ""}).Load(""); err == nil {
+		t.Fatal("expected an error for an explicit blank REDIS_ADDR")
+	}
+}
+
+// TestRedisLoadErrorDoesNotLeakSecret proves a Redis environment parse error
+// never echoes a credential: the error names the variable, not the password.
+func TestRedisLoadErrorDoesNotLeakSecret(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	_, err := fakeLoader(
+		map[string]string{DefaultPath: ""},
+		map[string]string{EnvRedisPassword: sentinel, EnvRedisDB: "not-a-number"},
+	).Load("")
+	if err == nil {
+		t.Fatal("expected an error for a non-numeric REDIS_DB")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("the error leaked the Redis password: %v", err)
+	}
+}
+
+// TestRedisSecretsRedactEverywhere is the credential-safety sentinel for the
+// Redis section: the username and password must not survive fmt, log/slog, JSON
+// or YAML.
+func TestRedisSecretsRedactEverywhere(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	cfg := &Config{Redis: Redis{Addr: "localhost:6379", Username: Secret(sentinel), Password: Secret(sentinel)}}
+
+	if got := cfg.Redis.Username.String(); strings.Contains(got, sentinel) {
+		t.Fatalf("Secret.String leaked the secret: %q", got)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("redis", "username", cfg.Redis.Username, "password", cfg.Redis.Password)
+	if strings.Contains(buf.String(), sentinel) {
+		t.Fatalf("log/slog leaked the Redis secret:\n%s", buf.String())
+	}
+
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), sentinel) {
+		t.Fatalf("JSON leaked the Redis secret: %s", encoded)
+	}
+
+	yamlEncoded, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if strings.Contains(string(yamlEncoded), sentinel) {
+		t.Fatalf("YAML leaked the Redis secret: %s", yamlEncoded)
+	}
+}

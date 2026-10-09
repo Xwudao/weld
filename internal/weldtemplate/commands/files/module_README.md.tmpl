@@ -1,0 +1,33 @@
+# `__modname__` command group
+
+`weld add module __modname__ --command` generated this package. weld writes it
+once and records every file in `weld.json`; it does not regenerate them, so your
+edits survive later `weld add` commands.
+
+## What it is
+
+A command group backed by the `internal/modules/__modname__` business module: it
+receives the same `Service` interface and `NewService` constructor the HTTP
+handler uses, so the command and `GET /api/__modname__` share one business layer.
+A bare `__name__ __modname__` shows help; the generated `greet` subcommand is a
+focused example of the seam that you can extend or replace.
+
+## How it is wired
+
+Generating the module command installed `http` and `loom` (and the `config` they
+require). The group resolves the module's Service from the command-specific
+graph in `internal/di/__modname___graph.go`. That graph binds
+`__modname__.NewService` (the same factory the HTTP server graph binds) and
+includes `commonModule`, the shared provider set `di.go` declares (configuration,
+logger and the installed db/redis/mail/storage bindings); Loom prunes every
+provider a subcommand does not consume, so the group never constructs the HTTP
+server, the scheduler or a database pool. A capability installed after this
+command still reaches it, because the shared providers live in `commonModule`
+rather than in this stable graph.
+
+`internal/app/__modname___command.go` registers the group through
+`app.RegisterCommand` and delegates `Build` to `di.Init__ModName__`. The `greet`
+subcommand calls `g.resolve`, which builds and starts the graph for that one
+invocation and stops it within a bounded deadline. Keep the module's `Service`
+interface and `NewService` symbol stable; `internal/di/loom_gen.go` is generated
+by Loom and must never be edited.

@@ -1,0 +1,424 @@
+package objectstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"__module__/internal/config"
+)
+
+const (
+	testBucket = "test-bucket"
+	testKey    = "dir/report.txt"
+)
+
+// fakeS3 is an in-process S3 protocol adapter. It stores object bodies in a map
+// keyed by the path-style object path, so the tests drive the real AWS SDK
+// request and response flow over a real loopback socket with no cloud service.
+// It deliberately implements only the three operations the client uses.
+type fakeS3 struct {
+	mu      sync.Mutex
+	objects map[string][]byte
+}
+
+func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.objects == nil {
+		f.objects = map[string][]byte{}
+	}
+	key := strings.TrimPrefix(r.URL.Path, "/"+testBucket+"/")
+	switch r.Method {
+	case http.MethodPut:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusInternalServerError)
+			return
+		}
+		f.objects[key] = body
+		w.Header().Set("ETag", fmt.Sprintf("%q", strconv.Itoa(len(body))))
+		w.WriteHeader(http.StatusOK)
+	case http.MethodGet:
+		body, ok := f.objects[key]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(body)
+	case http.MethodDelete:
+		delete(f.objects, key)
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (f *fakeS3) get(key string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	body, ok := f.objects[key]
+	return body, ok
+}
+
+// newTestStore starts the protocol adapter, builds a Store against it and
+// returns both; the server and the store are closed with the test.
+func newTestStore(t *testing.T) (*Store, *fakeS3) {
+	t.Helper()
+	fake := &fakeS3{}
+	server := httptest.NewServer(fake)
+	t.Cleanup(server.Close)
+	cfg := &config.Config{Storage: config.Storage{
+		Endpoint:        server.URL,
+		Region:          "us-east-1",
+		Bucket:          testBucket,
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+		PathStyle:       true,
+		TLS:             boolPtr(false),
+	}}
+	store, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store, fake
+}
+
+// newTestStoreTLS starts the protocol adapter behind TLS and builds a Store that
+// trusts its certificate. It is the secure endpoint a production deployment
+// uses, and it matters here: SigV4 signs the payload hash over plain HTTP, which
+// requires a seekable body, while over TLS it uses UNSIGNED-PAYLOAD and can
+// stream a non-seekable body.
+func newTestStoreTLS(t *testing.T) (*Store, *fakeS3) {
+	t.Helper()
+	fake := &fakeS3{}
+	server := httptest.NewTLSServer(fake)
+	t.Cleanup(server.Close)
+	cfg := &config.Config{Storage: config.Storage{
+		Endpoint:        server.URL,
+		Region:          "us-east-1",
+		Bucket:          testBucket,
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+		PathStyle:       true,
+	}}
+	store, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	// The test server's own client trusts its self-signed certificate; the SDK
+	// uses the same *http.Client the Store built.
+	store.httpClient.Transport = server.Client().Transport
+	return store, fake
+}
+
+// TestNewDoesNotConnect proves the constructor is idle: the endpoint points at a
+// closed port, yet New succeeds and Close is safe without a connection. It never
+// creates the bucket either.
+func TestNewDoesNotConnect(t *testing.T) {
+	cfg := &config.Config{Storage: config.Storage{
+		Endpoint:        "127.0.0.1:1",
+		Region:          "us-east-1",
+		Bucket:          testBucket,
+		AccessKeyID:     "key",
+		SecretAccessKey: "secret",
+	}}
+	store, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestNewRejectsIncompleteConfiguration proves the client validates what it
+// needs and fails loudly rather than inventing a bucket or a credential.
+func TestNewRejectsIncompleteConfiguration(t *testing.T) {
+	valid := config.Storage{
+		Endpoint:        "127.0.0.1:1",
+		Region:          "us-east-1",
+		Bucket:          testBucket,
+		AccessKeyID:     "key",
+		SecretAccessKey: "secret",
+	}
+	cases := map[string]config.Storage{
+		"missing bucket":     func() config.Storage { s := valid; s.Bucket = ""; return s }(),
+		"missing region":     func() config.Storage { s := valid; s.Region = ""; return s }(),
+		"missing access key": func() config.Storage { s := valid; s.AccessKeyID = ""; return s }(),
+		"missing secret":     func() config.Storage { s := valid; s.SecretAccessKey = ""; return s }(),
+	}
+	for name, storage := range cases {
+		store, err := New(&config.Config{Storage: storage})
+		if err == nil {
+			_ = store.Close()
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+// TestUploadDownloadDelete exercises the full round trip against the protocol
+// adapter: the body streams up, streams back byte-for-byte, and Delete removes
+// it.
+func TestUploadDownloadDelete(t *testing.T) {
+	store, fake := newTestStore(t)
+	ctx := context.Background()
+
+	payload := strings.Repeat("streaming-payload ", 1024)
+	etag, err := store.Upload(ctx, testKey, strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if etag == "" {
+		t.Fatal("Upload returned an empty ETag")
+	}
+	if body, ok := fake.get(testKey); !ok || string(body) != payload {
+		t.Fatalf("the server stored %d bytes, want %d", len(body), len(payload))
+	}
+
+	body, err := store.Download(ctx, testKey)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	downloaded, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read Download body: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("close Download body: %v", err)
+	}
+	if string(downloaded) != payload {
+		t.Fatal("the downloaded body does not match the uploaded body")
+	}
+
+	if err := store.Delete(ctx, testKey); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok := fake.get(testKey); ok {
+		t.Fatal("the object survived Delete")
+	}
+}
+
+// TestDownloadMissingKeyFails proves a missing object is an error and not an
+// empty successful body.
+func TestDownloadMissingKeyFails(t *testing.T) {
+	store, _ := newTestStore(t)
+	body, err := store.Download(context.Background(), "absent.txt")
+	if err == nil {
+		_ = body.Close()
+		t.Fatal("expected an error for a missing object")
+	}
+}
+
+// TestPresignGetIsBoundedAndSigned proves a presigned download URL carries the
+// requested bounded expiry and a signature, and that fetching it downloads the
+// object.
+func TestPresignGetIsBoundedAndSigned(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	if _, err := store.Upload(ctx, testKey, strings.NewReader("presigned")); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+
+	signed, err := store.PresignGet(ctx, testKey, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("PresignGet: %v", err)
+	}
+	parsed, err := url.Parse(signed)
+	if err != nil {
+		t.Fatalf("parse presigned URL: %v", err)
+	}
+	if parsed.Path != "/"+testBucket+"/"+testKey {
+		t.Fatalf("presigned path = %q", parsed.Path)
+	}
+	if got := parsed.Query().Get("X-Amz-Expires"); got != "900" {
+		t.Fatalf("X-Amz-Expires = %q, want 900", got)
+	}
+	if parsed.Query().Get("X-Amz-Signature") == "" {
+		t.Fatal("the presigned URL carries no signature")
+	}
+
+	response, err := http.Get(signed)
+	if err != nil {
+		t.Fatalf("GET presigned URL: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read presigned response: %v", err)
+	}
+	if string(body) != "presigned" {
+		t.Fatalf("presigned body = %q, want %q", body, "presigned")
+	}
+}
+
+// TestPresignPutAllowsUpload proves a presigned upload URL is usable and stores
+// the object the protocol adapter reads back.
+func TestPresignPutAllowsUpload(t *testing.T) {
+	store, fake := newTestStore(t)
+	signed, err := store.PresignPut(context.Background(), testKey, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("PresignPut: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodPut, signed, strings.NewReader("via-presign"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("PUT presigned URL: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("PUT presigned URL status = %d", response.StatusCode)
+	}
+	if body, ok := fake.get(testKey); !ok || string(body) != "via-presign" {
+		t.Fatalf("the presigned upload stored %q", body)
+	}
+}
+
+// TestPresignRejectsUnboundedExpiry proves a presigned URL can never be
+// permanent or negative.
+func TestPresignRejectsUnboundedExpiry(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, expiry := range []time.Duration{0, -time.Second, MaxPresignExpiry + time.Second} {
+		if _, err := store.PresignGet(ctx, testKey, expiry); err == nil {
+			t.Errorf("PresignGet(%s): expected an error", expiry)
+		}
+		if _, err := store.PresignPut(ctx, testKey, expiry); err == nil {
+			t.Errorf("PresignPut(%s): expected an error", expiry)
+		}
+	}
+	if _, err := store.PresignGet(ctx, testKey, MaxPresignExpiry); err != nil {
+		t.Fatalf("PresignGet(MaxPresignExpiry): %v", err)
+	}
+}
+
+// TestKeyValidation proves an unusable key is rejected before any request.
+func TestKeyValidation(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	for name, key := range map[string]string{
+		"blank":        "   ",
+		"absolute":     "/etc/passwd",
+		"too long":     strings.Repeat("k", 1025),
+		"contains NUL": "key\x00name",
+	} {
+		if _, err := store.Upload(ctx, key, strings.NewReader("x")); err == nil {
+			t.Errorf("%s: Upload accepted an invalid key", name)
+		}
+		if err := store.Delete(ctx, key); err == nil {
+			t.Errorf("%s: Delete accepted an invalid key", name)
+		}
+		if _, err := store.Download(ctx, key); err == nil {
+			t.Errorf("%s: Download accepted an invalid key", name)
+		}
+	}
+}
+
+// TestUploadRejectsNilBody proves the streaming upload needs a body.
+func TestUploadRejectsNilBody(t *testing.T) {
+	store, _ := newTestStore(t)
+	if _, err := store.Upload(context.Background(), testKey, nil); err == nil {
+		t.Fatal("expected an error for a nil upload body")
+	}
+}
+
+// countingReader is a non-seekable io.Reader: it implements only Read, so the
+// upload path must stream it rather than demanding a seekable body.
+type countingReader struct {
+	r    io.Reader
+	read int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.read += n
+	return n, err
+}
+
+// TestUploadStreamsNonSeekableBody proves Upload accepts a reader that cannot
+// seek and consumes it exactly once, so a pipe or a network stream uploads
+// without being buffered into memory first.
+func TestUploadStreamsNonSeekableBody(t *testing.T) {
+	store, fake := newTestStoreTLS(t)
+	payload := strings.Repeat("streamed-chunk-", 512)
+	reader := &countingReader{r: strings.NewReader(payload)}
+
+	etag, err := store.Upload(context.Background(), testKey, reader)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if etag == "" {
+		t.Fatal("Upload returned an empty ETag")
+	}
+	if body, ok := fake.get(testKey); !ok || string(body) != payload {
+		t.Fatalf("the server stored %d bytes, want %d", len(body), len(payload))
+	}
+	if reader.read != len(payload) {
+		t.Fatalf("the body was read %d times, want %d", reader.read, len(payload))
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// staticProvider is a Provider backed by fixed settings. It proves the Store can
+// be built from the provider seam that a future DB-backed site-config runtime
+// configuration implements.
+type staticProvider struct {
+	settings config.Storage
+	err      error
+}
+
+func (p staticProvider) ObjectStorageSettings(context.Context) (config.Storage, error) {
+	return p.settings, p.err
+}
+
+// TestNewWithProvider proves the provider seam builds a working Store and that a
+// provider error is returned unchanged.
+func TestNewWithProvider(t *testing.T) {
+	fake := &fakeS3{}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	settings := config.Storage{
+		Endpoint:        server.URL,
+		Region:          "us-east-1",
+		Bucket:          testBucket,
+		AccessKeyID:     "key",
+		SecretAccessKey: "secret",
+		PathStyle:       true,
+		TLS:             boolPtr(false),
+	}
+	store, err := NewWithProvider(context.Background(), staticProvider{settings: settings})
+	if err != nil {
+		t.Fatalf("NewWithProvider: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.Upload(context.Background(), testKey, strings.NewReader("via-provider")); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if body, ok := fake.get(testKey); !ok || string(body) != "via-provider" {
+		t.Fatalf("stored %q", body)
+	}
+
+	sentinel := errors.New("site-config unavailable")
+	if _, err := NewWithProvider(context.Background(), staticProvider{err: sentinel}); !errors.Is(err, sentinel) {
+		t.Fatalf("provider error = %v, want %v", err, sentinel)
+	}
+	if _, err := NewWithProvider(context.Background(), nil); err == nil {
+		t.Fatal("expected an error for a nil provider")
+	}
+}

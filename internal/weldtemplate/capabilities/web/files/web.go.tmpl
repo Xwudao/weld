@@ -1,0 +1,70 @@
+// Package web serves the __name__ frontend: the Vite build output embedded at
+// compile time and delivered over HTTP.
+//
+// The package owns no command and opens no socket. internal/httpserver wires
+// Handler into the application mux, and the "serve" command (owned by the http
+// capability) serves that mux.
+package web
+
+import (
+	"io/fs"
+	"net/http"
+	"strings"
+)
+
+// Handler returns the HTTP handler for the embedded frontend.
+//
+// The handler serves the build output and falls back to index.html so that
+// client-side routes keep working. The /api/ namespace is reserved for the api
+// capability: unknown API paths return 404 instead of the SPA, and only
+// browser navigations (GET/HEAD that accept text/html) fall back, so a fetch to
+// a missing endpoint never receives the HTML shell.
+func Handler() http.Handler {
+	return handler(dist)
+}
+
+func handler(assets fs.FS) http.Handler {
+	files := http.FileServer(http.FS(assets))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isAPIPath(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "" {
+			name = "index.html"
+		}
+		if _, err := fs.Stat(assets, name); err == nil {
+			files.ServeHTTP(w, r)
+			return
+		}
+		if !isBrowserNavigation(r) || !hasIndex(assets) {
+			http.NotFound(w, r)
+			return
+		}
+		clone := r.Clone(r.Context())
+		clone.URL.Path = "/"
+		files.ServeHTTP(w, clone)
+	})
+}
+
+// hasIndex reports whether the SPA shell is present. Without it the fallback
+// must 404 rather than let the file server answer with a directory listing.
+func hasIndex(assets fs.FS) bool {
+	_, err := fs.Stat(assets, "index.html")
+	return err == nil
+}
+
+// isAPIPath reports whether path belongs to the reserved API namespace.
+func isAPIPath(path string) bool {
+	return path == "/api" || strings.HasPrefix(path, "/api/")
+}
+
+// isBrowserNavigation reports whether r is a top-level browser request that
+// should receive the SPA shell for an unknown path.
+func isBrowserNavigation(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}

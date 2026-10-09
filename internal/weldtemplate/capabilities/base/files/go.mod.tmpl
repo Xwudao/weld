@@ -1,0 +1,19 @@
+module __module__
+
+// weld:goversion:begin
+// The Go directive is the project's toolchain floor. A capability that needs a
+// newer minimum replaces this region rather than editing outside it.
+go 1.23
+// weld:goversion:end
+// weld:deps:begin
+// The command tree is Cobra, so a capability contributes a command without the
+// base scaffold hand-rolling a dispatcher. pflag and mousetrap are Cobra's own
+// direct requirements, pinned here so the base project builds offline; a later
+// `weld add` appends its capability's requirements below.
+require github.com/spf13/cobra v1.9.1
+
+require (
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/spf13/pflag v1.0.6 // indirect
+)
+// weld:deps:end

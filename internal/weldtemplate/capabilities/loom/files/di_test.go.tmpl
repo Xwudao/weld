@@ -1,0 +1,486 @@
+package di
+
+import (
+	"context"
+	"io/fs"
+{{- if .Caps.Has "http"}}
+	"bytes"
+{{- if .Caps.Has "api"}}
+	"encoding/json"
+{{- end}}
+	"io"
+	"log/slog"
+	"net"
+	nethttp "net/http"
+	"net/http/httptest"
+	"strings"
+	"time"
+{{- end}}
+	"testing"
+
+{{- if .Caps.Has "http"}}
+	"github.com/Xwudao/loom"
+{{- end}}
+{{- if .Caps.Has "api"}}
+	"__module__/internal/api"
+{{- end}}
+	"__module__/internal/config"
+{{- if .Caps.Has "http"}}
+	"__module__/internal/logging"
+{{- end}}
+{{- range .Modules}}
+	"__module__/internal/modules/{{.Name}}"
+{{- end}}
+)
+
+// The tests here exercise the composed graph without PostgreSQL: the pool is
+// only parsed (never connected) and only when a consumer asks for it, the API
+// service is served in memory, and the lifecycle's bind, serve-failure and
+// graceful-stop behavior is checked on loopback sockets.
+
+// fakeLoader builds a config.Loader over in-memory files and environment, so
+// configuration tests never touch the filesystem or the process environment.
+func fakeLoader(files, env map[string]string) *config.Loader {
+	readFile := func(name string) ([]byte, error) {
+		content, ok := files[name]
+		if !ok {
+			return nil, fs.ErrNotExist
+		}
+		return []byte(content), nil
+	}
+	lookupEnv := func(key string) (string, bool) {
+		value, ok := env[key]
+		return value, ok
+	}
+	return config.NewLoader(readFile, lookupEnv)
+}
+
+// baseLoader is a loader that satisfies NewConfig for the installed
+// capabilities: an empty file and no environment, so the built-in defaults
+// apply. Installing db does not change what NewConfig requires.
+func baseLoader() *config.Loader {
+	return fakeLoader(map[string]string{config.DefaultPath: ""}, nil)
+}
+
+func TestNewConfigDefaultsToLoopbackPort(t *testing.T) {
+	cfg, err := NewConfig(context.Background(), baseLoader())
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
+	if cfg.HTTP.Addr != ":8080" {
+		t.Fatalf("HTTP.Addr = %q, want :8080", cfg.HTTP.Addr)
+	}
+}
+{{- if .Caps.Has "db"}}
+
+// TestNewConfigReadsDatabaseFromFile proves the database settings, including the
+// password, come from the file when the environment does not override them.
+func TestNewConfigReadsDatabaseFromFile(t *testing.T) {
+	loader := fakeLoader(map[string]string{
+		config.DefaultPath: "database:\n  host: db.example\n  port: 6543\n  user: app\n  password: file-secret\n  name: appdb\n",
+	}, nil)
+	cfg, err := NewConfig(context.Background(), loader)
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
+	if cfg.Database.Host != "db.example" || cfg.Database.Port != 6543 {
+		t.Fatalf("database = %+v", cfg.Database)
+	}
+	if cfg.Database.Password.Value() != "file-secret" {
+		t.Fatal("the file password was not loaded")
+	}
+}
+
+// TestNewConfigEnvironmentOverridesFile proves the environment outranks the file
+// for the database settings too.
+func TestNewConfigEnvironmentOverridesFile(t *testing.T) {
+	loader := fakeLoader(
+		map[string]string{config.DefaultPath: "database:\n  host: file-host\n  port: 5432\n  user: file-user\n  name: filedb\n"},
+		map[string]string{config.EnvDBHost: "env-host", config.EnvDBUser: "env-user", config.EnvDBName: "envdb"},
+	)
+	cfg, err := NewConfig(context.Background(), loader)
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
+	if cfg.Database.Host != "env-host" || cfg.Database.User != "env-user" || cfg.Database.Name != "envdb" {
+		t.Fatalf("database = %+v, want the environment values", cfg.Database)
+	}
+}
+
+// TestNewConfigNeedsNoDatabase proves installing db does not require a database
+// credential to load configuration: NewPool validates the database section, not
+// the graph root, so an unrelated command starts with no settings.
+func TestNewConfigNeedsNoDatabase(t *testing.T) {
+	cfg, err := NewConfig(context.Background(), fakeLoader(map[string]string{config.DefaultPath: ""}, nil))
+	if err != nil {
+		t.Fatalf("NewConfig without database settings: %v", err)
+	}
+	if cfg.HTTP.Addr != config.DefaultHTTPAddr {
+		t.Fatalf("HTTP.Addr = %q, want %q", cfg.HTTP.Addr, config.DefaultHTTPAddr)
+	}
+}
+
+// TestNewPoolRequiresDatabaseCredentials proves the credential check guards the
+// pool, the one constructor that needs a database: constructing it without a
+// database setting fails loudly rather than inventing a dsn.
+func TestNewPoolRequiresDatabaseCredentials(t *testing.T) {
+	pool, cleanup, err := NewPool(context.Background(), &config.Config{})
+	if err == nil {
+		t.Fatal("expected an error when the database has no credentials")
+	}
+	if pool != nil || cleanup != nil {
+		t.Fatal("NewPool returned a pool or cleanup alongside an error")
+	}
+}
+
+// TestNewPoolParsesWithoutConnecting proves the graph builds the pool without a
+// running database (pgxpool parses the dsn lazily) and returns a cleanup that
+// closes it exactly once.
+func TestNewPoolParsesWithoutConnecting(t *testing.T) {
+	cfg := &config.Config{Database: config.Database{
+		Host: "localhost", Port: 5432, User: "app", Password: "pw", Name: "{{.Name}}",
+	}}
+	pool, cleanup, err := NewPool(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	if pool == nil {
+		t.Fatal("NewPool returned a nil pool")
+	}
+	if cleanup == nil {
+		t.Fatal("NewPool returned no cleanup")
+	}
+	if err := cleanup(context.Background()); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	// The lifecycle calls a cleanup once, and it must stay safe if called again.
+	if err := cleanup(context.Background()); err != nil {
+		t.Fatalf("second cleanup: %v", err)
+	}
+}
+{{- end}}
+{{- if .Caps.Has "http"}}
+
+// TestWithAddrOverridesConfig proves the command-line flag outranks the file.
+func TestWithAddrOverridesConfig(t *testing.T) {
+	loader := fakeLoader(map[string]string{config.DefaultPath: "http:\n  addr: \":9999\"\n"}, nil)
+	cfg, err := NewConfig(WithAddr(context.Background(), "127.0.0.1:0"), loader)
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
+	if cfg.HTTP.Addr != "127.0.0.1:0" {
+		t.Fatalf("HTTP.Addr = %q, want 127.0.0.1:0", cfg.HTTP.Addr)
+	}
+}
+
+func TestNewConfigRejectsBlankAddr(t *testing.T) {
+	if _, err := NewConfig(WithAddr(context.Background(), "  "), baseLoader()); err == nil {
+		t.Fatal("expected an error for a blank listen address")
+	}
+}
+
+{{if .Modules}}
+// The fakes below implement each installed module's Service interface without
+// calling its NewService constructor, so a user who changes that constructor's
+// signature (for example to consume data.Repository after `weld add db`) does
+// not break this regenerated test. The HTTP graph binds the real NewService, so
+// production wiring still follows the user's edit.
+{{- range .Modules}}
+
+// {{.Name}}FakeService implements {{.Name}}.Service.
+type {{.Name}}FakeService struct{}
+
+func ({{.Name}}FakeService) Greet(_ context.Context, req {{.Name}}.Request) ({{.Name}}.Response, error) {
+	return {{.Name}}.Response{Module: "{{.Name}}", Message: "Hello, " + strings.TrimSpace(req.Name) + "!"}, nil
+}
+{{- end}}
+{{end}}
+
+// newServerForTest builds a server against the installed graph providers,
+// injecting a logger so the bind/serve lifecycle is exercised without
+// PostgreSQL and without a global logger.{{if .Caps.Has "api"}}
+// The API service is built through api.NewService rather than the graph's
+// NewAPIService provider, so a user who edits that provider (for example to
+// consume data.Repository) does not break this regenerated test.{{end}}{{if .Modules}}
+// Each module is served through a fake built here, not its NewService, for the
+// same reason.{{end}}
+func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
+	t.Helper()
+	server, err := NewServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger{{if .Caps.Has "api"}}, api.NewService(){{end}}{{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return server
+}
+
+// discardLogger is the injected logger for lifecycle tests that do not assert
+// on output.
+func discardLogger() *slog.Logger {
+	return logging.New(io.Discard, logging.TextFormat, nil)
+}
+
+// TestComposedServerAppliesMiddleware proves the Loom graph serves the project
+// middleware chain: the graph wraps its mux with httpserver.Chain, so even a
+// not-found response carries a request id. It needs no socket.
+func TestComposedServerAppliesMiddleware(t *testing.T) {
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
+	recorder := httptest.NewRecorder()
+	server.HTTP.Handler.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/does-not-exist", nil))
+	if recorder.Header().Get("X-Request-Id") == "" {
+		t.Fatal("the Loom composition did not apply the middleware chain")
+	}
+}
+
+// TestServerBindFailureFailsStart proves a port already in use fails Start
+// instead of being swallowed by a background goroutine.
+func TestServerBindFailureFailsStart(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer occupied.Close()
+
+	lifecycle := loom.NewLifecycle()
+	newServerForTest(t, lifecycle, occupied.Addr().String(), discardLogger())
+	if err := lifecycle.Start(context.Background()); err == nil {
+		t.Fatal("Start succeeded on an occupied port")
+	}
+}
+
+// TestServerReportsRuntimeFailure proves a serve failure reaches the command
+// instead of leaving it waiting forever.
+func TestServerReportsRuntimeFailure(t *testing.T) {
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
+	ctx := context.Background()
+	if err := lifecycle.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = lifecycle.Stop(ctx) }()
+
+	// Closing the bound listener directly is not a graceful shutdown, so Serve
+	// returns an error rather than net/http.ErrServerClosed.
+	if err := server.listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	select {
+	case err := <-server.Fail():
+		if err == nil {
+			t.Fatal("expected a serve error, got nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the serve failure")
+	}
+}
+
+// TestServerStopsGracefully proves a normal stop ends the serving goroutine
+// without reporting a failure.
+func TestServerStopsGracefully(t *testing.T) {
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
+	ctx := context.Background()
+	if err := lifecycle.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := lifecycle.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case err := <-server.Fail():
+		if err != nil {
+			t.Fatalf("serve ended with %v, want nil after graceful shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the server to stop")
+	}
+}
+
+// TestServerLogsLifecycle proves the server logs through the injected logger:
+// a buffer as the sink records the startup and shutdown transitions, and no
+// global logger is involved.
+func TestServerLogsLifecycle(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, logging.TextFormat, nil)
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", logger)
+	ctx := context.Background()
+	if err := lifecycle.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := lifecycle.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-server.Fail():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the server to stop")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "listening") {
+		t.Fatalf("startup was not logged through the injected logger:\n%s", out)
+	}
+	if !strings.Contains(out, "shutting down") {
+		t.Fatalf("shutdown was not logged through the injected logger:\n%s", out)
+	}
+{{- if .Caps.Has "api"}}
+	if !strings.Contains(out, "in-memory") {
+		t.Fatalf("the in-memory demo was not logged through the injected logger:\n%s", out)
+	}
+{{- end}}
+}
+
+{{- if .Caps.Has "api"}}
+func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
+	mux := newMux(api.NewService(){{range .Modules}}, {{.Name}}.NewService(){{end}})
+	body := `{"name":"widget","quantity":2,"status":"active"}`
+	request := httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != nethttp.StatusCreated {
+		t.Fatalf("POST /api/items = %d: %s", recorder.Code, recorder.Body)
+	}
+	var created api.ItemResponse
+	if err := json.Unmarshal(envelopeData(t, recorder.Body.Bytes()), &created); err != nil {
+		t.Fatalf("decode response data: %v", err)
+	}
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/items/"+created.ID, nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET /api/items/%s = %d", created.ID, recorder.Code)
+	}
+}
+
+// envelopeData returns the data member of a {code,msg,data} response body, so a
+// test can decode the payload the shared httpx envelope wraps.
+func envelopeData(t *testing.T, raw []byte) json.RawMessage {
+	t.Helper()
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	return envelope.Data
+}
+
+// TestComposedServerServesInMemoryAPI proves serving needs no database: the
+// lifecycle binds a real loopback socket, a POST persists into the in-memory
+// service and a GET reads it back. The address is ephemeral (:0), so the test
+// never depends on a fixed port.
+func TestComposedServerServesInMemoryAPI(t *testing.T) {
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
+	ctx := context.Background()
+	if err := lifecycle.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = lifecycle.Stop(ctx) }()
+
+	base := "http://" + server.listener.Addr().String()
+	created := postJSON(t, base+"/api/items", `{"name":"widget","quantity":2,"status":"active"}`)
+	var item api.ItemResponse
+	if err := json.Unmarshal(envelopeData(t, created), &item); err != nil {
+		t.Fatalf("decode create response data: %v", err)
+	}
+	if item.ID == "" || item.Name != "widget" {
+		t.Fatalf("created = %+v", item)
+	}
+	got := getJSON(t, base+"/api/items/"+item.ID)
+	if !strings.Contains(string(got), item.ID) {
+		t.Fatalf("GET did not return the created item: %s", got)
+	}
+}
+
+func postJSON(t *testing.T, url, body string) []byte {
+	t.Helper()
+	resp, err := nethttp.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read POST %s: %v", url, err)
+	}
+	if resp.StatusCode != nethttp.StatusCreated {
+		t.Fatalf("POST %s = %d: %s", url, resp.StatusCode, raw)
+	}
+	return raw
+}
+
+func getJSON(t *testing.T, url string) []byte {
+	t.Helper()
+	resp, err := nethttp.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read GET %s: %v", url, err)
+	}
+	if resp.StatusCode != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d: %s", url, resp.StatusCode, raw)
+	}
+	return raw
+}
+{{- end}}
+
+{{- if .Modules}}
+// TestComposedMuxServesModulesWithoutSocket proves the graph registers every
+// installed business module on the composed mux, with no socket and no database.
+func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
+	mux := newMux({{if .Caps.Has "api"}}api.NewService(),{{end}}{{range .Modules}}{{.Name}}FakeService{},{{end}})
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, {{(index .Modules 0).Name}}.RoutePrefix, nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d: %s", {{(index .Modules 0).Name}}.RoutePrefix, recorder.Code, recorder.Body)
+	}
+}
+{{- end}}
+
+{{if .Caps.Has "cron"}}
+// TestSchedulerStartsAfterTheServerAndStopsFirst proves the graph wiring: the
+// server binds its socket before the scheduler starts, and the scheduler stops
+// before the server shuts down. Both transitions are read from the injected
+// logger, so the ordering is the real hook order rather than an assumption.
+func TestSchedulerStartsAfterTheServerAndStopsFirst(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, logging.TextFormat, nil)
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", logger)
+	cfg := &config.Config{
+		HTTP: config.HTTP{Addr: "127.0.0.1:0"},
+		Cron: config.Cron{Timezone: "UTC"},
+	}
+	if _, err := NewScheduler(lifecycle, cfg, logger, server); err != nil {
+		t.Fatalf("NewScheduler: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := lifecycle.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := lifecycle.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	out := buf.String()
+	listen := strings.Index(out, "listening")
+	started := strings.Index(out, "cron scheduler started")
+	stopped := strings.Index(out, "cron scheduler stopped")
+	shutting := strings.Index(out, "shutting down")
+	if listen < 0 || started < 0 || stopped < 0 || shutting < 0 {
+		t.Fatalf("the lifecycle was not logged through the injected logger:\n%s", out)
+	}
+	if listen > started {
+		t.Fatalf("the scheduler started before the server bound its socket:\n%s", out)
+	}
+	if stopped > shutting {
+		t.Fatalf("the scheduler did not stop before the server shut down:\n%s", out)
+	}
+}
+{{- end}}
+{{- end}}

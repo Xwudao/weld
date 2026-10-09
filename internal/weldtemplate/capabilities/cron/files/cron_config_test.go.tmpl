@@ -1,0 +1,87 @@
+package config
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestCronTimezoneDefaultsToUTC proves a project that installs cron but sets no
+// timezone gets UTC, both as the stored value and as the resolved location.
+func TestCronTimezoneDefaultsToUTC(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cron.Timezone != DefaultCronTimezone {
+		t.Fatalf("Cron.Timezone = %q, want %q", cfg.Cron.Timezone, DefaultCronTimezone)
+	}
+	location, err := cfg.Cron.Location()
+	if err != nil {
+		t.Fatalf("Location: %v", err)
+	}
+	if location != time.UTC {
+		t.Fatalf("Location() = %v, want UTC", location)
+	}
+	if err := cfg.ValidateCron(); err != nil {
+		t.Fatalf("ValidateCron: %v", err)
+	}
+}
+
+// TestCronEnvironmentOverridesFile pins the file < environment precedence for the
+// cron timezone.
+func TestCronEnvironmentOverridesFile(t *testing.T) {
+	cfg, err := fakeLoader(
+		map[string]string{DefaultPath: "cron:\n  timezone: UTC\n"},
+		map[string]string{EnvCronTimezone: "UTC"},
+	).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cron.Timezone != "UTC" {
+		t.Fatalf("Cron.Timezone = %q, want UTC", cfg.Cron.Timezone)
+	}
+}
+
+// TestCronRejectsUnknownTimezone proves an unknown zone fails loudly instead of
+// silently falling back to local time.
+func TestCronRejectsUnknownTimezone(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: "cron:\n  timezone: Not/AZone\n"}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Cron.Location(); err == nil {
+		t.Fatal("Location accepted an unknown timezone")
+	}
+	if err := cfg.ValidateCron(); err == nil {
+		t.Fatal("ValidateCron accepted an unknown timezone")
+	}
+}
+
+// TestCronBlankEnvironmentIsAnError proves an explicitly set but blank
+// CRON_TIMEZONE is an error rather than a silent fallback to the default.
+func TestCronBlankEnvironmentIsAnError(t *testing.T) {
+	_, err := fakeLoader(map[string]string{DefaultPath: ""}, map[string]string{EnvCronTimezone: "   "}).Load("")
+	if err == nil {
+		t.Fatal("expected an error for a blank CRON_TIMEZONE")
+	}
+	if !strings.Contains(err.Error(), EnvCronTimezone) {
+		t.Fatalf("the error does not name the variable: %v", err)
+	}
+}
+
+// TestCronNamedTimezone proves an IANA zone is resolved when the host has
+// zoneinfo for it.
+func TestCronNamedTimezone(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: "cron:\n  timezone: America/New_York\n"}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	location, err := cfg.Cron.Location()
+	if err != nil {
+		t.Skipf("host has no zoneinfo for a named zone: %v", err)
+	}
+	if location.String() != "America/New_York" {
+		t.Fatalf("Location() = %v, want America/New_York", location)
+	}
+}
