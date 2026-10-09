@@ -210,7 +210,7 @@ func TestAddModuleFilesSurviveLaterAdd(t *testing.T) {
 		t.Fatalf("a later add rewrote the user's module file:\n%s", got)
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{`widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`, "web.Handler()"} {
+	for _, want := range []string{`widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`, "web.Handler(httpserver.APIPrefix)"} {
 		if !strings.Contains(di, want) {
 			t.Errorf("the regenerated graph lost %q after a later add:\n%s", want, di)
 		}

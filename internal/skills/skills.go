@@ -401,7 +401,7 @@ func writeEditing(b *strings.Builder, set map[string]bool) {
 	}
 	var seams []string
 	if set["http"] {
-		seams = append(seams, "`internal/httpserver/middleware.go`")
+		seams = append(seams, "`internal/httpserver/middleware.go`", "`internal/httpserver/policy.go`")
 	}
 	if set["api"] && set["loom"] {
 		seams = append(seams, "`internal/di/api_provider.go`")

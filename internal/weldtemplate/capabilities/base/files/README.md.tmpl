@@ -57,7 +57,8 @@ redis` installs a lazy client but never imports it into the application. When
 you need either, wire it in yourself through a stable file (the `api`, `db`,
 `redis` and `loom` READMEs name them), not through the regenerated Loom graph.
 
-The frontend reserves `/api/` for the API capability: unknown API paths return a
+The frontend reserves the API mount prefix (`httpserver.APIPrefix`, `/api` by
+default) for the API and the business modules: unknown paths under it return a
 not-found rather than the HTML shell. The base project does not install or
 require any capability.
 

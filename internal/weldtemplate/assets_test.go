@@ -109,8 +109,8 @@ func TestCapabilitiesAreWellFormed(t *testing.T) {
 
 // TestWebCapabilityRequiresHTTP guards web's single-mode contract: it needs
 // http, ships the frontend handler but no serve or route payload (the Loom
-// server graph composes web.Handler()), and patches only the Makefile and
-// git-ignore regions.
+// server graph composes web.Handler(httpserver.APIPrefix)), and patches only the
+// Makefile and git-ignore regions.
 func TestWebCapabilityRequiresHTTP(t *testing.T) {
 	d := readDescriptor(t, "web")
 	if len(d.Requires) != 1 || d.Requires[0] != "http" {
@@ -147,8 +147,8 @@ func TestWebCapabilityRequiresHTTP(t *testing.T) {
 		t.Fatalf("read loom graph: %v", err)
 	}
 	graphText := string(graph)
-	if !strings.Contains(graphText, `{{- if .Caps.Has "web"}}`) || !strings.Contains(graphText, "web.Handler()") {
-		t.Error("the Loom graph does not compose web.Handler() under a web guard")
+	if !strings.Contains(graphText, `{{- if .Caps.Has "web"}}`) || !strings.Contains(graphText, "web.Handler(httpserver.APIPrefix)") {
+		t.Error("the Loom graph does not compose web.Handler(httpserver.APIPrefix) under a web guard")
 	}
 }
 
@@ -2046,6 +2046,15 @@ func TestNoOpenAPIPayloadsRemain(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("walk modules: %v", err)
+	}
+	if err := fs.WalkDir(FS(), "commands", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		check(p, d)
+		return nil
+	}); err != nil {
+		t.Fatalf("walk commands: %v", err)
 	}
 	if walkErr != nil {
 		t.Fatal(walkErr)

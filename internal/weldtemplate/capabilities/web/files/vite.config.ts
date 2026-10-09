@@ -11,7 +11,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // /api is reserved for the api capability (weld add api).
+      // Proxies the API mount in development; it mirrors httpserver.APIPrefix
+      // (the built app is served by the Go server, so this only affects `vite dev`).
       '/api': 'http://localhost:8080',
     },
   },

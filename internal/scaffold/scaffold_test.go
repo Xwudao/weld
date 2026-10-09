@@ -240,7 +240,7 @@ func TestAddWebInstallsHTTPDependency(t *testing.T) {
 		t.Error("the web capability wrote the retired non-Loom route seam")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	if !strings.Contains(di, "web.Handler()") {
+	if !strings.Contains(di, "web.Handler(httpserver.APIPrefix)") {
 		t.Errorf("the Loom server graph does not mount the SPA:\n%s", di)
 	}
 
@@ -725,7 +725,7 @@ func TestAddAPIAndWebInEitherOrder(t *testing.T) {
 
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
 			for _, want := range []string{
-				"web.Handler()",
+				"web.Handler(httpserver.APIPrefix)",
 				"api.Register(base.Group(httpserver.APIPrefix), service)",
 			} {
 				if !strings.Contains(di, want) {

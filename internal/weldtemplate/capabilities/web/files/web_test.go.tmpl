@@ -15,8 +15,12 @@ func testAssets() fstest.MapFS {
 	}
 }
 
+// testAPIPrefix is the reserved prefix the tests exercise; it mirrors the
+// generated httpserver.APIPrefix default.
+const testAPIPrefix = "/api"
+
 func TestHandlerServesEmbeddedFiles(t *testing.T) {
-	h := handler(testAssets())
+	h := handler(testAssets(), testAPIPrefix)
 	recorder := httptest.NewRecorder()
 	h.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/a.js", nil))
 	if recorder.Code != http.StatusOK {
@@ -28,7 +32,7 @@ func TestHandlerServesEmbeddedFiles(t *testing.T) {
 }
 
 func TestHandlerFallsBackToIndexForBrowserNavigation(t *testing.T) {
-	h := handler(testAssets())
+	h := handler(testAssets(), testAPIPrefix)
 	request := httptest.NewRequest(http.MethodGet, "/some/client/route", nil)
 	request.Header.Set("Accept", "text/html,application/xhtml+xml")
 	recorder := httptest.NewRecorder()
@@ -42,7 +46,7 @@ func TestHandlerFallsBackToIndexForBrowserNavigation(t *testing.T) {
 }
 
 func TestHandlerDoesNotFallBackForAPIPaths(t *testing.T) {
-	h := handler(testAssets())
+	h := handler(testAssets(), testAPIPrefix)
 	request := httptest.NewRequest(http.MethodGet, "/api/missing", nil)
 	request.Header.Set("Accept", "text/html")
 	recorder := httptest.NewRecorder()
@@ -55,8 +59,21 @@ func TestHandlerDoesNotFallBackForAPIPaths(t *testing.T) {
 	}
 }
 
+// TestHandlerReservesTheConfiguredPrefix proves the reservation follows a
+// versioned or relocated API mount instead of hard-coding /api.
+func TestHandlerReservesTheConfiguredPrefix(t *testing.T) {
+	h := handler(testAssets(), "/api/v2")
+	request := httptest.NewRequest(http.MethodGet, "/api/v2/missing", nil)
+	request.Header.Set("Accept", "text/html")
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for the configured prefix", recorder.Code)
+	}
+}
+
 func TestHandlerDoesNotFallBackForNonBrowserRequests(t *testing.T) {
-	h := handler(testAssets())
+	h := handler(testAssets(), testAPIPrefix)
 	recorder := httptest.NewRecorder()
 	h.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/missing.json", nil))
 	if recorder.Code != http.StatusNotFound {
@@ -65,7 +82,7 @@ func TestHandlerDoesNotFallBackForNonBrowserRequests(t *testing.T) {
 }
 
 func TestHandlerDoesNotFallBackWithoutIndex(t *testing.T) {
-	h := handler(fstest.MapFS{"assets/a.js": {Data: []byte("x")}})
+	h := handler(fstest.MapFS{"assets/a.js": {Data: []byte("x")}}, testAPIPrefix)
 	request := httptest.NewRequest(http.MethodGet, "/some/client/route", nil)
 	request.Header.Set("Accept", "text/html")
 	recorder := httptest.NewRecorder()

@@ -320,7 +320,7 @@ func newMux({{range .Modules}}
 ) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 {{- if .Caps.Has "web"}}
-	mux.Handle("/", web.Handler())
+	mux.Handle("/", web.Handler(httpserver.APIPrefix))
 {{- end}}
 {{- if .Modules}}
 	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard())
@@ -339,7 +339,7 @@ func newMux({{range .Modules}}
 func newMuxWithAPI(service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 {{- if .Caps.Has "web"}}
-	mux.Handle("/", web.Handler())
+	mux.Handle("/", web.Handler(httpserver.APIPrefix))
 {{- end}}
 	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard())
 	api.Register(base.Group(httpserver.APIPrefix), service)
