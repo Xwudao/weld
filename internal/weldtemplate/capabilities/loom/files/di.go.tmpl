@@ -71,9 +71,7 @@ import (
 	"__module__/internal/cron"
 {{- end}}
 	"__module__/internal/httpserver"
-{{- if or (.Caps.Has "api") .Modules}}
 	"__module__/internal/httpx"
-{{- end}}
 {{- range .Modules}}
 	"__module__/internal/modules/{{.Name}}"
 {{- end}}
@@ -273,6 +271,13 @@ var appGraph = loom.Graph[*App](
 	// them.
 	loom.Provide(NewScheduler),
 {{- end}}
+	// The administrator guard is a provider, not a direct call: the graph mounts
+	// every module behind the one policy it defines here, and because the guard is
+	// injected it can take the dependencies a real check needs. It is defined in
+	// internal/httpserver/policy.go, the stable project file; give it a
+	// dependency there (for example the pool after `weld add db`) and Loom follows
+	// the signature without editing this regenerated graph.
+	loom.Provide(httpserver.AdminGuard),
 {{- if .Caps.Has "api"}}
 	loom.Provide(NewServerWithAPI),
 {{- else}}
@@ -313,9 +318,12 @@ func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service ap
 // the dependency graph is the single source of composition. Each module's mount
 // prefix comes from httpserver.ModulePrefix, so changing the version (or giving
 // one module its own URL space) is an edit in the stable project file rather than
-// an edit to this regenerated graph. The administrator policy is defined once
-// here, so every module's administrator routes share one guard.
-func newMux({{range .Modules}}
+// an edit to this regenerated graph. The administrator policy is resolved once
+// here with the guard the graph injects (httpserver.AdminGuard, a provider in the
+// stable policy file), so every module's administrator routes share one guard
+// and that guard can take the dependencies it needs.
+func newMux(
+	adminGuard httpx.Middleware,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
@@ -323,7 +331,7 @@ func newMux({{range .Modules}}
 	mux.Handle("/", web.Handler(httpserver.APIPrefix))
 {{- end}}
 {{- if .Modules}}
-	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard())
+	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, adminGuard)
 {{- range .Modules}}
 	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
 {{- end}}
@@ -335,13 +343,13 @@ func newMux({{range .Modules}}
 // newMuxWithAPI composes the API and module routes. The API-specific wrapper
 // keeps newMux's module-only test seam source-compatible when api is added.
 // The API and the modules share one policy-aware base, mounted at
-// httpserver.APIPrefix.
-func newMuxWithAPI(service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
+// httpserver.APIPrefix, and one injected administrator guard.
+func newMuxWithAPI(adminGuard httpx.Middleware, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 {{- if .Caps.Has "web"}}
 	mux.Handle("/", web.Handler(httpserver.APIPrefix))
 {{- end}}
-	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard())
+	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, adminGuard)
 	api.Register(base.Group(httpserver.APIPrefix), service)
 {{- range .Modules}}
 	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
@@ -391,10 +399,11 @@ func (s *Server) Stop() error {
 func NewServer(
 	lc *loom.Lifecycle,
 	cfg *config.Config,
-	logger *slog.Logger,{{range .Modules}}
+	logger *slog.Logger,
+	adminGuard httpx.Middleware,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
-	return newServer(lc, cfg, logger, newMux({{range .Modules}}
+	return newServer(lc, cfg, logger, newMux(adminGuard,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	))
 }
@@ -407,10 +416,11 @@ func NewServerWithAPI(
 	lc *loom.Lifecycle,
 	cfg *config.Config,
 	logger *slog.Logger,
+	adminGuard httpx.Middleware,
 	service api.Service,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
-	return newServer(lc, cfg, logger, newMuxWithAPI(service,{{range .Modules}}
+	return newServer(lc, cfg, logger, newMuxWithAPI(adminGuard, service,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	))
 }

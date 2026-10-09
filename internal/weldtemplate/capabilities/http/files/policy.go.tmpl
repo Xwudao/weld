@@ -41,25 +41,22 @@ func ModulePrefix(name string) string {
 // every module shares one guard.
 const PolicyAdmin = "admin"
 
-// AdminGuard is the project's placeholder administrator policy.
+// AdminGuard is the project's administrator policy: the guard the generated
+// server graph registers for every module route marked httpx.Policy("admin").
 //
-// A policy name is resolved at startup into the middleware registered for it, so
-// this function is where the real check belongs. It is an ordinary net/http
-// middleware: it runs before the handler and before the request body is bound,
-// and it may do anything a request needs — read a header, verify a JWT or a
-// session, or look a role up in the database. It rejects by writing httpx.Error
-// and returning, and it passes by calling next.ServeHTTP, optionally carrying
-// the caller's identity on the request context for the handler to read.
+// The graph declares this function as a Loom provider and injects its result, so
+// the guard can take the dependencies a real check needs: add a parameter (for
+// example the pool after `weld add db`) and Loom constructs it, with no edit to
+// the regenerated graph. It is an ordinary net/http middleware: it runs before
+// the handler and before the request body is bound, and it may read a header,
+// verify a JWT or a session, or look a role up in the database. It rejects by
+// writing httpx.Error and returning, and it passes by calling next.ServeHTTP,
+// optionally carrying the caller's identity on the request context for a handler
+// to read. Return an (httpx.Middleware, error) pair to fail startup when its own
+// configuration is unusable.
 //
-// The graph constructs the guard, so it can close over an injected dependency.
-// After `weld add db`, for example, wire it in internal/di/di.go as
-//
-//	WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard(repository))
-//
-// and have the guard call the repository to load the caller's role before it
-// decides. Change this signature freely; only this file and the WithPolicy call
-// site move together. A name the graph never defines panics at startup, so a
-// route can never serve unguarded because of a typo.
+// A policy name the graph never defines panics at startup, so a route can never
+// serve unguarded because of a typo.
 //
 // The body below is a placeholder that accepts any non-empty bearer token, so a
 // generated project compiles and its tests exercise the rejection path. It does

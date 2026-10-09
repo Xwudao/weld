@@ -1,6 +1,6 @@
 {
   "name": "http",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "kind": "add",
   "summary": "HTTP server lifecycle, the shared JSON/middleware toolkit, a composable handler builder and one serve command.",
   "requires": ["loom"],

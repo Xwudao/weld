@@ -290,8 +290,13 @@ func TestAPICapabilityRequiresHTTP(t *testing.T) {
 		!strings.Contains(string(graph), "api.Register(base.Group(httpserver.APIPrefix), service)") {
 		t.Error("the Loom graph does not call api.Register under an api guard")
 	}
-	if !strings.Contains(string(graph), "httpserver.PolicyAdmin, httpserver.AdminGuard()") {
+	if !strings.Contains(string(graph), "httpserver.PolicyAdmin, adminGuard") {
 		t.Error("the Loom graph does not define the administrator policy once")
+	}
+	// The guard is a provider, so it can take injected dependencies: the graph
+	// declares it rather than calling it inline, and passes it to the mux.
+	if !strings.Contains(string(graph), "loom.Provide(httpserver.AdminGuard)") {
+		t.Error("the Loom graph does not provide the administrator guard")
 	}
 	if strings.Contains(string(graph), "OpenAPI") {
 		t.Error("the Loom graph still references OpenAPI")
