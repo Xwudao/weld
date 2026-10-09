@@ -30,7 +30,21 @@ type Manifest struct {
 	CreatedWith     string          `json:"createdWith"`
 	Base            CapabilityRef   `json:"base"`
 	Capabilities    []CapabilityRef `json:"capabilities"`
-	Files           []ManagedFile   `json:"files"`
+	// Modules records the business modules installed with `weld add module
+	// <name>`. They are not capabilities: each carries its own name, so the Loom
+	// graph can be re-rendered from the record without a runtime registry. The
+	// field is omitted for projects that have none, so the manifest of a
+	// capabilities-only project is byte-for-byte unchanged.
+	Modules []ModuleRef   `json:"modules,omitempty"`
+	Files   []ManagedFile `json:"files"`
+}
+
+// ModuleRef pins an installed business module to the template version that
+// produced it.
+type ModuleRef struct {
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	AppliedAt string `json:"appliedAt,omitempty"`
 }
 
 // CapabilityRef pins a capability to the version that was applied.
@@ -109,6 +123,34 @@ func (m *Manifest) AddCapability(ref CapabilityRef) {
 		ref.AppliedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	m.Capabilities = append(m.Capabilities, ref)
+}
+
+// HasModule reports whether a business module is recorded.
+func (m *Manifest) HasModule(name string) bool {
+	for _, module := range m.Modules {
+		if module.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ModuleVersion returns the recorded version for a business module.
+func (m *Manifest) ModuleVersion(name string) string {
+	for _, module := range m.Modules {
+		if module.Name == name {
+			return module.Version
+		}
+	}
+	return ""
+}
+
+// AddModule records an applied business module with a timestamp.
+func (m *Manifest) AddModule(ref ModuleRef) {
+	if ref.AppliedAt == "" {
+		ref.AppliedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	m.Modules = append(m.Modules, ref)
 }
 
 // SetFile records or updates a managed file and its content hash.

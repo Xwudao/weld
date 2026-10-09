@@ -137,6 +137,141 @@ func Create(req Request) (*Result, error) {
 	return &Result{Dir: target, Operations: operations, Capability: base}, nil
 }
 
+// planner accumulates one `weld add` plan. It renders capability payloads and,
+// for `weld add module`, module payloads, tracking which paths are already
+// planned so a later payload can patch a file an earlier one produced and no
+// path is written twice.
+type planner struct {
+	req      Request
+	manifest *project.Manifest
+	result   *Result
+	// planned holds the content a file will have once this plan is applied.
+	planned map[string][]byte
+	// index maps a planned path to its operation, so a later payload replacing
+	// the same file updates it in place.
+	index map[string]int
+	// present is the installed capability set guards and the DI graph are
+	// rendered against. It starts from the manifest and grows as dependencies are
+	// planned, so a capability's conditional payload follows the set that will
+	// exist once the plan is applied.
+	present map[string]bool
+}
+
+func newPlanner(req Request, manifest *project.Manifest, result *Result) *planner {
+	return &planner{
+		req:      req,
+		manifest: manifest,
+		result:   result,
+		planned:  map[string][]byte{},
+		index:    map[string]int{},
+		present:  installedSet(manifest),
+	}
+}
+
+// upsert records an operation, replacing an existing operation for the same path.
+func (p *planner) upsert(operation project.Operation) {
+	if i, ok := p.index[operation.Path]; ok {
+		p.result.Operations[i] = operation
+		return
+	}
+	p.index[operation.Path] = len(p.result.Operations)
+	p.result.Operations = append(p.result.Operations, operation)
+}
+
+// planNewFile plans a file that must not already exist. A path planned twice by
+// two payloads, and a path that exists without weld owning it, are both
+// conflicts, so a user file is never overwritten.
+func (p *planner) planNewFile(path, capability string, content []byte) error {
+	if _, exists := p.planned[path]; exists {
+		return &project.ConflictError{Path: path, Reason: "planned by another capability"}
+	}
+	if _, err := os.Stat(filepath.Join(p.req.Dir, path)); err == nil {
+		return &project.ConflictError{Path: path, Reason: "unmanaged file already exists"}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	p.planned[path] = content
+	p.upsert(project.Operation{Path: path, Content: content})
+	p.manifest.SetFile(path, capability, content)
+	return nil
+}
+
+// installCapability plans one capability's files and patches, then records it.
+func (p *planner) installCapability(capability *template.Capability) error {
+	p.present[capability.Name] = true
+	vars := template.Vars{Name: p.manifest.Name, Module: p.manifest.Module, Version: capability.Version}
+	for _, file := range capability.Files {
+		if !entryApplies(p.present, file.When, file.WhenAbsent) {
+			continue
+		}
+		content, err := capability.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		if err := p.planNewFile(file.Path, capability.Name, template.Render(content, vars)); err != nil {
+			return err
+		}
+	}
+	for _, patch := range capability.Patches {
+		if !entryApplies(p.present, patch.When, patch.WhenAbsent) {
+			continue
+		}
+		if err := p.applyPatch(capability, patch, vars); err != nil {
+			return err
+		}
+	}
+	p.manifest.AddCapability(project.CapabilityRef{Name: capability.Name, Version: capability.Version})
+	p.result.Installed = append(p.result.Installed, capability.Name)
+	return nil
+}
+
+// applyPatch inserts one capability's snippet at a marker region, leaving every
+// byte outside it untouched. A restored file is written even when the region
+// already carries this capability's sentinel, because the file was absent, so
+// skipping the write would leave it missing.
+func (p *planner) applyPatch(capability *template.Capability, patch template.Patch, vars template.Vars) error {
+	original, bootstrapped, err := patchTarget(p.req.Dir, patch, p.planned, p.manifest)
+	if err != nil {
+		return err
+	}
+	snippet, err := capability.ReadPatch(patch)
+	if err != nil {
+		return err
+	}
+	rendered := template.Render(snippet, vars)
+	var updated []byte
+	var already bool
+	if patch.Mode == "replace" {
+		updated, err = project.ReplaceMarker(original, patch.Marker, rendered)
+	} else {
+		updated, already, err = project.PatchMarker(original, patch.Marker, capability.Name, rendered)
+	}
+	if err != nil {
+		return &project.ConflictError{Path: patch.Path, Reason: err.Error()}
+	}
+	if already && !bootstrapped {
+		return nil
+	}
+	p.planned[patch.Path] = updated
+	p.upsert(project.Operation{Path: patch.Path, Content: updated, Overwrite: true})
+	p.manifest.SetFile(patch.Path, capability.Name, updated)
+	return nil
+}
+
+// finish renders the dependency graph for the resulting installed set and
+// writes the manifest.
+func (p *planner) finish() error {
+	if err := reconcileDI(p.req, p.manifest, p.present, p.planned, p.upsert, p.result); err != nil {
+		return err
+	}
+	encoded, err := p.manifest.Encode()
+	if err != nil {
+		return err
+	}
+	p.upsert(project.Operation{Path: project.ManifestName, Content: encoded, Overwrite: true})
+	return nil
+}
+
 // Add plans installing an additive capability into an existing project.
 //
 // Missing requirements are resolved and installed first, so `weld add web`
@@ -170,97 +305,15 @@ func Add(req Request, name string) (*Result, error) {
 		}
 	}
 
-	// planned holds the content a file will have once this plan is applied. A
-	// capability patching a file an earlier capability just planned reads it
-	// from here instead of the (not yet written) disk.
-	planned := map[string][]byte{}
-	index := map[string]int{}
-	upsert := func(operation project.Operation) {
-		if i, ok := index[operation.Path]; ok {
-			result.Operations[i] = operation
-			return
-		}
-		index[operation.Path] = len(result.Operations)
-		result.Operations = append(result.Operations, operation)
-	}
-
-	// present is the installed capability set guards and the DI graph are
-	// rendered against. It starts from the manifest and grows as dependencies
-	// are planned, so a capability's conditional payload follows the set that
-	// will exist once the plan is applied.
-	present := installedSet(manifest)
-
+	p := newPlanner(req, manifest, result)
 	for _, capability := range order {
-		present[capability.Name] = true
-		vars := template.Vars{Name: manifest.Name, Module: manifest.Module, Version: capability.Version}
-		for _, file := range capability.Files {
-			if !entryApplies(present, file.When, file.WhenAbsent) {
-				continue
-			}
-			if _, exists := planned[file.Path]; exists {
-				return nil, &project.ConflictError{Path: file.Path, Reason: "planned by another capability"}
-			}
-			if _, err := os.Stat(filepath.Join(req.Dir, file.Path)); err == nil {
-				return nil, &project.ConflictError{Path: file.Path, Reason: "unmanaged file already exists"}
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
-			content, err := capability.ReadFile(file)
-			if err != nil {
-				return nil, err
-			}
-			rendered := template.Render(content, vars)
-			planned[file.Path] = rendered
-			upsert(project.Operation{Path: file.Path, Content: rendered})
-			manifest.SetFile(file.Path, capability.Name, rendered)
+		if err := p.installCapability(capability); err != nil {
+			return nil, err
 		}
-
-		for _, patch := range capability.Patches {
-			if !entryApplies(present, patch.When, patch.WhenAbsent) {
-				continue
-			}
-			original, bootstrapped, err := patchTarget(req.Dir, patch, planned, manifest)
-			if err != nil {
-				return nil, err
-			}
-			snippet, err := capability.ReadPatch(patch)
-			if err != nil {
-				return nil, err
-			}
-			rendered := template.Render(snippet, vars)
-			var updated []byte
-			var already bool
-			if patch.Mode == "replace" {
-				updated, err = project.ReplaceMarker(original, patch.Marker, rendered)
-			} else {
-				updated, already, err = project.PatchMarker(original, patch.Marker, capability.Name, rendered)
-			}
-			if err != nil {
-				return nil, &project.ConflictError{Path: patch.Path, Reason: err.Error()}
-			}
-			// A restored file is written even when the region already carries this
-			// capability's sentinel: the file is absent, so skipping the write here
-			// would leave it missing.
-			if already && !bootstrapped {
-				continue
-			}
-			planned[patch.Path] = updated
-			upsert(project.Operation{Path: patch.Path, Content: updated, Overwrite: true})
-			manifest.SetFile(patch.Path, capability.Name, updated)
-		}
-		manifest.AddCapability(project.CapabilityRef{Name: capability.Name, Version: capability.Version})
-		result.Installed = append(result.Installed, capability.Name)
 	}
-
-	if err := reconcileDI(req, manifest, present, planned, upsert, result); err != nil {
+	if err := p.finish(); err != nil {
 		return nil, err
 	}
-
-	encoded, err := manifest.Encode()
-	if err != nil {
-		return nil, err
-	}
-	upsert(project.Operation{Path: project.ManifestName, Content: encoded, Overwrite: true})
 	return result, nil
 }
 
@@ -403,6 +456,22 @@ func entryApplies(present map[string]bool, when, whenAbsent []string) bool {
 	return true
 }
 
+// diModules turns the manifest's business modules into the graph contribution a
+// capability's DI template renders. Modules are recorded separately from
+// capabilities (they carry their own name), so the graph follows them without a
+// runtime registry, and the order is the install order so a regenerated graph is
+// deterministic.
+func diModules(manifest *project.Manifest) []template.DIModule {
+	if len(manifest.Modules) == 0 {
+		return nil
+	}
+	modules := make([]template.DIModule, 0, len(manifest.Modules))
+	for _, module := range manifest.Modules {
+		modules = append(modules, template.DIModule{Name: module.Name, Title: template.ExportName(module.Name)})
+	}
+	return modules
+}
+
 // reconcileDI renders the dependency graph of every installed capability that
 // declares one, against the installed capability set.
 //
@@ -431,6 +500,7 @@ func reconcileDI(req Request, manifest *project.Manifest, present map[string]boo
 			Module:  manifest.Module,
 			Version: capability.Version,
 			Caps:    template.CapabilitySet(present),
+			Modules: diModules(manifest),
 		}
 		graph, err := capability.RenderDIGraph(vars)
 		if err != nil {

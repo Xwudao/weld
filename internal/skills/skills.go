@@ -214,6 +214,7 @@ func Render(manifest *project.Manifest, catalog Catalog) ([]byte, error) {
 	writeHeader(&b, manifest)
 	writeCapabilities(&b, caps, catalog)
 	writeWiring(&b, set)
+	writeModules(&b, manifest)
 	writeEditing(&b, set)
 	writeFileIndex(&b, manifest)
 	writeRegenerate(&b)
@@ -337,6 +338,26 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 	if wrote {
 		b.WriteString("\n")
 	}
+}
+
+// writeModules describes the business modules installed with `weld add module`.
+// They are intentionally not capabilities: weld writes them once and never
+// regenerates them, so the generated guide must say so rather than imply a later
+// add may rewrite them.
+func writeModules(b *strings.Builder, manifest *project.Manifest) {
+	if len(manifest.Modules) == 0 {
+		return
+	}
+	b.WriteString("## Business modules\n\n")
+	b.WriteString("Added with `weld add module <name>`. Unlike generated capability files,\n")
+	b.WriteString("weld writes them once and never regenerates them, so they are yours to edit;\n")
+	b.WriteString("the default service is an in-memory example, not persistence. Adding another\n")
+	b.WriteString("capability re-renders the Loom graph around them but leaves the module\n")
+	b.WriteString("packages untouched.\n\n")
+	for _, module := range manifest.Modules {
+		fmt.Fprintf(b, "- **%s** v%s — `internal/modules/%s` served under `/api/%s`.\n", module.Name, module.Version, module.Name, module.Name)
+	}
+	b.WriteString("\n")
 }
 
 func writeEditing(b *strings.Builder, set map[string]bool) {

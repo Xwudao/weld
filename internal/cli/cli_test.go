@@ -413,3 +413,71 @@ func TestSkillsRequiresProject(t *testing.T) {
 		t.Fatal("expected skills to fail outside a weld project")
 	}
 }
+
+func TestAddModuleCommand(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err := run(t, "add", "module", "widget", "--dir", dir)
+	if err != nil {
+		t.Fatalf("add module: %v", err)
+	}
+	if !strings.Contains(out, "internal/modules/widget/module.go") {
+		t.Fatalf("add module output = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "modules", "widget", "module.go")); err != nil {
+		t.Fatalf("add module did not write the module: %v", err)
+	}
+	// The module needs http, which the same command installs without being asked.
+	if _, err := os.Stat(filepath.Join(dir, "internal", "httpserver", "http.go")); err != nil {
+		t.Fatalf("add module did not resolve the http dependency: %v", err)
+	}
+
+	// Repeating add is a no-op that still succeeds.
+	out, err = run(t, "add", "module", "widget", "--dir", dir)
+	if err != nil {
+		t.Fatalf("repeat add module: %v", err)
+	}
+	if !strings.Contains(out, "already installed") {
+		t.Fatalf("repeat add module output = %q", out)
+	}
+
+	// list reports the installed module.
+	listOut, err := run(t, "list", "--dir", dir)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(listOut, "widget") {
+		t.Fatalf("list does not report the module: %q", listOut)
+	}
+
+	// A bad name and a missing name are rejected.
+	if _, err := run(t, "add", "module", "items", "--dir", dir); err == nil {
+		t.Fatal("expected add module items to fail")
+	}
+	if _, err := run(t, "add", "module", "--dir", dir); err == nil {
+		t.Fatal("expected add module without a name to fail")
+	}
+}
+
+func TestAddModuleDryRunWritesNothing(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err := run(t, "add", "module", "widget", "--dir", dir, "--dry-run")
+	if err != nil {
+		t.Fatalf("add module --dry-run: %v", err)
+	}
+	if !strings.Contains(out, "dry run") {
+		t.Fatalf("dry-run output = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "modules")); !os.IsNotExist(err) {
+		t.Fatal("dry run wrote the module")
+	}
+}

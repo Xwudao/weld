@@ -39,6 +39,7 @@ To release, publish `weld-template` and pin a real version, then drop the
 ```
 weld new <name> [--module path] [--dir dir] [--dry-run]
 weld add <capability> [--dir dir] [--dry-run]
+weld add module <name> [--dir dir] [--dry-run]
 weld list [--dir dir]
 weld skills [--dir dir] [--dry-run]
 weld version
@@ -100,6 +101,11 @@ is opt-in and requires `http`: it wires whatever of `db`, `api` and `redis` is
 installed, prunes the Redis client until a provider asks for it, and regenerates
 its graph when they are added, in either order.
 
+`weld add module <name>` is separate from the capability set: it generates one
+HTTP business module under `internal/modules/<name>` and wires it under
+`/api/<name>` (see [`weld add module`](#weld-add-module-stage-5)). It installs
+`http` and the `config` it requires automatically when they are absent.
+
 ## Staged architecture
 
 ```
@@ -113,7 +119,10 @@ new ──▶ base project ──▶ add capability ──▶ add capability ─
 
 Every file `weld` writes is recorded in `weld.json` with the capability and
 version that produced it. Capabilities are **one-way additive**: later
-capabilities extend the project; nothing removes a capability.
+capabilities extend the project; nothing removes a capability. `weld add module
+<name>` sits beside the capability set: it adds one HTTP business module
+(`internal/modules/<name>`, recorded under `module:<name>` and listed in the
+manifest's `modules`) without touching the capability list.
 
 Capabilities are also **independent and dependency-resolved**. `weld new`
 produces a CLI that builds and runs with no HTTP server, no database, no Redis
@@ -335,6 +344,46 @@ Because the generated initializer imports `github.com/Xwudao/loom`, installing
 `loom` raises the project's Go directive to `go 1.25.0`. The generator's
 `x/tools` dependency stays in `tools/loom`.
 
+## `weld add module` (stage 5)
+
+`weld add module <name>` adds a first-class **HTTP business module**:
+`internal/modules/<name>` with a typed request and response, a `Service` seam,
+and a Go HTTP handler registered under `/api/<name>`. It is a deliberately
+small, replaceable example, not persistence: the generated service holds state
+only in memory.
+
+- **Name validation.** `<name>` must be a canonical lower-case Go package name
+  and URL segment. A Go keyword and the reserved built-in API paths `api`,
+  `items` and `openapi` are rejected, as is a module already installed.
+- **Dependency install.** It installs `http`, and the `config` that `http`
+  requires, automatically when absent, so it works on a fresh CLI project.
+- **Ownership.** Every module file is recorded in `weld.json` under
+  `module:<name>`, and the module is recorded in the manifest's `modules` list.
+  The files are written once and never regenerated, so your edits survive later
+  `weld add` commands; an existing unmanaged file under `internal/modules/<name>`
+  is a conflict, never an overwrite, and a repeat add is a no-op that still
+  succeeds.
+- **Wiring is explicit and order independent.**
+  - Without Loom, weld writes `internal/httpserver/<name>_route.go` and appends
+    one line to the `weld:routes` extension point in
+    `internal/httpserver/http.go`, so the route list stays explicit and needs no
+    init-time registration.
+  - With Loom, the module is provided by its own package's `NewService` and
+    registered on the regenerated graph's mux. The graph is re-rendered from the
+    manifest's `modules` list, so installing Loom before the module, or the
+    module before Loom, both produce a graph that includes it, without weld
+    rewriting any module file.
+- **Database semantics are unchanged.** With `db` and Loom installed, the graph
+  still declares the pool and repository as available bindings only: the default
+  composition never constructs them, so serving the module needs no database
+  credential.
+
+The generated `README.md` inside the package says all of this, keeps the
+`Service` interface and `NewService` symbol as the stable seam, and notes that
+the demo service is not persistence. The HTTP surface is a plain
+`http.Handler`, so the generated `module_test.go` exercises it with
+`net/http/httptest`, with no socket and no database.
+
 ## Configuration (`weld add http` / `weld add db`)
 
 `config` is a first-class, shared capability, not a base dependency: the base
@@ -460,6 +509,13 @@ Test conventions:
   `api`+`db`+`loom` in either order, and assert the initializer really constructs
   `NewPool`/`NewRepository`/`NewAPIService` and registers the pool cleanup. Loom
   integration tests skip visibly when the pinned generator cannot be built.
+- The scaffold tests for `weld add module` prove the generated module's handler
+  in process with `net/http/httptest` (no socket, no database); that a repeat add
+  and a dry run write nothing; that a reserved or malformed name and an unmanaged
+  file are rejected before any write; that the module package survives a later
+  capability add; and that the Loom graph includes the module whether Loom is
+  installed before or after it — while a `db`+Loom graph still declares but never
+  constructs the pool and repository.
 - The API integration tests are **skipped with a reason** when the sibling
   `go-validate` working copy (or the test dependencies) is unavailable, because
   the `Spec`/`Constraint` API is not published yet (newest tag v0.1.1). The
@@ -476,8 +532,8 @@ Test conventions:
 ```
 cmd/weld/            CLI entry point
 internal/cli/        argument parsing and output
-internal/template/   capability catalog + placeholder rendering
+internal/template/   capability catalog, module template, placeholder rendering
 internal/project/    manifest, marker patching, best-effort rollback apply
-internal/scaffold/   create/add plans and dependency resolution
+internal/scaffold/   create/add/add-module plans and dependency resolution
 internal/skills/     project agent skill generation and safe write
 ```

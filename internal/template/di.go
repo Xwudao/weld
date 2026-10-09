@@ -20,6 +20,9 @@ type DITemplateVars struct {
 	Module  string
 	Version string
 	Caps    CapabilitySet
+	// Modules lists the installed business modules, in install order, so a
+	// capability's graph can bind and route them without a runtime registry.
+	Modules []DIModule
 }
 
 // RenderDIGraph renders a capability's DI graph source for the installed

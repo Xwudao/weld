@@ -55,6 +55,10 @@ Usage:
   %s add <capability> [--dir dir] [--dry-run]
       Additively extend an existing project in place.
 
+  %s add module <name> [--dir dir] [--dry-run]
+      Add an HTTP business module under internal/modules/<name> wired to
+      /api/<name>; installs http and config automatically when absent.
+
   %s list [--dir dir]
       Show available capabilities and, when inside a project, what is installed.
 
@@ -88,6 +92,15 @@ Capabilities:
                     the cron scheduler (requires http; opt-in, never installed
                     by web, api, db, redis, mail, storage or cron)
 
+Modules:
+  add module <name> generates internal/modules/<name>: a small HTTP business
+  module (typed request/response, a Service seam and a handler under
+  /api/<name>) plus its route wiring. It installs http and config automatically
+  when absent, validates the name, and records the module in weld.json. Without
+  Loom it registers through the weld:routes extension point; with Loom the
+  generated graph picks it up, whichever is installed first. Its files are
+  written once and never regenerated, so your edits survive later adds.
+
 http and db each install the config capability, so the first of them adds the
 shared typed configuration loader and generates a local, git-ignored config.yml
 from config.example.yml; adding the other only appends its section to that file.
@@ -103,7 +116,7 @@ Every file a capability writes is recorded in the project manifest (weld.json)
 with the capability and version that produced it. The skills command writes
 .agents/skills/weld/SKILL.md from that manifest and refuses to overwrite the
 file once you edit it.
-`, progName, progName, progName, progName, progName, progName, progName)
+`, progName, progName, progName, progName, progName, progName, progName, progName)
 }
 
 func runNew(args []string, stdout io.Writer) error {
@@ -151,11 +164,15 @@ func runAdd(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(positional) != 1 {
-		return fmt.Errorf("usage: %s add <capability> [--dir dir] [--dry-run]", progName)
+	var result *scaffold.Result
+	switch {
+	case len(positional) == 2 && positional[0] == "module":
+		result, err = scaffold.AddModule(scaffold.Request{Dir: *dir, Catalog: template.Load()}, positional[1])
+	case len(positional) == 1 && positional[0] != "module":
+		result, err = scaffold.Add(scaffold.Request{Dir: *dir, Catalog: template.Load()}, positional[0])
+	default:
+		return fmt.Errorf("usage: %s add <capability> [--dir dir] [--dry-run]\n       %s add module <name> [--dir dir] [--dry-run]", progName, progName)
 	}
-
-	result, err := scaffold.Add(scaffold.Request{Dir: *dir, Catalog: template.Load()}, positional[0])
 	if err != nil {
 		return err
 	}
@@ -207,6 +224,12 @@ func runList(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "  * base   v%s\n", manifest.Base.Version)
 	for _, capability := range manifest.Capabilities {
 		fmt.Fprintf(stdout, "  * %-6s v%s (applied %s)\n", capability.Name, capability.Version, capability.AppliedAt)
+	}
+	if len(manifest.Modules) > 0 {
+		fmt.Fprintf(stdout, "\nModules in %s:\n", manifest.Name)
+		for _, module := range manifest.Modules {
+			fmt.Fprintf(stdout, "  * %-8s v%s (applied %s)\n", module.Name, module.Version, module.AppliedAt)
+		}
 	}
 	if drift := manifest.Drift(*dir); len(drift) > 0 {
 		fmt.Fprintf(stdout, "\n%d managed file(s) changed since install:\n", len(drift))
