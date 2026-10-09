@@ -299,6 +299,9 @@ func Add(req Request, name string) (*Result, error) {
 		result.Notes = alreadyInstalledNotes(req.Dir, manifest, requested)
 		return result, nil
 	}
+	if err := checkCLICompatibility(req.Dir, order); err != nil {
+		return nil, err
+	}
 	for _, capability := range order {
 		if capability.Name != requested.Name {
 			result.Notes = append(result.Notes, fmt.Sprintf("installing required capability %q", capability.Name))
@@ -315,6 +318,32 @@ func Add(req Request, name string) (*Result, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// checkCLICompatibility prevents installing a Cobra-based serve command into a
+// project scaffolded with the former standard-library command registry. A
+// mixed command tree would be written successfully but fail to compile; fail
+// during planning instead, before changing any project files.
+func checkCLICompatibility(root string, order []*template.Capability) error {
+	needsCobra := false
+	for _, capability := range order {
+		if capability.Name == "http" || capability.Name == "loom" {
+			needsCobra = true
+			break
+		}
+	}
+	if !needsCobra {
+		return nil
+	}
+	const appPath = "internal/app/app.go"
+	content, err := os.ReadFile(filepath.Join(root, appPath))
+	if err != nil {
+		return err
+	}
+	if !bytes.Contains(content, []byte("func NewRootCommand() *cobra.Command")) {
+		return &project.ConflictError{Path: appPath, Reason: "uses the earlier CLI; migrate the generated app to Cobra before installing http or loom"}
+	}
+	return nil
 }
 
 // installOrder returns the capabilities to install for requested, dependencies

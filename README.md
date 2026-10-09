@@ -6,7 +6,7 @@ existing project to gain a web frontend instead of generating a second
 template.
 
 ```
-weld new demo          # minimal Go CLI: version + help, no dependencies
+weld new demo          # minimal Go CLI: Cobra command tree, version + help
 cd demo
 weld add web           # installs http, then the React + TS + Vite frontend
 weld add api           # JSON API + OpenAPI 3.1 (installs http too; no web needed)
@@ -48,9 +48,9 @@ weld help
 
 Capabilities:
 
-- `base` (scaffold) — minimal, dependency-free Go CLI with a `log/slog`
+- `base` (scaffold) — minimal Go CLI on a Cobra command tree with a `log/slog`
   logging factory (`internal/logging`) whose sink is an injected `io.Writer`.
-  It ships no configuration.
+  It ships no configuration and no server; the only dependency is Cobra itself.
 - `config` (add) — the shared typed configuration capability: `config.yml` from
   the working directory, environment and flag overrides, and a redacting
   `Secret` type. Installed automatically by the first of `http` and `db`.
@@ -137,10 +137,14 @@ in an HTTP server and can be added to a CLI-only project.
 No capability performs arbitrary text substitution. There are three owned
 extension points:
 
-1. **Go command registry** — `internal/app` exposes `RegisterCommand(Command)`.
-   `http` adds `internal/app/serve.go`, whose `init` registers the `serve`
-   command. Commands are the only init-time registration point; HTTP routes are
-   not.
+1. **Go command tree** — `internal/app` builds the root command with Cobra and
+exposes the contribution seams: `RegisterCommand(func() *cobra.Command)` for a
+top-level command, `ConfigureRoot(func(*cobra.Command))` for shared persistent
+flags, and `SetDefaultRun` for what a bare invocation does. `http` adds
+`internal/app/serve.go`, whose `init` registers the `serve` command, installs
+`--config`/`--addr` as root persistent flags and makes a bare `__name__` run the
+same serve lifecycle. Commands are the only init-time command registration
+point; HTTP routes are not registered at init time.
 2. **Go route composition** — `internal/httpserver/http.go` exposes
    `NewHandler(routes ...Route)` plus a `weld:routes` marker region that
    `Handler()` reads. `web` adds `internal/httpserver/web_route.go` (same
@@ -159,6 +163,18 @@ extension points:
 return 404 instead of the HTML shell, and only browser navigations fall back to
 `index.html`. It keeps that exclusion rather than relying on mux precedence, so
 the frontend never masquerades as an API that is not installed.
+
+### Migrating a project generated before the Cobra CLI (stage 2a)
+
+`weld new` now generates a Cobra command tree, but `weld add` never rewrites
+`internal/app/app.go`. Before installing a new Cobra-based `http` or `loom`
+capability into a project with the older hand-rolled dispatcher, weld fails
+**during planning**, without changing files. There is no automatic upgrade:
+re-scaffold on the current base and port your application changes, or manually
+migrate `internal/app/app.go`, any existing `internal/app/serve.go`, the Cobra
+`go.mod` dependency and `go.sum` together before retrying. An existing project
+can still add capabilities that do not require a new Cobra-based serve file.
+New projects are unaffected.
 
 ## Safety model
 
@@ -456,8 +472,10 @@ Test conventions:
   immediately. The generated `internal/httpserver` test occupies a loopback port
   with `httptest` to prove `Serve` reports the bind failure without logging a
   listening line, and closes the occupying server.
-- The generated `serve` command is exercised through flag parsing and the
-  command registry (`internal/app/serve_test.go`) rather than by listening.
+- The generated `serve` command is exercised as a Cobra command tree
+  (`internal/app/serve_test.go`): the root builds the serve command, the shared
+  `--config`/`--addr` flags parse and their precedence resolves, and the
+  lifecycle helper runs against a cancellable context — rather than by listening.
 - The generated `internal/config` test drives the loader through an injected
   `readFile`/`lookupEnv`: it covers the flag/environment/file/default precedence,
   a missing file, an invalid file that must not echo its content, a blank

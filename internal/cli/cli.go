@@ -70,7 +70,8 @@ Usage:
   %s help
 
 Capabilities:
-  base   (scaffold) minimal, dependency-free Go CLI with a log/slog factory
+  base   (scaffold) minimal Go CLI on a Cobra command tree with a log/slog
+                    factory
   config (add)      typed YAML configuration (config.yml + environment) with a
                     redacting Secret type; installed by http and db
   http   (add)      HTTP lifecycle, composable mux and a serve command

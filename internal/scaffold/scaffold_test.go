@@ -111,6 +111,7 @@ func TestCreateWritesMinimalCLI(t *testing.T) {
 	for _, path := range []string{
 		"main.go",
 		"internal/app/app.go",
+		"go.sum",
 		"Makefile",
 		"README.md",
 		".gitignore",
@@ -134,16 +135,24 @@ func TestCreateWritesMinimalCLI(t *testing.T) {
 			t.Errorf("base scaffold created %s", path)
 		}
 	}
-	// The base go.mod carries the weld:deps extension point but requires nothing
-	// until a capability patches it.
+	// The base go.mod carries the weld:deps extension point and pins Cobra, the
+	// command tree every capability extends. pflag and mousetrap are Cobra's own
+	// requirements, pinned so the base project builds with no network access.
 	goMod := readFile(t, filepath.Join(dir, "go.mod"))
 	if !strings.Contains(goMod, "weld:deps:begin") || !strings.Contains(goMod, "weld:deps:end") {
 		t.Errorf("base go.mod is missing the weld:deps extension point:\n%s", goMod)
 	}
+	if !strings.Contains(goMod, "github.com/spf13/cobra") || !strings.Contains(goMod, "github.com/spf13/pflag") {
+		t.Errorf("base go.mod does not pin Cobra and pflag:\n%s", goMod)
+	}
 	if strings.Contains(goMod, "go-validate") {
 		t.Errorf("base go.mod already requires go-validate:\n%s", goMod)
 	}
-	if app := readFile(t, filepath.Join(dir, "internal/app/app.go")); strings.Contains(app, "net/http") || strings.Contains(app, "\"serve\"") {
+	// The base app is a Cobra command tree; it must not smuggle in HTTP or a
+	// serve command, which only the http capability adds.
+	if app := readFile(t, filepath.Join(dir, "internal/app/app.go")); !strings.Contains(app, "github.com/spf13/cobra") {
+		t.Error("base app.go does not build on Cobra")
+	} else if strings.Contains(app, "net/http") || strings.Contains(app, "\"serve\"") {
 		t.Error("base app.go references HTTP or the serve command")
 	}
 	if readme := readFile(t, filepath.Join(dir, "README.md")); strings.Contains(readme, "/api/health") {
@@ -1286,13 +1295,20 @@ func TestAddLoomInstallsHTTPAndRendersGraph(t *testing.T) {
 	if !strings.Contains(gen, "func InitApp(ctx context.Context)") {
 		t.Errorf("loom_gen.go has no InitApp:\n%s", gen)
 	}
-	// Exactly one serve command remains, now driven by the graph.
+	// Exactly one serve command remains, now driven by the graph, and the bare
+	// root action runs the same graph lifecycle.
 	serve := readFile(t, filepath.Join(dir, "internal/app/serve.go"))
-	if strings.Count(serve, `Name:    "serve"`) != 1 {
-		t.Errorf("serve command count = %d, want 1:\n%s", strings.Count(serve, `Name:    "serve"`), serve)
+	if strings.Count(serve, "RegisterCommand(") != 1 || !strings.Contains(serve, "RegisterCommand(newServeLoomCommand)") {
+		t.Errorf("serve command is not replaced by the Loom registration:\n%s", serve)
 	}
-	if !strings.Contains(serve, "runServeLoom") {
-		t.Errorf("serve command is not wired to the graph:\n%s", serve)
+	if strings.Contains(serve, "RegisterCommand(newServeCommand)") {
+		t.Errorf("the plain serve registration survived the Loom replace:\n%s", serve)
+	}
+	if !strings.Contains(serve, "SetDefaultRun(runServeLoom)") {
+		t.Errorf("a bare invocation is not wired to the graph:\n%s", serve)
+	}
+	if !strings.Contains(serve, "ConfigureRoot(registerServeFlags)") {
+		t.Errorf("the Loom serve registration does not share the root flags:\n%s", serve)
 	}
 	// opt-in Go floor is raised and Loom is a direct dependency.
 	goMod := readFile(t, filepath.Join(dir, "go.mod"))
@@ -2153,6 +2169,40 @@ func TestAddDoesNotBootstrapUnmanagedConfig(t *testing.T) {
 	}
 }
 
+// TestOldCLIRejectsNewServeBeforeWriting prevents an existing stdlib-CLI
+// project from receiving a Cobra serve file that cannot compile against it.
+func TestOldCLIRejectsNewServeBeforeWriting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		add  func(string) error
+	}{
+		{"http", func(dir string) error { _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "http"); return err }},
+		{"module", func(dir string) error {
+			_, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "orders")
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := create(t, t.TempDir())
+			appPath := filepath.Join(dir, "internal", "app", "app.go")
+			if err := os.WriteFile(appPath, []byte("package app\n// earlier CLI\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			before := readFile(t, filepath.Join(dir, project.ManifestName))
+			err := tc.add(dir)
+			if err == nil || !strings.Contains(err.Error(), "migrate the generated app to Cobra") {
+				t.Fatalf("add with earlier CLI error = %v", err)
+			}
+			if after := readFile(t, filepath.Join(dir, project.ManifestName)); before != after {
+				t.Fatal("planning changed the manifest")
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "internal", "httpserver")); !os.IsNotExist(statErr) {
+				t.Fatalf("planning wrote HTTP files: %v", statErr)
+			}
+		})
+	}
+}
+
 // --- logging milestone -----------------------------------------------------
 
 // assertInjectedLogger fails when a generated project does not ship the base
@@ -2233,6 +2283,91 @@ func TestBaseGeneratedProjectLogsErrorsThroughSlog(t *testing.T) {
 	}
 	if strings.Contains(text, "error:") {
 		t.Fatalf("the base CLI still uses the fmt error path:\n%s", text)
+	}
+}
+
+// TestBaseGeneratedProjectBareRunShowsHelp proves a bare base invocation (no
+// argument) prints the command help and exits zero: with no capability there is
+// no long-running root action, so nothing starts.
+func TestBaseGeneratedProjectBareRunShowsHelp(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	if !goModTidy(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	env := serveEnv()
+	binary := buildAppBinary(t, dir, env)
+
+	out, err := exec.Command(binary).CombinedOutput()
+	if err != nil {
+		t.Fatalf("bare base invocation failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	for _, want := range []string{"Usage:", "version", "help"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("bare base help is missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "listening") {
+		t.Errorf("a bare base invocation started a server:\n%s", text)
+	}
+}
+
+// TestBareAppAndServeShareOneLifecycle proves that once http is installed a bare
+// `app` and `app serve` are the same long-running lifecycle: both bind the
+// shared --addr and log the listening line, and both stop cleanly on SIGTERM.
+// help, version and an unknown command never start it.
+func TestBareAppAndServeShareOneLifecycle(t *testing.T) {
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "http")
+	if !goModTidy(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	env := serveEnv()
+	binary := buildAppBinary(t, dir, env)
+
+	for _, args := range [][]string{nil, {"serve"}} {
+		cmd, addr, stderr := startApp(t, binary, dir, env, args...)
+		if !strings.Contains(stderr.String(), addr) {
+			t.Errorf("args %v did not bind the shared --addr %s:\n%s", args, addr, stderr.String())
+		}
+		stopServe(t, cmd, stderr)
+	}
+
+	for _, args := range [][]string{{"help"}, {"version"}, {"--version"}, {"bogus"}} {
+		cmd := exec.Command(binary, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, _ := cmd.CombinedOutput()
+		if strings.Contains(string(out), "listening") {
+			t.Errorf("%v started the server:\n%s", args, out)
+		}
+	}
+}
+
+// TestLoomBareAppAndServeShareOneLifecycle proves the Loom replacement keeps a
+// bare `app` and `app serve` identical: both run the generated graph and log the
+// listening line, and both stop cleanly on SIGTERM.
+func TestLoomBareAppAndServeShareOneLifecycle(t *testing.T) {
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	for _, capability := range []string{"http", "loom"} {
+		add(t, dir, capability)
+	}
+	if !goModTidy(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	env := serveEnv()
+	binary := buildAppBinary(t, dir, env)
+
+	for _, args := range [][]string{nil, {"serve"}} {
+		cmd, addr, stderr := startApp(t, binary, dir, env, args...)
+		if !strings.Contains(stderr.String(), addr) {
+			t.Errorf("args %v did not bind the shared --addr %s:\n%s", args, addr, stderr.String())
+		}
+		stopServe(t, cmd, stderr)
 	}
 }
 
@@ -2810,6 +2945,30 @@ func startServe(t *testing.T, binary, dir string, env []string) (*exec.Cmd, stri
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start serve: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	waitForLog(t, stderr, "listening", 20*time.Second)
+	return cmd, addr, stderr
+}
+
+// startApp starts a generated binary with the given command words on a fresh
+// loopback address, appending the shared --addr flag, and waits until it logs
+// the listening line. It returns the process and its captured stderr, and kills
+// the process when the test finishes. Empty args exercise a bare invocation.
+func startApp(t *testing.T, binary, dir string, env []string, args ...string) (*exec.Cmd, string, *syncBuffer) {
+	t.Helper()
+	addr := freeAddr(t)
+	full := append(append([]string{}, args...), "--addr", addr)
+	cmd := exec.Command(binary, full...)
+	cmd.Dir = dir
+	cmd.Env = env
+	stderr := &syncBuffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %v: %v", args, err)
 	}
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()

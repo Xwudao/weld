@@ -77,6 +77,9 @@ func AddModule(req Request, name string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkCLICompatibility(req.Dir, order); err != nil {
+		return nil, err
+	}
 	for _, capability := range order {
 		result.Notes = append(result.Notes, fmt.Sprintf("installing required capability %q", capability.Name))
 	}
