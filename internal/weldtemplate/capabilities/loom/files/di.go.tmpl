@@ -270,7 +270,11 @@ var appGraph = loom.Graph[*App](
 	// them.
 	loom.Provide(NewScheduler),
 {{- end}}
+{{- if .Caps.Has "api"}}
+	loom.Provide(NewServerWithAPI),
+{{- else}}
 	loom.Provide(NewServer),
+{{- end}}
 	loom.Provide(NewApp),
 )
 
@@ -307,22 +311,34 @@ func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service ap
 // namespace takes precedence over the SPA catch-all because net/http resolves
 // the more specific pattern first. Business modules are registered here too, so
 // a module never needs a separate route seam.
-func newMux({{if .Caps.Has "api"}}
-	service api.Service,{{end}}{{range .Modules}}
+func newMux({{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 {{- if .Caps.Has "web"}}
 	mux.Handle("/", web.Handler())
 {{- end}}
-{{- if .Caps.Has "api"}}
-	api.Register(mux, service)
-{{- end}}
 {{- range .Modules}}
 	{{.Name}}.Register(mux, {{.Name}}Service)
 {{- end}}
 	return mux
 }
+{{- if .Caps.Has "api"}}
+
+// newMuxWithAPI composes the API and module routes. The API-specific wrapper
+// keeps newMux's module-only test seam source-compatible when api is added.
+func newMuxWithAPI(service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
+	mux := nethttp.NewServeMux()
+{{- if .Caps.Has "web"}}
+	mux.Handle("/", web.Handler())
+{{- end}}
+	api.Register(mux, service)
+{{- range .Modules}}
+	{{.Name}}.Register(mux, {{.Name}}Service)
+{{- end}}
+	return mux
+}
+{{- end}}
 
 // Server is the managed HTTP server the graph owns.
 type Server struct {
@@ -365,18 +381,37 @@ func (s *Server) Stop() error {
 func NewServer(
 	lc *loom.Lifecycle,
 	cfg *config.Config,
-	logger *slog.Logger,{{if .Caps.Has "api"}}
-	service api.Service,{{end}}{{range .Modules}}
+	logger *slog.Logger,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
+	return newServer(lc, cfg, logger, newMux({{range .Modules}}
+		{{.Name}}Service,{{end}}
+	))
+}
+{{- if .Caps.Has "api"}}
+
+// NewServerWithAPI is the API composition entry point used by the Loom graph.
+// NewServer deliberately retains the module-only signature so a project's
+// existing DI tests remain source-compatible when api is added.
+func NewServerWithAPI(
+	lc *loom.Lifecycle,
+	cfg *config.Config,
+	logger *slog.Logger,
+	service api.Service,{{range .Modules}}
+	{{.Name}}Service {{.Name}}.Service,{{end}}
+) (*Server, error) {
+	return newServer(lc, cfg, logger, newMuxWithAPI(service,{{range .Modules}}
+		{{.Name}}Service,{{end}}
+	))
+}
+{{- end}}
+
+func newServer(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, handler nethttp.Handler) (*Server, error) {
 	server := &Server{
 		// The composed mux is wrapped with the same middleware chain the
 		// httpserver package exposes (httpserver.Chain), so the composition serves
 		// the project middleware semantics.
-		HTTP: httpserver.NewServer(cfg.HTTP.Addr, httpserver.Chain(logger, newMux({{if .Caps.Has "api"}}
-			service,{{end}}{{range .Modules}}
-			{{.Name}}Service,{{end}}
-		))),
+		HTTP: httpserver.NewServer(cfg.HTTP.Addr, httpserver.Chain(logger, handler)),
 		logger: logger,
 		fail:   make(chan error, 1),
 	}

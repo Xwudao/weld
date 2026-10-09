@@ -573,7 +573,15 @@ func reconcileDI(req Request, manifest *project.Manifest, present map[string]boo
 			if bytes.Equal(current, source.content) {
 				continue
 			}
+			// The graph test is a project-owned seam. It is generated for a
+			// fresh project, but users commonly add fakes and route assertions
+			// there as their module interfaces evolve. Once edited, retain it
+			// across capability adds rather than silently replacing those tests.
 			_, statErr := os.Stat(filepath.Join(req.Dir, source.path))
+			if source.path == path.Join(capability.DI.Dir, "di_test.go") && managed && statErr == nil {
+				manifest.PreserveFile(source.path)
+				continue
+			}
 			planned[source.path] = source.content
 			upsert(project.Operation{Path: source.path, Content: source.content, Overwrite: statErr == nil})
 			manifest.SetFile(source.path, capability.Name, source.content)

@@ -206,7 +206,7 @@ func ({{.Name}}FakeService) Greet(_ context.Context, req {{.Name}}.Request) ({{.
 // same reason.{{end}}
 func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
 	t.Helper()
-	server, err := NewServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger{{if .Caps.Has "api"}}, api.NewService(){{end}}{{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	server, err := NewServer{{if .Caps.Has "api"}}WithAPI{{end}}(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger{{if .Caps.Has "api"}}, api.NewService(){{end}}{{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestServerLogsLifecycle(t *testing.T) {
 
 {{- if .Caps.Has "api"}}
 func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
-	mux := newMux(api.NewService(){{range .Modules}}, {{.Name}}.NewService(){{end}})
+	mux := newMuxWithAPI(api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	body := `{"name":"widget","quantity":2,"status":"active"}`
 	request := httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -432,7 +432,7 @@ func getJSON(t *testing.T, url string) []byte {
 // TestComposedMuxServesModulesWithoutSocket proves the graph registers every
 // installed business module on the composed mux, with no socket and no database.
 func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
-	mux := newMux({{if .Caps.Has "api"}}api.NewService(),{{end}}{{range .Modules}}{{.Name}}FakeService{},{{end}})
+	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}({{if .Caps.Has "api"}}api.NewService(){{end}}{{range .Modules}}{{if $.Caps.Has "api"}}, {{end}}{{.Name}}FakeService{},{{end}})
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, {{(index .Modules 0).Name}}.RoutePrefix, nil))
 	if recorder.Code != nethttp.StatusOK {

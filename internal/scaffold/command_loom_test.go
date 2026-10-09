@@ -390,6 +390,47 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	}
 }
 
+// TestAddAPIPreservesCustomizedModuleDITest proves the cross-capability seam:
+// after a module's constructor and DI test have been customized, adding api
+// regenerates the production graph without replacing the project's test.
+// The generated project still runs the API OpenAPI tests and the pre-existing
+// module route tests together, so both route families remain buildable.
+func TestAddAPIPreservesCustomizedModuleDITest(t *testing.T) {
+	goValidate := goValidateDir(t)
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	useLocalGoValidate(t, dir, goValidate)
+	addModule(t, dir, "widget")
+	add(t, dir, "db")
+
+	servicePath := filepath.Join(dir, "internal", "modules", "widget", "service.go")
+	editInPlace(t, servicePath,
+		"func NewService() Service {\n\treturn NewDemoService()\n}",
+		"func NewService(repo data.Repository) Service {\n\t_ = repo\n\treturn NewDemoService()\n}")
+	editInPlace(t, servicePath,
+		"\t\"strings\"\n",
+		"\t\"strings\"\n\n\t\"example.com/demo/internal/data\"\n")
+
+	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
+	const userTestMarker = "// user-owned module route assertion"
+	diTest := readFile(t, diTestPath) + "\n" + userTestMarker + "\n"
+	if err := os.WriteFile(diTestPath, []byte(diTest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "api")
+	if got := readFile(t, diTestPath); !strings.Contains(got, userTestMarker) {
+		t.Fatalf("weld add api replaced the customized DI test")
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dir, "internal", "di", "di.go")), "NewServerWithAPI") {
+		t.Fatal("the API graph did not gain its composition entry point")
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
+
 // TestLoomModuleServiceSignatureChangeCompiles proves the Loom seam is
 // editable: after `weld add db`, changing the module's constructor to
 // NewService(repo data.Repository) still compiles and tests, in both install
