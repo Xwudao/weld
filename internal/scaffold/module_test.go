@@ -65,7 +65,7 @@ func TestAddModuleInstallsHTTPAndConfig(t *testing.T) {
 		t.Error("the module wrote the retired non-Loom route seam")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{"loom.Provide(widget.NewService)", `widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`} {
+	for _, want := range []string{"loom.Provide(widget.NewService)", `widget.Register(base.Group(httpserver.ModulePrefix(widget.Name)), widgetService)`} {
 		if !strings.Contains(di, want) {
 			t.Errorf("di.go is missing %q:\n%s", want, di)
 		}
@@ -210,7 +210,7 @@ func TestAddModuleFilesSurviveLaterAdd(t *testing.T) {
 		t.Fatalf("a later add rewrote the user's module file:\n%s", got)
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{`widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`, "web.Handler(httpserver.APIPrefix)"} {
+	for _, want := range []string{`widget.Register(base.Group(httpserver.ModulePrefix(widget.Name)), widgetService)`, "web.Handler(httpserver.APIPrefix)"} {
 		if !strings.Contains(di, want) {
 			t.Errorf("the regenerated graph lost %q after a later add:\n%s", want, di)
 		}
@@ -236,7 +236,7 @@ func TestAddModuleComposesWithDB(t *testing.T) {
 		t.Fatal("installing db rewrote a module file")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	if !strings.Contains(di, `widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`) {
+	if !strings.Contains(di, `widget.Register(base.Group(httpserver.ModulePrefix(widget.Name)), widgetService)`) {
 		t.Errorf("installing db dropped the module registration:\n%s", di)
 	}
 	if !strings.Contains(di, "loom.Provide(NewPool)") {
@@ -265,7 +265,7 @@ func TestAddModuleWithLoomRendersGraphAndPreservesDBPruning(t *testing.T) {
 		t.Error("a Loom project also wrote the non-Loom route seam")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{"loom.Provide(widget.NewService)", `widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`, "loom.Provide(NewPool)"} {
+	for _, want := range []string{"loom.Provide(widget.NewService)", `widget.Register(base.Group(httpserver.ModulePrefix(widget.Name)), widgetService)`, "loom.Provide(NewPool)"} {
 		if !strings.Contains(di, want) {
 			t.Errorf("di.go is missing %q:\n%s", want, di)
 		}

@@ -310,9 +310,9 @@ func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service ap
 // newMux composes the application handler from the installed capabilities.
 //
 // Route composition is explicit here rather than through a global registry, so
-// the dependency graph is the single source of composition. The mount prefix
-// comes from httpserver.APIPrefix, so changing the version (or adding another
-// audience surface) is a one-line change in the stable project file rather than
+// the dependency graph is the single source of composition. Each module's mount
+// prefix comes from httpserver.ModulePrefix, so changing the version (or giving
+// one module its own URL space) is an edit in the stable project file rather than
 // an edit to this regenerated graph. The administrator policy is defined once
 // here, so every module's administrator routes share one guard.
 func newMux({{range .Modules}}
@@ -325,7 +325,7 @@ func newMux({{range .Modules}}
 {{- if .Modules}}
 	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard())
 {{- range .Modules}}
-	{{.Name}}.Register(base.Group(httpserver.APIPrefix+"/{{.Name}}"), {{.Name}}Service)
+	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
 {{- end}}
 {{- end}}
 	return mux
@@ -344,7 +344,7 @@ func newMuxWithAPI(service api.Service{{range .Modules}}, {{.Name}}Service {{.Na
 	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard())
 	api.Register(base.Group(httpserver.APIPrefix), service)
 {{- range .Modules}}
-	{{.Name}}.Register(base.Group(httpserver.APIPrefix+"/{{.Name}}"), {{.Name}}Service)
+	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
 {{- end}}
 	return mux
 }

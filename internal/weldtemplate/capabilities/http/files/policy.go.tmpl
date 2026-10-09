@@ -7,15 +7,33 @@ import (
 	"__module__/internal/httpx"
 )
 
-// APIPrefix is the mount prefix for the built-in API and every business module.
+// APIPrefix is the default mount prefix for the built-in API and the business
+// modules (see ModulePrefix).
 //
-// It is the one place the HTTP surface's top-level path is declared. Change it
-// (for example to "/api/v2") to version the surface, or mount a second surface
-// (for example "/ex") for another audience; the generated server graph mounts
-// from this constant, so the change survives every later `weld add`. A module
-// declares its paths relative to its mount, so it follows the prefix without an
-// edit.
+// It is the one place the HTTP surface's default top-level path is declared.
+// Change it (for example to "/api/v2") to version the surface; the generated
+// server graph mounts the API and the modules from this constant (through
+// ModulePrefix), so the change survives every later `weld add`. A module declares
+// its paths relative to its mount, so it follows the prefix without an edit.
 const APIPrefix = "/api"
+
+// ModulePrefix returns the URL prefix a business module is registered under.
+//
+// The generated server graph mounts every module through this function, so the
+// project owns the mapping from a module to its URL space without editing the
+// regenerated graph. The default keeps a module under the versioned API prefix
+// (APIPrefix/<name>). Return "" for a module that declares its own full paths —
+// for example one whose public routes live at /v1/thing and whose administrator
+// routes live at /admin/v1/thing, which do not fit a single APIPrefix/<name>
+// mount; the module then owns its complete paths and the graph mounts it at the
+// root.
+//
+// The name is the module's package name (the module's Name constant). Version
+// the whole surface in one place here, or special-case one module, without
+// touching internal/di/di.go.
+func ModulePrefix(name string) string {
+	return APIPrefix + "/" + name
+}
 
 // PolicyAdmin is the name of the administrator route policy. A module marks its
 // administrator routes with httpx.Policy(PolicyAdmin) and implements no check

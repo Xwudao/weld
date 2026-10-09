@@ -453,7 +453,7 @@ func getJSON(t *testing.T, url string) []byte {
 // installed business module on the composed mux, with no socket and no database.
 func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
 	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}({{if .Caps.Has "api"}}api.NewService(),{{end}}{{range .Modules}}{{.Name}}FakeService{},{{end}})
-	prefix := httpserver.APIPrefix + "/" + {{(index .Modules 0).Name}}.Name
+	prefix := httpserver.ModulePrefix({{(index .Modules 0).Name}}.Name)
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, prefix, nil))
 	if recorder.Code != nethttp.StatusOK {
@@ -469,7 +469,7 @@ func TestComposedMuxServesModuleRoutes(t *testing.T) {
 	mux := newMuxWithAPI(api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	{{- range .Modules}}
 	{
-		prefix := httpserver.APIPrefix + "/" + {{.Name}}.Name
+		prefix := httpserver.ModulePrefix({{.Name}}.Name)
 		recorder := httptest.NewRecorder()
 		mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, prefix, nil))
 		if recorder.Code != nethttp.StatusOK {

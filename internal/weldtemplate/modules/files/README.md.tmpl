@@ -29,10 +29,11 @@ mount the composition root gives it:
 - `GET {prefix}/health` — `router.HandleFunc`, the raw escape hatch for a
   response that must stay unwrapped.
 
-The module declares no mount prefix and no guard. `internal/httpserver.APIPrefix`
-sets the top-level path and the generated server graph mounts the module there,
-so the same module serves `/api/v1/__modname__` and `/api/v2/__modname__` without
-an edit. `adminPolicy` is only a name: the composition root defines what the
+The module declares no mount prefix and no guard. `internal/httpserver.ModulePrefix`
+returns the module's prefix (the versioned `APIPrefix/__modname__` by default) and
+the generated server graph mounts the module there, so the same module serves
+`/api/v1/__modname__` and `/api/v2/__modname__` without an edit; a module that owns
+its full paths is mounted at the root by returning `""`. `adminPolicy` is only a name: the composition root defines what the
 `"admin"` policy does (`httpserver.AdminGuard` by default), so authorization
 lives in exactly one place and every module shares it.
 
@@ -82,7 +83,7 @@ interface and the `NewService` symbol stable.
 Generating this module installed `http` and `loom` (and the `config` they
 require). The generated Loom server graph in `internal/di` provides
 `__modname__.NewService`, mounts the module under the API prefix
-(`httpserver.APIPrefix`) and defines the `admin` policy once with
+(`httpserver.ModulePrefix`) and defines the `admin` policy once with
 `httpserver.AdminGuard`. You may change `NewService`'s signature — for example to
 take `data.Repository` after `weld add db` — and the graph follows it. Nothing in
 this package quotes the graph, and no separate route file is written.

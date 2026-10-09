@@ -839,6 +839,16 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 	if !strings.Contains(read(paths["internal/httpserver/http.go"]), "httpx.Chain(middlewareChain(") {
 		t.Error("http.go does not compose the configured middleware chain")
 	}
+	// The project-owned policy file is the one seam for the surface: the API
+	// prefix, the per-module mount it defaults to, the administrator policy name
+	// and the guard. The graph mounts modules through ModulePrefix, so a project
+	// can give a module its own URL space without editing the regenerated graph.
+	policy := read(paths["internal/httpserver/policy.go"])
+	for _, want := range []string{"const APIPrefix =", "func ModulePrefix(", "const PolicyAdmin =", "func AdminGuard()"} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("httpserver/policy.go is missing %q", want)
+		}
+	}
 }
 
 // TestCapabilitiesShareTheResponseEnvelope guards the wire contract: the
@@ -1724,7 +1734,7 @@ func TestModuleShipsNoPlainRouteTemplate(t *testing.T) {
 	}
 	graphText := string(graph)
 	if !strings.Contains(graphText, "loom.Provide({{.Name}}.NewService)") ||
-		!strings.Contains(graphText, "{{.Name}}.Register(base.Group(httpserver.APIPrefix") {
+		!strings.Contains(graphText, "{{.Name}}.Register(base.Group(httpserver.ModulePrefix") {
 		t.Error("the Loom graph does not register the module service on the composed mux")
 	}
 }
