@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Xwudao/weld/internal/template"
 )
 
 func run(t *testing.T, args ...string) (string, error) {
@@ -28,6 +30,33 @@ func TestVersionAndHelp(t *testing.T) {
 	}
 	if _, err := run(t, "bogus"); err == nil {
 		t.Fatal("expected error for unknown command")
+	}
+}
+
+func TestAddHelpListsEmbeddedCapabilities(t *testing.T) {
+	out, err := run(t, "add", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Available capabilities:") || !strings.Contains(out, "weld list") {
+		t.Fatalf("add help lacks capability guidance: %s", out)
+	}
+	catalog := template.Load()
+	names, err := catalog.Names()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		capability, err := catalog.Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if capability.Kind == template.KindAdd && !strings.Contains(out, "  "+name+" ") {
+			t.Errorf("add help omitted %s", name)
+		}
+	}
+	if strings.Contains(out, "  base ") {
+		t.Fatal("base is not an additive capability")
 	}
 }
 

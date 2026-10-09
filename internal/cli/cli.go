@@ -10,6 +10,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -100,6 +101,7 @@ func newAddCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <capability>",
 		Short: "additively extend an existing project in place",
+		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("usage: %s add <capability> [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--dir dir] [--dry-run]\n       %s add command <name> [--dir dir] [--dry-run]", progName, progName, progName)
@@ -110,6 +112,27 @@ func newAddCommand() *cobra.Command {
 	}
 	cmd.AddCommand(newAddModuleCommand(), newAddCommandSubcommand())
 	return cmd
+}
+
+// addHelp lists the embedded catalog rather than maintaining a second manual
+// capability list that could go stale when a template capability is added.
+func addHelp() string {
+	var b strings.Builder
+	b.WriteString("Add a capability to an existing project.\n\nAvailable capabilities:\n")
+	catalog := template.Load()
+	names, err := catalog.Names()
+	if err != nil {
+		return b.String() + "  (catalog unavailable)\n"
+	}
+	for _, name := range names {
+		capability, err := catalog.Get(name)
+		if err != nil || capability.Kind != template.KindAdd {
+			continue
+		}
+		fmt.Fprintf(&b, "  %-9s %s\n", name, capability.Summary)
+	}
+	b.WriteString("\nRun `weld list` to see installed capabilities in this project.")
+	return b.String()
 }
 
 // newAddModuleCommand builds `weld add module <name>`.
