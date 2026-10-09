@@ -1,11 +1,17 @@
 // Package cli implements the weld command line.
+//
+// The command tree is built with Cobra so the dispatch, help and flag handling
+// match the generated applications' command trees. Run keeps the tool's public
+// shape: it takes the argument vector and the output writers, returns a non-nil
+// error on failure, and never prints an error itself, so the caller reports it
+// exactly once.
 package cli
 
 import (
-	"flag"
 	"fmt"
 	"io"
-	"strings"
+
+	"github.com/spf13/cobra"
 
 	weldtemplate "github.com/Xwudao/weld-template"
 	"github.com/Xwudao/weld/internal/project"
@@ -19,55 +25,146 @@ const (
 	version  = "0.1.0"
 )
 
-// Run executes a weld invocation and returns a non-nil error on failure.
+// Run executes a weld invocation and returns a non-nil error on failure. It
+// neither prints the error nor exits: main reports a returned error once and
+// sets the exit status, so the command tree stays silent here.
 func Run(args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
-		printUsage(stdout)
-		return nil
+	root := newRootCommand()
+	root.SetArgs(args)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	return root.Execute()
+}
+
+// newRootCommand builds the root command with every weld command attached.
+func newRootCommand() *cobra.Command {
+	root := &cobra.Command{
+		Use:   progName,
+		Short: "progressive Go scaffold",
+		Long:  usageLong,
+		// main reports a failed command once, through its own error writer, so
+		// the command tree stays silent here: no "Error:" line and no usage
+		// dump on a bad flag or a missing argument.
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		// A bare invocation (no subcommand) shows help. Anything else that is
+		// not a known command is an unknown-command error, matching the tool's
+		// earlier dispatcher.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return nil
+			}
+			return fmt.Errorf("unknown command %q (run: %s help)", args[0], progName)
+		},
+		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	switch args[0] {
-	case "new":
-		return runNew(args[1:], stdout)
-	case "add":
-		return runAdd(args[1:], stdout)
-	case "list", "ls":
-		return runList(args[1:], stdout)
-	case "skills":
-		return runSkills(args[1:], stdout)
-	case "version", "--version", "-v":
-		fmt.Fprintf(stdout, "%s %s (templates %s)\n", progName, version, weldtemplate.Version)
-		return nil
-	case "help", "--help", "-h":
-		printUsage(stdout)
-		return nil
-	default:
-		return fmt.Errorf("unknown command %q (run: %s help)", args[0], progName)
+	root.Version = fmt.Sprintf("%s (templates %s)", version, weldtemplate.Version)
+	root.SetVersionTemplate(progName + " {{.Version}}\n")
+	// weld ships no shell-completion generator; keep the command surface to the
+	// commands the tool actually contributes.
+	root.CompletionOptions.DisableDefaultCmd = true
+	// --dir and --dry-run are shared by every project-aware command, so they
+	// are persistent flags defined once here.
+	root.PersistentFlags().String("dir", ".", "project directory")
+	root.PersistentFlags().Bool("dry-run", false, "print the plan without writing")
+	root.AddCommand(
+		newNewCommand(),
+		newAddCommand(),
+		newListCommand(),
+		newSkillsCommand(),
+		newVersionCommand(),
+	)
+	return root
+}
+
+// newNewCommand builds `weld new`.
+func newNewCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "new <name>",
+		Short: "create a minimal Go CLI project",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("usage: %s new <name> [--module path] [--dir dir] [--dry-run]", progName)
+			}
+			return nil
+		},
+		RunE: runNew,
+	}
+	cmd.Flags().String("module", "", "Go module path (default example.com/<name>)")
+	return cmd
+}
+
+// newAddCommand builds `weld add`, whose `module` subcommand is separate from
+// the additive capability set.
+func newAddCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "add <capability>",
+		Short: "additively extend an existing project in place",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("usage: %s add <capability> [--dir dir] [--dry-run]\n       %s add module <name> [--dir dir] [--dry-run]", progName, progName)
+			}
+			return nil
+		},
+		RunE: runAdd,
+	}
+	cmd.AddCommand(newAddModuleCommand())
+	return cmd
+}
+
+// newAddModuleCommand builds `weld add module <name>`.
+func newAddModuleCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "module <name>",
+		Short: "add an HTTP business module under internal/modules/<name>",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("usage: %s add module <name> [--dir dir] [--dry-run]", progName)
+			}
+			return nil
+		},
+		RunE: runAddModule,
 	}
 }
 
-func printUsage(w io.Writer) {
-	fmt.Fprintf(w, `%s - progressive Go scaffold
+// newListCommand builds `weld list` (alias `ls`).
+func newListCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "show available capabilities and, inside a project, what is installed",
+		RunE:    runList,
+	}
+}
 
-Usage:
-  %s new <name> [--module path] [--dir dir] [--dry-run]
-      Create a minimal Go CLI project.
+// newSkillsCommand builds `weld skills`.
+func newSkillsCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "skills",
+		Short: "generate the project's agent skill file",
+		RunE:  runSkills,
+	}
+}
 
-  %s add <capability> [--dir dir] [--dry-run]
-      Additively extend an existing project in place.
+// newVersionCommand builds the version command. The root's --version/-v flag
+// prints the same line, so `weld version`, `weld --version` and `weld -v`
+// agree.
+func newVersionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "print the version",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s %s (templates %s)\n", progName, version, weldtemplate.Version)
+			return nil
+		},
+	}
+}
 
-  %s add module <name> [--dir dir] [--dry-run]
-      Add an HTTP business module under internal/modules/<name> wired to
-      /api/<name>; installs http and config automatically when absent.
-
-  %s list [--dir dir]
-      Show available capabilities and, when inside a project, what is installed.
-
-  %s skills [--dir dir] [--dry-run]
-      Generate the project's .agents/skills/weld/SKILL.md, a project-specific
-      guide to the installed capabilities for coding agents.
-
-  %s version
-  %s help
+// usageLong is the help body. Cobra prints it above the generated usage and
+// command list, so it explains the capability and module set rather than the
+// command names.
+const usageLong = `weld builds a minimal Go CLI and then extends that same project in
+place, one capability at a time.
 
 Capabilities:
   base   (scaffold) minimal Go CLI on a Cobra command tree with a log/slog
@@ -116,35 +213,35 @@ installed, and it raises the project's Go floor to 1.25.
 Every file a capability writes is recorded in the project manifest (weld.json)
 with the capability and version that produced it. The skills command writes
 .agents/skills/weld/SKILL.md from that manifest and refuses to overwrite the
-file once you edit it.
-`, progName, progName, progName, progName, progName, progName, progName, progName)
-}
+file once you edit it.`
 
-func runNew(args []string, stdout io.Writer) error {
-	flags := flag.NewFlagSet("new", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	module := flags.String("module", "", "Go module path (default example.com/<name>)")
-	dir := flags.String("dir", ".", "directory to create the project in")
-	dryRun := flags.Bool("dry-run", false, "print the plan without writing")
-	positional, err := parseArgs(flags, args)
+// runNew plans and applies `weld new`.
+func runNew(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	module, err := cmd.Flags().GetString("module")
 	if err != nil {
 		return err
 	}
-	if len(positional) != 1 {
-		return fmt.Errorf("usage: %s new <name> [--module path] [--dir dir] [--dry-run]", progName)
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
 	}
 
 	result, err := scaffold.Create(scaffold.Request{
-		Dir:     *dir,
-		Name:    positional[0],
-		Module:  *module,
+		Dir:     dir,
+		Name:    args[0],
+		Module:  module,
 		Version: version,
 		Catalog: template.Load(),
 	})
 	if err != nil {
 		return err
 	}
-	if *dryRun {
+	if dryRun {
 		printResult(stdout, result, true)
 		return nil
 	}
@@ -156,28 +253,47 @@ func runNew(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runAdd(args []string, stdout io.Writer) error {
-	flags := flag.NewFlagSet("add", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	dir := flags.String("dir", ".", "project directory")
-	dryRun := flags.Bool("dry-run", false, "print the plan without writing")
-	positional, err := parseArgs(flags, args)
+// runAdd plans and applies `weld add <capability>`.
+func runAdd(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
 	if err != nil {
 		return err
 	}
-	var result *scaffold.Result
-	switch {
-	case len(positional) == 2 && positional[0] == "module":
-		result, err = scaffold.AddModule(scaffold.Request{Dir: *dir, Catalog: template.Load()}, positional[1])
-	case len(positional) == 1 && positional[0] != "module":
-		result, err = scaffold.Add(scaffold.Request{Dir: *dir, Catalog: template.Load()}, positional[0])
-	default:
-		return fmt.Errorf("usage: %s add <capability> [--dir dir] [--dry-run]\n       %s add module <name> [--dir dir] [--dry-run]", progName, progName)
-	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
 	if err != nil {
 		return err
 	}
-	if *dryRun {
+
+	result, err := scaffold.Add(scaffold.Request{Dir: dir, Catalog: template.Load()}, args[0])
+	if err != nil {
+		return err
+	}
+	return applyAddResult(stdout, result, dryRun)
+}
+
+// runAddModule plans and applies `weld add module <name>`.
+func runAddModule(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+
+	result, err := scaffold.AddModule(scaffold.Request{Dir: dir, Catalog: template.Load()}, args[0])
+	if err != nil {
+		return err
+	}
+	return applyAddResult(stdout, result, dryRun)
+}
+
+// applyAddResult prints an add plan and, unless it is a dry run, applies it.
+func applyAddResult(stdout io.Writer, result *scaffold.Result, dryRun bool) error {
+	if dryRun {
 		printResult(stdout, result, true)
 		return nil
 	}
@@ -191,11 +307,12 @@ func runAdd(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runList(args []string, stdout io.Writer) error {
-	flags := flag.NewFlagSet("list", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	dir := flags.String("dir", ".", "project directory")
-	if _, err := parseArgs(flags, args); err != nil {
+// runList prints the capability catalog and, inside a project, what is
+// installed.
+func runList(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
 		return err
 	}
 	catalog := template.Load()
@@ -203,7 +320,7 @@ func runList(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	manifest, loadErr := project.Load(*dir)
+	manifest, loadErr := project.Load(dir)
 
 	fmt.Fprintln(stdout, "Available capabilities:")
 	for _, name := range names {
@@ -218,7 +335,7 @@ func runList(args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "  %s %-6s v%-7s %-6s %s\n", mark, capability.Name, capability.Version, capability.Kind, capability.Summary)
 	}
 	if loadErr != nil {
-		fmt.Fprintf(stdout, "\nNo weld project in %s (run: %s new <name>)\n", *dir, progName)
+		fmt.Fprintf(stdout, "\nNo weld project in %s (run: %s new <name>)\n", dir, progName)
 		return nil
 	}
 	fmt.Fprintf(stdout, "\nInstalled in %s:\n", manifest.Name)
@@ -232,7 +349,7 @@ func runList(args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "  * %-8s v%s (applied %s)\n", module.Name, module.Version, module.AppliedAt)
 		}
 	}
-	if drift := manifest.Drift(*dir); len(drift) > 0 {
+	if drift := manifest.Drift(dir); len(drift) > 0 {
 		fmt.Fprintf(stdout, "\n%d managed file(s) changed since install:\n", len(drift))
 		for _, item := range drift {
 			fmt.Fprintf(stdout, "  %s (%s)\n", item.Path, item.Reason)
@@ -241,20 +358,23 @@ func runList(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runSkills(args []string, stdout io.Writer) error {
-	flags := flag.NewFlagSet("skills", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	dir := flags.String("dir", ".", "project directory")
-	dryRun := flags.Bool("dry-run", false, "print the plan without writing")
-	if _, err := parseArgs(flags, args); err != nil {
-		return err
-	}
-
-	manifest, err := project.Load(*dir)
+// runSkills generates or refreshes the project's agent skill file.
+func runSkills(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
 	if err != nil {
 		return err
 	}
-	result, err := skills.Generate(*dir, manifest, template.Load())
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+
+	manifest, err := project.Load(dir)
+	if err != nil {
+		return err
+	}
+	result, err := skills.Generate(dir, manifest, template.Load())
 	if err != nil {
 		return err
 	}
@@ -263,11 +383,11 @@ func runSkills(args []string, stdout io.Writer) error {
 		if result.Existing {
 			action = "update"
 		}
-		if *dryRun {
+		if dryRun {
 			fmt.Fprintf(stdout, "Plan (1 change(s), dry run):\n  %s %s\n", action, result.Path)
 			return nil
 		}
-		if err := result.Apply(*dir); err != nil {
+		if err := result.Apply(dir); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "Applied 1 change(s):\n  %s %s\n", action, result.Path)
@@ -275,48 +395,6 @@ func runSkills(args []string, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "%s is up to date.\n", result.Path)
 	return nil
-}
-
-// parseArgs parses flags even when they follow positional arguments, which the
-// standard flag package does not support on its own. It returns the positional
-// arguments.
-func parseArgs(flags *flag.FlagSet, args []string) ([]string, error) {
-	var flagArgs, positional []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--":
-			positional = append(positional, args[i+1:]...)
-			return tails(flags, flagArgs, positional)
-		case strings.HasPrefix(arg, "-") && arg != "-":
-			flagArgs = append(flagArgs, arg)
-			name := strings.TrimLeft(arg, "-")
-			if strings.ContainsRune(name, '=') {
-				continue
-			}
-			spec := flags.Lookup(name)
-			if spec == nil {
-				continue // let Parse report the unknown flag
-			}
-			if boolFlag, ok := spec.Value.(interface{ IsBoolFlag() bool }); ok && boolFlag.IsBoolFlag() {
-				continue
-			}
-			if i+1 < len(args) {
-				i++
-				flagArgs = append(flagArgs, args[i])
-			}
-		default:
-			positional = append(positional, arg)
-		}
-	}
-	return tails(flags, flagArgs, positional)
-}
-
-func tails(flags *flag.FlagSet, flagArgs, positional []string) ([]string, error) {
-	if err := flags.Parse(flagArgs); err != nil {
-		return nil, err
-	}
-	return positional, nil
 }
 
 func printResult(stdout io.Writer, result *scaffold.Result, dryRun bool) {

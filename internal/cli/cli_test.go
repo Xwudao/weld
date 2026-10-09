@@ -481,3 +481,134 @@ func TestAddModuleDryRunWritesNothing(t *testing.T) {
 		t.Fatal("dry run wrote the module")
 	}
 }
+
+// TestBareInvocationShowsHelpToStdout locks the Cobra root behavior: a bare
+// invocation shows help on stdout and succeeds rather than failing on a
+// missing subcommand.
+func TestBareInvocationShowsHelpToStdout(t *testing.T) {
+	out, err := run(t)
+	if err != nil {
+		t.Fatalf("bare invocation: %v", err)
+	}
+	for _, want := range []string{"Usage:", progName, "Capabilities:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("bare invocation help is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestHelpFlagsReturnNilAndPrintHelp covers `help`, `--help` and `-h`: each
+// must print help and report success, so the migration keeps the earlier help
+// semantics alongside the new Cobra tree.
+func TestHelpFlagsReturnNilAndPrintHelp(t *testing.T) {
+	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}} {
+		out, err := run(t, args...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if !strings.Contains(out, "Capabilities:") {
+			t.Errorf("%v help output = %q", args, out)
+		}
+	}
+}
+
+// TestVersionFlagAgreesWithVersionCommand proves `weld version`, `weld
+// --version` and `weld -v` print one line, so the Cobra version flag matches
+// the explicit subcommand.
+func TestVersionFlagAgreesWithVersionCommand(t *testing.T) {
+	command, err := run(t, "version")
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	for _, args := range [][]string{{"--version"}, {"-v"}} {
+		out, err := run(t, args...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if out != command {
+			t.Errorf("%v output = %q, want %q", args, out, command)
+		}
+	}
+}
+
+// TestListAlias covers the `ls` alias the earlier dispatcher accepted.
+func TestListAlias(t *testing.T) {
+	long, err := run(t, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	short, err := run(t, "ls")
+	if err != nil {
+		t.Fatalf("ls: %v", err)
+	}
+	if short != long {
+		t.Errorf("ls output = %q, want the list output %q", short, long)
+	}
+}
+
+// TestInterspersedFlags exercises the flag handling the migration must keep:
+// flags may follow or precede the positional argument, and a dry run reaches
+// the same plan either way.
+func TestInterspersedFlags(t *testing.T) {
+	root := t.TempDir()
+	before, err := run(t, "new", "--dir", root, "--module", "example.com/demo", "demo", "--dry-run")
+	if err != nil {
+		t.Fatalf("flags before positional: %v", err)
+	}
+	after, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root, "--dry-run")
+	if err != nil {
+		t.Fatalf("flags after positional: %v", err)
+	}
+	if before != after {
+		t.Errorf("plan depends on flag position:\nbefore=%q\nafter=%q", before, after)
+	}
+	if !strings.Contains(after, "dry run") {
+		t.Errorf("dry-run output = %q", after)
+	}
+	if _, err := os.Stat(filepath.Join(root, "demo")); !os.IsNotExist(err) {
+		t.Fatal("a dry run created the project")
+	}
+}
+
+// TestUnknownCommandError locks the one-error message shape: Run returns the
+// error rather than printing it, and it names the offending command and the
+// help suggestion.
+func TestUnknownCommandError(t *testing.T) {
+	_, err := run(t, "bogus")
+	if err == nil {
+		t.Fatal("expected an error for an unknown command")
+	}
+	if !strings.Contains(err.Error(), `unknown command "bogus"`) || !strings.Contains(err.Error(), "weld help") {
+		t.Errorf("unknown command error = %v", err)
+	}
+}
+
+// TestUsageErrorsNameTheCommand covers the argument validation the earlier
+// dispatcher reported: a missing name, capability or module name is a usage
+// error, not a panic or a silent no-op.
+func TestUsageErrorsNameTheCommand(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"new"}, "weld new <name>"},
+		{[]string{"new", "a", "b", "--dir", root}, "weld new <name>"},
+		{[]string{"add", "--dir", dir}, "weld add <capability>"},
+		{[]string{"add", "module", "--dir", dir}, "weld add module <name>"},
+	}
+	for _, tc := range cases {
+		_, err := run(t, tc.args...)
+		if err == nil {
+			t.Errorf("%v: expected a usage error", tc.args)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%v error = %v, want it to mention %q", tc.args, err, tc.want)
+		}
+	}
+}

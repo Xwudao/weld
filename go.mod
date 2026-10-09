@@ -2,6 +2,14 @@ module github.com/Xwudao/weld
 
 go 1.23
 
-require github.com/Xwudao/weld-template v0.0.0
+require (
+	github.com/Xwudao/weld-template v0.0.0
+	github.com/spf13/cobra v1.9.1
+)
+
+require (
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/spf13/pflag v1.0.6 // indirect
+)
 
 replace github.com/Xwudao/weld-template => ../weld-template
