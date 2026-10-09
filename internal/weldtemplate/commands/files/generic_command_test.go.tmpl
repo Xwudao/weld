@@ -1,12 +1,19 @@
 package __modname__
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	"__module__/internal/commandkit"
 )
 
-// stubLifecycle records that the graph was started and stopped.
+// stubLifecycle records that the resolved graph was started and stopped.
 type stubLifecycle struct {
 	started bool
 	stopped bool
@@ -15,21 +22,25 @@ type stubLifecycle struct {
 func (l *stubLifecycle) Start(context.Context) error { l.started = true; return nil }
 func (l *stubLifecycle) Stop(context.Context) error  { l.stopped = true; return nil }
 
-// stubBuild returns a Deps and a lifecycle without resolving any real graph.
+// stubBuild returns a Deps and a lifecycle without resolving any real graph. The
+// logger is discarded so the worked-example status subcommand can use it.
 func stubBuild() (*Deps, *stubLifecycle, error) {
-	return &Deps{}, &stubLifecycle{}, nil
+	return &Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, &stubLifecycle{}, nil
 }
 
 // TestNewCommandBuildsGroup checks the generated factory builds a real command
-// group: it carries the expected name and rejects an unknown subcommand instead
-// of silently succeeding.
+// group: it carries the expected name, exposes the worked-example subcommand and
+// rejects an unknown subcommand instead of silently succeeding.
 func TestNewCommandBuildsGroup(t *testing.T) {
-	cmd := NewCommand(func(context.Context) (*Deps, Lifecycle, error) {
+	cmd := NewCommand(func(context.Context) (*Deps, commandkit.Lifecycle, error) {
 		deps, lifecycle, err := stubBuild()
 		return deps, lifecycle, err
 	})
 	if cmd.Name() != "__modname__" {
 		t.Fatalf("command name = %q, want %q", cmd.Name(), "__modname__")
+	}
+	if findCommand(cmd, "status") == nil {
+		t.Fatal("the worked-example status subcommand is missing")
 	}
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
@@ -44,7 +55,7 @@ func TestNewCommandBuildsGroup(t *testing.T) {
 // stays free of the group's dependencies.
 func TestNewCommandDoesNotResolveTheGraph(t *testing.T) {
 	resolved := false
-	cmd := NewCommand(func(context.Context) (*Deps, Lifecycle, error) {
+	cmd := NewCommand(func(context.Context) (*Deps, commandkit.Lifecycle, error) {
 		resolved = true
 		deps, lifecycle, err := stubBuild()
 		return deps, lifecycle, err
@@ -58,4 +69,37 @@ func TestNewCommandDoesNotResolveTheGraph(t *testing.T) {
 	if resolved {
 		t.Fatal("building the command or showing help resolved the graph")
 	}
+}
+
+// TestStatusResolvesAndStopsTheGraph proves the worked-example subcommand
+// resolves the graph, uses the injected dependency and stops the lifecycle.
+func TestStatusResolvesAndStopsTheGraph(t *testing.T) {
+	lifecycle := &stubLifecycle{}
+	cmd := NewCommand(func(context.Context) (*Deps, commandkit.Lifecycle, error) {
+		deps, _, err := stubBuild()
+		return deps, lifecycle, err
+	})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"status"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !lifecycle.started || !lifecycle.stopped {
+		t.Fatalf("lifecycle started/stopped = %v/%v, want true/true", lifecycle.started, lifecycle.stopped)
+	}
+	if !strings.Contains(out.String(), "ok") {
+		t.Fatalf("status output = %q, want the worked-example line", out.String())
+	}
+}
+
+// findCommand returns the named direct subcommand, or nil.
+func findCommand(cmd *cobra.Command, name string) *cobra.Command {
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == name {
+			return sub
+		}
+	}
+	return nil
 }

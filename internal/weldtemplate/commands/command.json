@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "generic": {
     "files": [
       { "path": "internal/commands/__modname__/command.go", "source": "files/generic_command.go.tmpl" },

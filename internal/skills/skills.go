@@ -280,7 +280,7 @@ var curatedNotes = map[string]string{
 	"web":     "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
 	"api":     "JSON HTTP API in `internal/api`: typed, self-validating DTOs and routes declared once with the `internal/httpx` typed helpers, writing the `{code,msg,data}` envelope. The default `Service` is an in-memory development demo whose items are lost on restart; it is not persistence.",
 	"db":      "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
-	"loom":    "compile-time dependency injection in `internal/di`, automatically installed for every capability and command beyond the bare CLI. All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage bindings. Loom raises the project's Go directive to 1.25.",
+	"loom":    "compile-time dependency injection in `internal/di`, automatically installed for every capability and command beyond the bare CLI. All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage bindings. A command group resolves its graph lazily through the shared `internal/commandkit` seam, so a subcommand injects a dependency by adding a field to its `Deps` and a parameter to `NewDeps` (a provider already in `commonModule` needs no graph edit; a new one needs `loom.Provide(...)` in `internal/di/<name>_graph.go`). Loom raises the project's Go directive to 1.25.",
 	"redis":   "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
 	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs, unique names, overlap skipping, panic recovery and graceful stop. Cron installs HTTP and follows only the Loom `serve` lifecycle, never a short command. `internal/cron/register.go` is the stable job-registration file; installing cron schedules nothing.",
 	"mail":    "opt-in SMTP sender in `internal/mailsender`: one connection per `Send` with an explicit TLS policy and header-injection guards. Nothing generated imports it, so serving sends no mail; `internal/di/mail_provider.go` is the stable Loom seam.",
@@ -375,7 +375,10 @@ func writeCommands(b *strings.Builder, manifest *project.Manifest) {
 	b.WriteString("`app.RegisterCommand` in `internal/app/<name>_command.go`. weld writes them\n")
 	b.WriteString("once and never regenerates them, so they are yours to edit. Each group has\n")
 	b.WriteString("an editable `internal/di/<name>_graph.go` and resolves its dependencies only\n")
-	b.WriteString("when a real subcommand runs; help and unrelated commands start no server.\n\n")
+	b.WriteString("when a real subcommand runs; help and unrelated commands start no server. It\n")
+	b.WriteString("resolves the graph lazily through the shared `internal/commandkit` seam, so a\n")
+	b.WriteString("subcommand injects a dependency by adding a field to `Deps` and a parameter to\n")
+	b.WriteString("`NewDeps` (a provider already in `commonModule` needs no graph edit).\n\n")
 	for _, command := range manifest.Commands {
 		if manifest.HasModule(command.Name) {
 			fmt.Fprintf(b, "- **%s** v%s — `internal/commands/%s`, backed by the `%s` module's Service.\n", command.Name, command.Version, command.Name, command.Name)

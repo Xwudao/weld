@@ -1,14 +1,16 @@
 package __modname__
-{{if .Caps.Has "loom"}}
 
 import (
 	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
+	"__module__/internal/commandkit"
 	module "__module__/internal/modules/__modname__"
 )
 
@@ -21,18 +23,27 @@ type stubLifecycle struct {
 func (l *stubLifecycle) Start(context.Context) error { l.started = true; return nil }
 func (l *stubLifecycle) Stop(context.Context) error  { l.stopped = true; return nil }
 
+// stubDeps builds the dependency set the real command graph injects, with a
+// discarded logger so the worked-example status subcommand can use it.
+func stubDeps() *Deps {
+	return NewDeps(module.NewDemoService(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
 // TestNewCommandBuildsGroup checks the generated factory builds the command
-// group from the module's Service, exposes the focused greet seam, and rejects
-// an unknown subcommand.
+// group from the module's Service, exposes the greet seam, and rejects an
+// unknown subcommand.
 func TestNewCommandBuildsGroup(t *testing.T) {
-	cmd := NewCommand(func(context.Context) (*Deps, Lifecycle, error) {
-		return NewDeps(module.NewDemoService()), &stubLifecycle{}, nil
+	cmd := NewCommand(func(context.Context) (*Deps, commandkit.Lifecycle, error) {
+		return stubDeps(), &stubLifecycle{}, nil
 	})
 	if cmd.Name() != "__modname__" {
 		t.Fatalf("command name = %q, want %q", cmd.Name(), "__modname__")
 	}
 	if findCommand(cmd, "greet") == nil {
 		t.Fatal("the focused greet seam is missing")
+	}
+	if findCommand(cmd, "status") == nil {
+		t.Fatal("the worked-example status subcommand is missing")
 	}
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
@@ -46,11 +57,12 @@ func TestNewCommandBuildsGroup(t *testing.T) {
 // calls the module's Service through it, and stops the lifecycle afterwards.
 func TestGreetUsesTheResolvedSeam(t *testing.T) {
 	lifecycle := &stubLifecycle{}
-	cmd := NewCommand(func(context.Context) (*Deps, Lifecycle, error) {
-		return NewDeps(module.NewDemoService()), lifecycle, nil
+	cmd := NewCommand(func(context.Context) (*Deps, commandkit.Lifecycle, error) {
+		return stubDeps(), lifecycle, nil
 	})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"greet", "Ada"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("greet: %v", err)
@@ -63,58 +75,26 @@ func TestGreetUsesTheResolvedSeam(t *testing.T) {
 	}
 }
 
-// findCommand returns the named direct subcommand, or nil.
-func findCommand(cmd *cobra.Command, name string) *cobra.Command {
-	for _, sub := range cmd.Commands() {
-		if sub.Name() == name {
-			return sub
-		}
-	}
-	return nil
-}
-{{- else}}
-
-import (
-	"bytes"
-	"strings"
-	"testing"
-
-	"github.com/spf13/cobra"
-
-	module "__module__/internal/modules/__modname__"
-)
-
-// TestNewCommandBuildsGroup checks the generated factory builds the command
-// group from the module's Service, exposes the focused greet seam, and rejects
-// an unknown subcommand.
-func TestNewCommandBuildsGroup(t *testing.T) {
-	cmd := NewCommand(module.NewDemoService())
-	if cmd.Name() != "__modname__" {
-		t.Fatalf("command name = %q, want %q", cmd.Name(), "__modname__")
-	}
-	if findCommand(cmd, "greet") == nil {
-		t.Fatal("the focused greet seam is missing")
-	}
-	cmd.SilenceErrors = true
-	cmd.SilenceUsage = true
-	cmd.SetArgs([]string{"definitely-not-a-subcommand"})
-	if err := cmd.Execute(); err == nil {
-		t.Fatal("an unknown subcommand unexpectedly succeeded")
-	}
-}
-
-// TestGreetCallsTheService proves the focused subcommand calls the injected
-// module Service.
-func TestGreetCallsTheService(t *testing.T) {
-	cmd := NewCommand(module.NewDemoService())
+// TestStatusUsesAnInjectedDependency proves the worked example resolves an
+// injected field other than the module Service, so the pattern for adding one is
+// exercised.
+func TestStatusUsesAnInjectedDependency(t *testing.T) {
+	lifecycle := &stubLifecycle{}
+	cmd := NewCommand(func(context.Context) (*Deps, commandkit.Lifecycle, error) {
+		return stubDeps(), lifecycle, nil
+	})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"greet", "Ada"})
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"status"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("greet: %v", err)
+		t.Fatalf("status: %v", err)
 	}
-	if !strings.Contains(out.String(), "Ada") {
-		t.Fatalf("greet output = %q, want it to greet Ada", out.String())
+	if !lifecycle.started || !lifecycle.stopped {
+		t.Fatalf("lifecycle started/stopped = %v/%v, want true/true", lifecycle.started, lifecycle.stopped)
+	}
+	if !strings.Contains(out.String(), "ok") {
+		t.Fatalf("status output = %q, want the worked-example line", out.String())
 	}
 }
 
@@ -127,4 +107,3 @@ func findCommand(cmd *cobra.Command, name string) *cobra.Command {
 	}
 	return nil
 }
-{{- end}}

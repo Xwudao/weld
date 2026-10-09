@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"__module__/internal/commands/__modname__"
+	"__module__/internal/commandkit"
 	"__module__/internal/di"
 )
 
@@ -22,7 +23,7 @@ func init() {
 }
 
 func new__ModName__Command() *cobra.Command {
-	return __modname__.NewCommand(func(ctx context.Context) (*__modname__.Deps, __modname__.Lifecycle, error) {
+	return __modname__.NewCommand(func(ctx context.Context) (*__modname__.Deps, commandkit.Lifecycle, error) {
 		deps, lifecycle, err := di.Init__ModName__(ctx)
 		if err != nil {
 			return nil, nil, err

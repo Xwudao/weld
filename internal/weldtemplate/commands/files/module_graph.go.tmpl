@@ -37,6 +37,7 @@ var __modname__Graph = loom.Graph[*command.Deps](
 	commonModule,
 	// The module's Service, the same stable factory the HTTP graph binds.
 	loom.Provide(module.NewService),
-	// The command's dependency root, which consumes the module Service.
+	// The command's dependency root, which consumes the module Service and any
+	// further dependency added to Deps.
 	loom.Provide(command.NewDeps),
 )

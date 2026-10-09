@@ -454,11 +454,15 @@ non-business or multi-business commands:
   rather than in the command graph, a capability installed *after* the command
   graph was written still reaches it — `weld add db` extends `commonModule`,
   and the stable command graph is not rewritten. Loom prunes every provider a
-  subcommand does not consume, so a short command constructs nothing, and the
-  generated command package does not import the Loom runtime — it resolves the
-  graph through a small `Lifecycle` interface and a bounded `resolve` helper only
-  when a real subcommand runs, so help, `version` and unrelated commands never
-  build it. Each graph keeps its own instance cache, so the HTTP graph and a
+  subcommand does not consume, so a short command constructs nothing beyond what
+  its `Deps` asks for, and the generated command package does not import the Loom
+  runtime — it resolves the graph through the shared `internal/commandkit` seam
+  only when a real subcommand runs, so help, `version` and unrelated commands
+  never build it. Injecting a dependency is a field on `Deps` plus a parameter on
+  `NewDeps`: a provider already in `commonModule` (configuration, logger, and the
+  installed db/redis/mail/storage bindings) needs no graph edit, and the
+  generated `status` subcommand is the worked example. Each graph keeps its own
+  instance cache, so the HTTP graph and a
   command graph never share a process-wide singleton. The graph is written from
   the stable command template; a generated file that already exists and was
   edited is refused rather than overwritten.

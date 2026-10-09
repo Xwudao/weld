@@ -248,7 +248,8 @@ Modules:
   Adding it to a module that already exists writes only the command files and
   never rewrites your module service or handler. With Loom installed the group
   carries the module's Service through a stable command graph
-  (internal/di/<name>_graph.go) and resolves it lazily on a real subcommand.
+  (internal/di/<name>_graph.go) and resolves it lazily on a real subcommand
+  through the shared internal/commandkit seam.
 
 Commands:
   add command <name> generates an independent root command group in
@@ -261,6 +262,8 @@ Commands:
   internal/di/<name>_graph.go, and a real subcommand resolves it lazily so
   help and unrelated commands never construct its dependencies; Loom installed
   after the command upgrades it in place without overwriting an edited file.
+  To inject a dependency, add a field to the group's Deps and a parameter to
+  NewDeps (a provider already in the shared module needs no graph edit).
   A name may be a command or a module, never both: serve, help and version are
   reserved, and a name already used by a module is rejected.
 

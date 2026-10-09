@@ -100,16 +100,19 @@ stable command graph. Loom prunes every provider the root does not consume, so a
 short command constructs nothing beyond what its subcommands ask for, and there
 is no process-wide singleton: each graph keeps its own instance cache.
 
-The generated command package does not import the Loom runtime. It defines a
-small `Lifecycle` interface (`Start`/`Stop`) and resolves the graph only when a
-real subcommand runs, through a `resolve` helper that starts the lifecycle, runs
-the subcommand, stops it within a bounded deadline and joins any teardown error.
-Help, `version` and every unrelated command never build the graph.
+The generated command package does not import the Loom runtime. It resolves the
+graph through `internal/commandkit`, the shared seam shipped with Loom:
+`commandkit.Run` builds and starts the graph only when a real subcommand runs,
+runs the subcommand, stops the graph within a bounded deadline and joins any
+teardown error. Help, `version` and every unrelated command never build the
+graph.
 
 `weld add` regenerates `di.go` for the whole installed set, so the command
 graphs stay stable while `commonModule` grows with the project. To
-consume a shared provider, add it to the command root (`<name>.NewDeps`); it is
-already an available binding through `commonModule`. The server-only
+consume a shared provider, add a field to the command root's `Deps` and a
+parameter to `<name>.NewDeps`; it is already an available binding through
+`commonModule`, so no graph edit is needed. A dependency no provider declares
+needs `loom.Provide(...)` in the command graph. The server-only
 `*cron.Scheduler` is never available to a command.
 
 ### `di_test.go` uses a fake, not `NewService`

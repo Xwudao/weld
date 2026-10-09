@@ -11,100 +11,89 @@
 //
 // internal/app/__modname___command.go supplies Build from the command-specific
 // Loom graph (internal/di/__modname___graph.go). A real subcommand resolves the
-// graph lazily through resolve, so a bare `__modname__`, `help`, `version` and
-// every unrelated command never construct the group's dependencies.
+// graph lazily through internal/commandkit, so a bare `__modname__`, `help`,
+// `version` and every unrelated command never construct the group's
+// dependencies.
 package __modname__
 
 import (
 	"context"
-	"errors"
-	"time"
+	"fmt"
+	"log/slog"
 
 	"github.com/spf13/cobra"
+
+	"__module__/internal/commandkit"
 )
 
-// stopTimeout bounds lifecycle teardown after a subcommand has run, so a
-// provider that registers an OnStop hook cannot hang the command.
-const stopTimeout = 10 * time.Second
-
-// Lifecycle is the start/stop contract of the resolved dependency graph. The
-// generated graph's *loom.Lifecycle satisfies it; this package deliberately
-// does not import the Loom runtime, so the command depends only on Start and
-// Stop.
-type Lifecycle interface {
-	Start(context.Context) error
-	Stop(context.Context) error
+// Deps is the dependency set the group's subcommands consume and the root of the
+// command's Loom graph.
+//
+// Add one field for each dependency a subcommand needs and the matching
+// parameter to NewDeps. There are two cases:
+//
+//   - A dependency the shared commonModule already provides needs nothing else.
+//     That covers *config.Config, *slog.Logger and, when installed,
+//     data.Repository and the Redis, mail and storage bindings: Loom injects
+//     them and prunes them until a subcommand consumes them.
+//   - A dependency no provider declares needs a provider in
+//     internal/di/__modname___graph.go, for example loom.Provide(NewThing), with
+//     the same field here and the same parameter on NewDeps.
+//
+// Logger is the worked example: the status subcommand below reads it, so
+// resolving the graph constructs the shared logger and nothing else. Replace it
+// with your own dependency, or delete it and its subcommand.
+type Deps struct {
+	Logger *slog.Logger
 }
 
-// Build resolves the group's dependencies on demand. internal/app delegates it
-// to the generated internal/di initializer, so nothing here constructs the
-// graph.
-type Build func(context.Context) (*Deps, Lifecycle, error)
-
-// Deps is the dependency set the group's subcommands consume. It starts empty:
-// add a field for each service a subcommand needs, take it as a parameter on
-// NewDeps, and declare the matching provider in
-// internal/di/__modname___graph.go. Loom constructs only what resolve asks for,
-// so an unused provider is pruned rather than built.
-type Deps struct{}
-
-// NewDeps builds the dependency set. Add parameters here as you add fields to
-// Deps; the generated graph already declares the shared application providers
-// (configuration, logger and the installed db, redis, mail and storage
-// bindings) for them to consume.
-func NewDeps() *Deps { return &Deps{} }
-
-// group is the command group and its lazy dependency builder.
-type group struct {
-	*cobra.Command
-	build Build
-}
+// NewDeps builds the dependency set from the dependencies the graph injects. Add
+// one parameter per field added to Deps; the graph follows the signature
+// automatically, so no other file changes.
+func NewDeps(logger *slog.Logger) *Deps { return &Deps{Logger: logger} }
 
 // NewCommand builds the __modname__ command group from a lazy dependency
 // builder. The builder is not called here: a subcommand resolves it through
-// g.resolve on execution, so building the root command (or showing help) never
-// constructs the group's dependencies.
-func NewCommand(build Build) *cobra.Command {
-	g := &group{
-		Command: &cobra.Command{
-			Use:   "__modname__",
-			Short: "the __modname__ command group",
-			Args:  cobra.NoArgs,
-			RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
-		},
-		build: build,
+// commandkit.Run on execution, so building the root command (or showing help)
+// never constructs the group's dependencies.
+func NewCommand(build commandkit.Build[*Deps]) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "__modname__",
+		Short: "the __modname__ command group",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	return g.Command
+	root.AddCommand(newStatusCommand(build))
+	return root
 }
 
-// resolve builds the group's graph, starts it, runs fn with the resolved
-// dependencies, and stops it within a bounded deadline, joining any teardown
-// failure onto fn's error. Add a subcommand whose RunE calls it:
+// newStatusCommand is the worked example for talking to a dependency: it reads
+// Deps.Logger, so it shows how a field added to Deps above flows from the graph
+// through NewDeps into a subcommand. Copy it (and the field) to use your own
+// dependency:
 //
-//	RunE: func(cmd *cobra.Command, args []string) error {
-//		return g.resolve(cmd.Context(), func(ctx context.Context, deps *Deps) error {
-//			// use deps, then return nil
-//			return nil
-//		})
+//	func newExampleCommand(build commandkit.Build[*Deps]) *cobra.Command {
+//		return &cobra.Command{
+//			Use: "example",
+//			RunE: func(cmd *cobra.Command, args []string) error {
+//				return commandkit.Run(cmd.Context(), build, func(ctx context.Context, deps *Deps) error {
+//					// use ctx and deps, then return nil
+//					return nil
+//				})
+//			},
+//		}
 //	}
-func (g *group) resolve(ctx context.Context, fn func(context.Context, *Deps) error) (err error) {
-	deps, lifecycle, err := g.build(ctx)
-	if err != nil {
-		return err
+func newStatusCommand(build commandkit.Build[*Deps]) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "report through the resolved dependency graph",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return commandkit.Run(cmd.Context(), build, func(ctx context.Context, deps *Deps) error {
+				deps.Logger.Info("__modname__ status", "graph", "resolved")
+				fmt.Fprintln(cmd.OutOrStdout(), "__modname__ ok")
+				return nil
+			})
+		},
 	}
-	// Start the resolved graph before use. A failed start still gets a bounded
-	// stop of whatever started, and both errors are preserved.
-	if err := lifecycle.Start(ctx); err != nil {
-		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
-		defer cancel()
-		return errors.Join(err, lifecycle.Stop(stopCtx))
-	}
-	// Stop within a bounded deadline and join any stop failure onto the
-	// subcommand's own error, so a failed teardown is never swallowed.
-	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
-		defer cancel()
-		err = errors.Join(err, lifecycle.Stop(stopCtx))
-	}()
-	return fn(ctx, deps)
 }

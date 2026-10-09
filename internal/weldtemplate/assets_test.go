@@ -922,6 +922,8 @@ func TestLoomCapabilityRequiresConfigAndDeclaresGraph(t *testing.T) {
 	for _, want := range []string{
 		"tools/loom/go.mod",
 		"tools/loom/go.sum",
+		"internal/commandkit/commandkit.go",
+		"internal/commandkit/commandkit_test.go",
 	} {
 		if !paths[want] {
 			t.Errorf("loom capability does not ship %s", want)
@@ -1950,7 +1952,8 @@ func TestCommandGraphIsLoomAware(t *testing.T) {
 		}
 	}
 
-	// The generated command package must not import the Loom runtime.
+	// The generated command package must not import the Loom runtime, and it
+	// resolves its graph through the shared internal/commandkit seam instead.
 	for _, source := range []string{"files/generic_command.go.tmpl", "files/module_command.go.tmpl"} {
 		body, err := fs.ReadFile(fsys, path.Join("commands", source))
 		if err != nil {
@@ -1959,6 +1962,34 @@ func TestCommandGraphIsLoomAware(t *testing.T) {
 		if strings.Contains(string(body), "github.com/Xwudao/loom") {
 			t.Errorf("%s imports the Loom runtime; the command package must stay decoupled", source)
 		}
+		if !strings.Contains(string(body), "__module__/internal/commandkit") || !strings.Contains(string(body), "commandkit.Run(") {
+			t.Errorf("%s does not resolve its graph through internal/commandkit", source)
+		}
+	}
+}
+
+// TestCommandkitShipsTheLazySeam guards the shared command/graph seam shipped by
+// the loom capability: the lifecycle interface, the generic build function and
+// the Run that starts, runs and stops the graph, none of which imports Loom.
+func TestCommandkitShipsTheLazySeam(t *testing.T) {
+	body, err := fs.ReadFile(FS(), "capabilities/loom/files/commandkit.go.tmpl")
+	if err != nil {
+		t.Fatalf("read commandkit.go.tmpl: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"type Lifecycle interface",
+		"type Build[D any] func(",
+		"func Run[D any](",
+		"errors.Join(",
+		"context.WithoutCancel(",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("commandkit.go is missing %q", want)
+		}
+	}
+	if strings.Contains(text, "\"github.com/Xwudao/loom\"") {
+		t.Error("commandkit imports Loom; the command package depends on it to avoid that")
 	}
 }
 

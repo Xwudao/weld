@@ -1,6 +1,6 @@
 {
   "name": "loom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "kind": "add",
   "summary": "Compile-time dependency injection: one Loom graph wires the configuration, the logger and the installed bindings, and, once http is installed, the HTTP server and the business modules. Every added capability is a Loom project.",
   "requires": ["config"],
@@ -12,6 +12,8 @@
   "files": [
     { "path": "tools/loom/go.mod", "source": "files/tools/go.mod.tmpl" },
     { "path": "tools/loom/go.sum", "source": "files/tools/go.sum" },
+    { "path": "internal/commandkit/commandkit.go", "source": "files/commandkit.go.tmpl" },
+    { "path": "internal/commandkit/commandkit_test.go", "source": "files/commandkit_test.go.tmpl" },
     { "path": "internal/di/README.md", "source": "files/README.md" }
   ],
   "patches": [

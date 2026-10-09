@@ -8,98 +8,64 @@ package __modname__
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"time"
+	"log/slog"
 
 	"github.com/spf13/cobra"
 
+	"__module__/internal/commandkit"
 	module "__module__/internal/modules/__modname__"
 )
 
-// stopTimeout bounds lifecycle teardown after a subcommand has run, so a
-// provider that registers an OnStop hook cannot hang the command.
-const stopTimeout = 10 * time.Second
-
-// Lifecycle is the start/stop contract of the resolved dependency graph. The
-// generated graph's *loom.Lifecycle satisfies it; this package deliberately
-// does not import the Loom runtime, so the command depends only on Start and
-// Stop.
-type Lifecycle interface {
-	Start(context.Context) error
-	Stop(context.Context) error
-}
-
-// Build resolves the module's dependencies on demand. internal/app delegates it
-// to the generated internal/di initializer, so nothing here constructs the
-// graph.
-type Build func(context.Context) (*Deps, Lifecycle, error)
-
-// Deps is the dependency set the group's subcommands consume. It carries the
-// module's Service; add a field and a NewDeps parameter for anything else a
-// subcommand needs and declare the matching provider in
-// internal/di/__modname___graph.go.
+// Deps is the dependency set the group's subcommands consume and the root of the
+// command's Loom graph.
+//
+// Service is the module's business layer, the same interface the HTTP handler
+// uses, so a subcommand and a route share one implementation. Add one field for
+// each further dependency a subcommand needs and the matching parameter to
+// NewDeps. There are two cases:
+//
+//   - A dependency the shared commonModule already provides needs nothing else.
+//     That covers *config.Config, *slog.Logger and, when installed,
+//     data.Repository and the Redis, mail and storage bindings: Loom injects
+//     them and prunes them until a subcommand consumes them.
+//   - A dependency no provider declares needs a provider in
+//     internal/di/__modname___graph.go, for example loom.Provide(NewThing), with
+//     the same field here and the same parameter on NewDeps.
+//
+// Logger is the worked example: the status subcommand below reads it, so it
+// shows how a second field is added. Drop it if the group does not need it.
 type Deps struct {
 	Service module.Service
+	Logger  *slog.Logger
 }
 
-// NewDeps builds the dependency set from the module's Service. The generated
-// graph provides module.NewService, so Loom constructs the service (and prunes
-// the shared providers this group does not consume) per invocation.
-func NewDeps(service module.Service) *Deps { return &Deps{Service: service} }
-
-// group is the command group and its lazy dependency builder.
-type group struct {
-	*cobra.Command
-	build Build
+// NewDeps builds the dependency set from the dependencies the graph injects.
+// module.NewService is provided by the command graph; the logger comes from the
+// shared commonModule. Add one parameter per field added to Deps.
+func NewDeps(service module.Service, logger *slog.Logger) *Deps {
+	return &Deps{Service: service, Logger: logger}
 }
 
 // NewCommand builds the module's Cobra command group from a lazy dependency
-// builder. A subcommand resolves it through g.resolve on execution, so building
-// the root command (or showing help) never constructs the module's dependencies.
-func NewCommand(build Build) *cobra.Command {
-	g := &group{
-		Command: &cobra.Command{
-			Use:   "__modname__",
-			Short: "the __modname__ business module on the command line",
-			Args:  cobra.NoArgs,
-			RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
-		},
-		build: build,
+// builder. A subcommand resolves it through commandkit.Run on execution, so
+// building the root command (or showing help) never constructs the module's
+// dependencies.
+func NewCommand(build commandkit.Build[*Deps]) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "__modname__",
+		Short: "the __modname__ business module on the command line",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	g.Command.AddCommand(newGreetCommand(g))
-	return g.Command
-}
-
-// resolve builds the group's graph, starts it, runs fn with the resolved
-// dependencies, and stops it within a bounded deadline, joining any teardown
-// failure onto fn's error.
-func (g *group) resolve(ctx context.Context, fn func(context.Context, *Deps) error) (err error) {
-	deps, lifecycle, err := g.build(ctx)
-	if err != nil {
-		return err
-	}
-	// Start the resolved graph before use. A failed start still gets a bounded
-	// stop of whatever started, and both errors are preserved.
-	if err := lifecycle.Start(ctx); err != nil {
-		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
-		defer cancel()
-		return errors.Join(err, lifecycle.Stop(stopCtx))
-	}
-	// Stop within a bounded deadline and join any stop failure onto the
-	// subcommand's own error, so a failed teardown is never swallowed.
-	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
-		defer cancel()
-		err = errors.Join(err, lifecycle.Stop(stopCtx))
-	}()
-	return fn(ctx, deps)
+	root.AddCommand(newGreetCommand(build), newStatusCommand(build))
+	return root
 }
 
 // newGreetCommand is the focused example that demonstrates the seam: it calls
 // the module's Greet through the lazily resolved graph, so the command and the
 // HTTP handler share one Service. Replace or extend it with real subcommands.
-func newGreetCommand(g *group) *cobra.Command {
+func newGreetCommand(build commandkit.Build[*Deps]) *cobra.Command {
 	return &cobra.Command{
 		Use:   "greet [name]",
 		Short: "greet someone through the module's service",
@@ -109,12 +75,31 @@ func newGreetCommand(g *group) *cobra.Command {
 			if len(args) > 0 {
 				name = args[0]
 			}
-			return g.resolve(cmd.Context(), func(ctx context.Context, deps *Deps) error {
+			return commandkit.Run(cmd.Context(), build, func(ctx context.Context, deps *Deps) error {
 				response, err := deps.Service.Greet(ctx, module.Request{Name: name})
 				if err != nil {
 					return err
 				}
 				fmt.Fprintln(cmd.OutOrStdout(), response.Message)
+				return nil
+			})
+		},
+	}
+}
+
+// newStatusCommand is the worked example for adding a dependency: it reads
+// Deps.Logger, so it shows how a field added to Deps above flows from the graph
+// through NewDeps into a subcommand. Copy it (adding the field) to use your own
+// dependency.
+func newStatusCommand(build commandkit.Build[*Deps]) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "report through the resolved dependency graph",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return commandkit.Run(cmd.Context(), build, func(ctx context.Context, deps *Deps) error {
+				deps.Logger.Info("__modname__ status", "module", "__modname__")
+				fmt.Fprintln(cmd.OutOrStdout(), "__modname__ ok")
 				return nil
 			})
 		},

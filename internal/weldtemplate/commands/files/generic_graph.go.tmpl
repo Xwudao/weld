@@ -9,12 +9,12 @@
 // `weld add` regenerates (configuration, logger and the installed
 // db/redis/mail/storage bindings), plus the command's own dependency root. It
 // does not copy those providers, so a capability installed after this file was
-// written still reaches the command. The root consumes none of them until you
-// add a field to __modname__.Deps and a parameter to __modname__.NewDeps, so
-// Loom prunes every provider the command does not use. Resolving the group
-// therefore never constructs the HTTP server, the application root, the cron
-// scheduler or a database pool, and there is no process-wide singleton: each
-// graph keeps its own instance cache.
+// written still reaches the command. The root consumes only the providers the
+// fields on __modname__.Deps name — the worked example asks for the shared
+// logger — so Loom prunes every provider the command does not use. Resolving the
+// group therefore never constructs the HTTP server, the application root, the
+// cron scheduler or a database pool, and there is no process-wide singleton:
+// each graph keeps its own instance cache.
 package di
 
 import (
@@ -34,7 +34,8 @@ var __modname__Graph = loom.Graph[*__modname__.Deps](
 	// them only when the command's root consumes them, and the module never
 	// carries the HTTP server or the cron scheduler.
 	commonModule,
-	// The command's dependency root. Add parameters to
-	// __modname__.NewDeps to consume the shared providers.
+	// The command's dependency root. It consumes the shared providers the fields
+	// on __modname__.Deps name; add a field and a NewDeps parameter to consume
+	// another.
 	loom.Provide(__modname__.NewDeps),
 )

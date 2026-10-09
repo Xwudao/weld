@@ -227,7 +227,7 @@ func TestAddModuleWithCommandGeneratesBoth(t *testing.T) {
 
 	// The command group is backed by the module's own Service and NewService.
 	command := readFile(t, filepath.Join(dir, "internal/commands/widget/command.go"))
-	for _, want := range []string{"module.Service", "func NewDeps(service module.Service)"} {
+	for _, want := range []string{"module.Service", "func NewDeps(service module.Service, logger *slog.Logger)"} {
 		if !strings.Contains(command, want) {
 			t.Errorf("module command is missing %q:\n%s", want, command)
 		}

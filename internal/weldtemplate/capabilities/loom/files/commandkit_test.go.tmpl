@@ -1,0 +1,81 @@
+package commandkit
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+// stubLifecycle records how the graph was driven and can fail either phase.
+type stubLifecycle struct {
+	started  bool
+	stopped  bool
+	startErr error
+	stopErr  error
+}
+
+func (l *stubLifecycle) Start(context.Context) error { l.started = true; return l.startErr }
+func (l *stubLifecycle) Stop(context.Context) error  { l.stopped = true; return l.stopErr }
+
+// TestRunStartsRunsAndStops proves a successful subcommand resolves the graph
+// once, runs with the resolved value, and stops the graph afterwards.
+func TestRunStartsRunsAndStops(t *testing.T) {
+	lifecycle := &stubLifecycle{}
+	build := func(context.Context) (*string, Lifecycle, error) {
+		value := "resolved"
+		return &value, lifecycle, nil
+	}
+	got := ""
+	if err := Run(context.Background(), build, func(_ context.Context, value *string) error {
+		got = *value
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got != "resolved" {
+		t.Fatalf("subcommand saw %q, want the resolved value", got)
+	}
+	if !lifecycle.started || !lifecycle.stopped {
+		t.Fatalf("started/stopped = %v/%v, want true/true", lifecycle.started, lifecycle.stopped)
+	}
+}
+
+// TestRunStopsWhenStartFails proves a failed start still gets a bounded stop of
+// whatever started, with both errors preserved.
+func TestRunStopsWhenStartFails(t *testing.T) {
+	startErr := errors.New("start failed")
+	stopErr := errors.New("stop failed")
+	lifecycle := &stubLifecycle{startErr: startErr, stopErr: stopErr}
+	ran := false
+	err := Run(context.Background(), func(context.Context) (*string, Lifecycle, error) {
+		return nil, lifecycle, nil
+	}, func(context.Context, *string) error {
+		ran = true
+		return nil
+	})
+	if ran {
+		t.Fatal("the subcommand ran after the start failed")
+	}
+	if !errors.Is(err, startErr) || !errors.Is(err, stopErr) {
+		t.Fatalf("Run error = %v, want it to join the start and stop failures", err)
+	}
+	if !lifecycle.stopped {
+		t.Fatal("a failed start did not stop the graph")
+	}
+}
+
+// TestRunJoinsTeardownFailure proves a subcommand error and a teardown failure
+// are both reported rather than one replacing the other.
+func TestRunJoinsTeardownFailure(t *testing.T) {
+	runErr := errors.New("subcommand failed")
+	stopErr := errors.New("stop failed")
+	lifecycle := &stubLifecycle{stopErr: stopErr}
+	err := Run(context.Background(), func(context.Context) (*string, Lifecycle, error) {
+		return nil, lifecycle, nil
+	}, func(context.Context, *string) error {
+		return runErr
+	})
+	if !errors.Is(err, runErr) || !errors.Is(err, stopErr) {
+		t.Fatalf("Run error = %v, want it to join both failures", err)
+	}
+}

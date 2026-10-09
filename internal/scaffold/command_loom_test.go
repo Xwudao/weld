@@ -48,8 +48,8 @@ func assertLoomCommandSeam(t *testing.T, dir, name, initializer string) {
 	if strings.Contains(command, "github.com/Xwudao/loom") {
 		t.Errorf("the command package imports the Loom runtime:\n%s", command)
 	}
-	if !strings.Contains(command, "type Lifecycle interface") || !strings.Contains(command, "func (g *group) resolve(") {
-		t.Errorf("the command package has no lazy lifecycle seam:\n%s", command)
+	if !strings.Contains(command, "internal/commandkit") || !strings.Contains(command, "commandkit.Run(") {
+		t.Errorf("the command package does not resolve through internal/commandkit:\n%s", command)
 	}
 }
 
@@ -356,9 +356,9 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	// Consume the late-added repository from the command root: only the
 	// user-owned root changes, never the stable command graph.
 	commandPath := filepath.Join(dir, "internal", "commands", "orders", "command.go")
-	editInPlace(t, commandPath, "type Deps struct{}", "type Deps struct{ Repo data.Repository }")
-	editInPlace(t, commandPath, "func NewDeps() *Deps { return &Deps{} }", "func NewDeps(repo data.Repository) *Deps { return &Deps{Repo: repo} }")
-	editInPlace(t, commandPath, "\t\"time\"\n", "\t\"time\"\n\n\t\"example.com/demo/internal/data\"\n")
+	editInPlace(t, commandPath, "\tLogger *slog.Logger\n", "\tLogger *slog.Logger\n\tRepo data.Repository\n")
+	editInPlace(t, commandPath, "func NewDeps(logger *slog.Logger) *Deps { return &Deps{Logger: logger} }", "func NewDeps(logger *slog.Logger, repo data.Repository) *Deps { return &Deps{Logger: logger, Repo: repo} }")
+	editInPlace(t, commandPath, "\t\"example.com/demo/internal/commandkit\"\n", "\t\"example.com/demo/internal/commandkit\"\n\t\"example.com/demo/internal/data\"\n")
 
 	if _, ok := runLoomTool(t, dir, "generate", "./internal/di"); !ok {
 		t.Skip("cannot rebuild the pinned Loom generator (network/module cache unavailable)")
