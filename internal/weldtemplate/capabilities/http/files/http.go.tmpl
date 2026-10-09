@@ -10,6 +10,7 @@ package httpserver
 
 import (
 	"log/slog"
+	"net"
 	nethttp "net/http"
 
 	"__module__/internal/httpx"
@@ -41,4 +42,26 @@ func NewHandler(logger *slog.Logger, routes ...Route) nethttp.Handler {
 		route(mux)
 	}
 	return Chain(logger, mux)
+}
+
+// BrowseURL returns the URL a developer can open for a server bound at addr.
+//
+// A log line should carry a link, not the wildcard the listener reports: an
+// empty host, 0.0.0.0 or :: is not browsable and becomes 127.0.0.1, and a
+// concrete host is kept as it is. The scheme is http. An address without a port
+// (a unix socket, a bare host) is not a URL authority and is returned unchanged
+// behind the scheme, rather than inventing a port.
+func BrowseURL(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "http://" + addr.String()
+	}
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }

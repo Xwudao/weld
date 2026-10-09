@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net"
 	nethttp "net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,29 @@ import (
 // testLogger is the injected logger for tests that do not assert on output.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+}
+
+// TestBrowseURLRewritesTheWildcardHost proves a listener address becomes a URL a
+// developer can open, so a startup log line is clickable rather than a wildcard.
+func TestBrowseURLRewritesTheWildcardHost(t *testing.T) {
+	cases := []struct {
+		name string
+		addr net.Addr
+		want string
+	}{
+		{"wildcard ipv6", &net.TCPAddr{IP: net.IPv6zero, Port: 8080}, "http://127.0.0.1:8080"},
+		{"wildcard ipv4", &net.TCPAddr{IP: net.IPv4zero, Port: 8080}, "http://127.0.0.1:8080"},
+		{"loopback", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8080}, "http://127.0.0.1:8080"},
+		{"concrete host", &net.TCPAddr{IP: net.IPv4(192, 168, 1, 5), Port: 9000}, "http://192.168.1.5:9000"},
+		{"ipv6 loopback", &net.TCPAddr{IP: net.IPv6loopback, Port: 8080}, "http://[::1]:8080"},
+		{"no port", &net.UnixAddr{Name: "/tmp/app.sock", Net: "unix"}, "http:///tmp/app.sock"},
+		{"nil", nil, ""},
+	}
+	for _, tc := range cases {
+		if got := BrowseURL(tc.addr); got != tc.want {
+			t.Errorf("%s: BrowseURL(%v) = %q, want %q", tc.name, tc.addr, got, tc.want)
+		}
+	}
 }
 
 func TestNewHandlerComposesInjectedRoutes(t *testing.T) {

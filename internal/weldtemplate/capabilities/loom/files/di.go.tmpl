@@ -484,7 +484,7 @@ func newServer(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, hand
 				return fmt.Errorf("di: listen on %s: %w", cfg.HTTP.Addr, err)
 			}
 			server.listener = listener
-			logger.Info("__name__ listening", "addr", listener.Addr().String())
+			logger.Info("__name__ listening", "url", httpserver.BrowseURL(listener.Addr()))
 {{- if .Caps.Has "api"}}
 			logger.Info("__name__ API uses in-memory development data; items are lost on restart")
 {{- end}}

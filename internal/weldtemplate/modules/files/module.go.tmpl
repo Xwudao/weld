@@ -64,6 +64,17 @@ const adminPolicy = "admin"
 // It takes the Service rather than constructing one, so the caller owns the
 // module's dependencies and a test can inject a fake. The Loom server graph
 // calls it with the Service it provides and a router mounted at the API prefix.
+//
+// A module whose routes span more than one prefix — a public /v1/<resource> and
+// an administrator /admin/v1/<resource>, say — mounts one group per prefix
+// instead, so every route stays relative and the prefix lives in one place; the
+// composition root then mounts the module at the root through
+// httpserver.ModulePrefix:
+//
+//	public := router.Group("/v1/widget")
+//	public.Get("/all", handler)
+//	admin := router.Group("/admin/v1/widget").Require(adminPolicy)
+//	admin.Post("/create", handler)
 func Register(router *httpx.Router, service Service) {
 	// GET {prefix}/ — public, no input.
 	httpx.NoInput(router, nethttp.MethodGet, "", func(ctx context.Context) (Response, error) {
