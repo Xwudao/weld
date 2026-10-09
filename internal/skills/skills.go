@@ -276,7 +276,7 @@ func describe(name string, catalog Catalog) string {
 var curatedNotes = map[string]string{
 	"base":    "minimal Go CLI on a Cobra command tree: a root-command contribution seam in `internal/app` (`RegisterCommand`, `ConfigureRoot`, `SetDefaultRun`) and a `log/slog` factory in `internal/logging`. A bare invocation prints help until a capability installs a long-running root action. It ships no configuration and no server.",
 	"config":  "shared typed configuration in `internal/config`: `config.yml` from the working directory with flag > environment > file > defaults precedence. `config.yml` is local and git-ignored and `config.example.yml` is committed. `config.Secret` redacts itself in `fmt`, `log/slog`, JSON and YAML.",
-	"http":    "HTTP server lifecycle in `internal/httpserver` and the `serve` command in `internal/app/serve.go`. The handler is composed explicitly with `NewHandler(routes ...Route)`; routes are not registered globally. Once installed, a bare invocation runs the same serve lifecycle as `serve`, and `--config`/`--addr` are shared persistent root flags so both parse one definition.",
+	"http":    "HTTP server lifecycle in `internal/httpserver` and the `serve` command in `internal/app/serve.go`. The handler is composed explicitly with `NewHandler(logger, routes ...Route)`; routes are not registered globally. The shared HTTP toolkit is `internal/httpx`: the `{code,msg,data}` JSON response envelope with raw writers for responses that must stay unwrapped, typed JSON binding with a body limit and an optional validator callback, and the composable middleware (`RequestID`, `AccessLog`, `Recover`). The middleware stack is declared in `internal/httpserver/middleware.go`, a stable project-owned file. Once installed, a bare invocation runs the same serve lifecycle as `serve`, and `--config`/`--addr` are shared persistent root flags so both parse one definition.",
 	"web":     "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
 	"api":     "JSON HTTP API in `internal/api`: typed DTOs, go-validate rules and an OpenAPI 3.1 document served at `GET /api/openapi.json`. The default `Service` is an in-memory development demo whose items are lost on restart; it is not persistence.",
 	"db":      "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
@@ -395,6 +395,9 @@ func writeEditing(b *strings.Builder, set map[string]bool) {
 		b.WriteString("  `internal/di/di.go` and `internal/di/loom_gen.go`.\n")
 	}
 	var seams []string
+	if set["http"] {
+		seams = append(seams, "`internal/httpserver/middleware.go`")
+	}
 	if set["api"] && set["loom"] {
 		seams = append(seams, "`internal/di/api_provider.go`")
 	}

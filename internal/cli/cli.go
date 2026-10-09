@@ -213,9 +213,11 @@ Capabilities:
                     factory
   config (add)      typed YAML configuration (config.yml + environment) with a
                     redacting Secret type; installed by http and db
-  http   (add)      HTTP lifecycle, composable mux and a serve command
+  http   (add)      HTTP lifecycle, shared JSON/middleware toolkit and a serve
+                    command
   web    (add)      React + TypeScript + Vite frontend (requires http)
-  api    (add)      JSON API, go-validate rules and an OpenAPI 3.1 document
+  api    (add)      JSON API with a {code,msg,data} envelope, go-validate rules
+                    and an OpenAPI 3.1 document
   db     (add)      PostgreSQL: SQL migrations, sqlc queries, an injectable pool
                     and repository
   redis  (add)      Opt-in Redis client with typed connection config; installing

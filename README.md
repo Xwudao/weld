@@ -56,12 +56,19 @@ Capabilities:
 - `config` (add) — the shared typed configuration capability: `config.yml` from
   the working directory, environment and flag overrides, and a redacting
   `Secret` type. Installed automatically by the first of `http` and `db`.
-- `http` (add) — HTTP server lifecycle, a composable handler builder, and the
-  single `serve` command. Its `Serve` takes the injected `*slog.Logger`, and
-  `serve` reads the listen address through the shared `config` loader.
+- `http` (add) — HTTP server lifecycle, a shared JSON/middleware toolkit, a
+  composable handler builder, and the single `serve` command. The toolkit in
+  `internal/httpx` owns the `{code,msg,data}` response envelope, typed JSON
+  binding and the composable middleware chain; the stack is declared in the
+  stable, project-owned `internal/httpserver/middleware.go`. Its `Serve` takes
+  the injected `*slog.Logger`, and `serve` reads the listen address through the
+  shared `config` loader. No authentication, CORS or rate limiting is enabled by
+  default.
 - `web` (add) — React + TypeScript + Vite frontend, served by `http`.
 - `api` (add) — JSON HTTP API: typed DTOs, `go-validate` rules and an OpenAPI
-  3.1 document built from the same contract, served by `http`.
+  3.1 document built from the same contract, served by `http`. Responses are
+  wrapped in the shared `{code,msg,data}` envelope and the document describes
+  the same envelope; `GET /api/openapi.json` stays a raw OpenAPI document.
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository. Requires `base` and
   `config`.
@@ -155,8 +162,12 @@ flags, and `SetDefaultRun` for what a bare invocation does. `http` adds
 same serve lifecycle. Commands are the only init-time command registration
 point; HTTP routes are not registered at init time.
 2. **Go route composition** — `internal/httpserver/http.go` exposes
-   `NewHandler(routes ...Route)` plus a `weld:routes` marker region that
-   `Handler()` reads. `web` adds `internal/httpserver/web_route.go` (same
+   `NewHandler(logger, routes ...Route)` plus a `weld:routes` marker region that
+   `Handler(logger)` reads, and `httpserver.Chain(logger, handler)` applies the
+   project middleware stack (declared in the stable
+   `internal/httpserver/middleware.go`) to a handler. The Loom graph wraps the
+   mux it composes with `Chain`, so both compositions serve identical middleware.
+   `web` adds `internal/httpserver/web_route.go` (same
    package) and appends `installWebRoute` to that region; `api` adds
    `internal/httpserver/api_route.go` and appends `installAPIRoute`. Composition
    is explicit: no global route registry and no init-time route registration.
@@ -511,8 +522,12 @@ Test conventions:
 
 - No test opens a socket to a service. HTTP behavior is asserted with
   `net/http/httptest` against handlers built from injected routes/fixtures
-  (`httpserver.NewHandler`, and `web.Handler` over an `fstest.MapFS`). The
-  generated graph tests bind an ephemeral loopback socket only to prove that an
+  (`httpserver.NewHandler(logger, routes...)`, and `web.Handler` over an
+  `fstest.MapFS`). The generated `internal/httpx` test covers the envelope
+  writers, typed binding (content type, body limit, unknown field, trailing
+  JSON) and the middleware (order, request id, recovery, Flusher/Hijacker
+  forwarding) without a socket. The generated graph tests bind an ephemeral
+  loopback socket only to prove that an
   occupied port fails `Start` and that a serve failure is reported, and close it
   immediately. The generated `internal/httpserver` test occupies a loopback port
   with `httptest` to prove `Serve` reports the bind failure without logging a

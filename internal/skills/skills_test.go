@@ -143,6 +143,33 @@ func TestRenderLoomSeams(t *testing.T) {
 	}
 }
 
+func TestRenderHTTPSharesTheToolkitAndMiddlewareSeam(t *testing.T) {
+	body, err := Render(manifest("config", "http"), template.Load())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"internal/httpx",
+		"{code,msg,data}",
+		"internal/httpserver/middleware.go",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("http skill is missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRenderWithoutHTTPDoesNotClaimTheMiddlewareSeam(t *testing.T) {
+	body, err := Render(manifest("db"), template.Load())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(string(body), "internal/httpserver/middleware.go") {
+		t.Fatalf("a project without http claims the middleware seam:\n%s", body)
+	}
+}
+
 func TestRenderWithoutAPIDoesNotClaimTheAPIService(t *testing.T) {
 	body, err := Render(manifest("http"), template.Load())
 	if err != nil {
