@@ -20,7 +20,7 @@ import (
 )
 
 // Version is the template payload version recorded in generated projects.
-const Version = "0.3.2"
+const Version = "0.4.0"
 
 //go:embed all:capabilities all:modules all:commands
 var assets embed.FS

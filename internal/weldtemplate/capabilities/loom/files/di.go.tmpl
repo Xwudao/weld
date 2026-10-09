@@ -272,12 +272,11 @@ var appGraph = loom.Graph[*App](
 	loom.Provide(NewScheduler),
 {{- end}}
 	// The administrator guard is a provider, not a direct call: the graph mounts
-	// every module behind the one policy it defines here, and because the guard is
-	// injected it can take the dependencies a real check needs. It is defined in
-	// internal/httpserver/policy.go, the stable project file; give it a
-	// dependency there (for example the pool after `weld add db`) and Loom follows
-	// the signature without editing this regenerated graph.
-	loom.Provide(httpserver.AdminGuard),
+	// The project's named policies are a provider: the graph applies whatever
+	// internal/httpserver/policy.go declares, so adding a policy (a "login" policy
+	// next to "admin", say) is an edit in that stable file, never in this
+	// regenerated graph. Each policy can take the dependencies a real check needs.
+	loom.Provide(httpserver.Policies),
 {{- if .Caps.Has "api"}}
 	loom.Provide(NewServerWithAPI),
 {{- else}}
@@ -331,10 +330,10 @@ func logRoutes(cfg *config.Config, logger *slog.Logger, router *httpx.Router) {
 // composeMux with the config and logger so a development environment logs the
 // routes.
 func newMux(
-	adminGuard httpx.Middleware,{{range .Modules}}
+	policies []httpserver.NamedPolicy,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) *nethttp.ServeMux {
-	return composeMux(nil, nil, adminGuard,{{range .Modules}}
+	return composeMux(nil, nil, policies,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	)
 }
@@ -345,17 +344,17 @@ func newMux(
 // the dependency graph is the single source of composition. Each module's mount
 // prefix comes from httpserver.ModulePrefix, so changing the version (or giving
 // one module its own URL space) is an edit in the stable project file rather than
-// an edit to this regenerated graph. The administrator policy is resolved once
-// here with the guard the graph injects (httpserver.AdminGuard, a provider in the
-// stable policy file), so every module's administrator routes share one guard
-// and that guard can take the dependencies it needs.
+// an edit to this regenerated graph. The named policies are applied from the
+// project's own list (httpserver.Policies, a provider in the stable policy file),
+// so every module route marked with a policy shares one guard and adding a policy
+// needs no edit here.
 //
 // A development environment logs the composed routes, so the surface and its
 // policy coverage are visible at startup.
 func composeMux(
 	cfg *config.Config,
 	logger *slog.Logger,
-	adminGuard httpx.Middleware,{{range .Modules}}
+	policies []httpserver.NamedPolicy,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
@@ -363,13 +362,25 @@ func composeMux(
 	mux.Handle("/", web.Handler(httpserver.APIPrefix))
 {{- end}}
 {{- if .Modules}}
-	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, adminGuard)
+	base := applyPolicies(httpx.NewRouter(mux), policies)
 {{- range .Modules}}
 	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
 {{- end}}
 	logRoutes(cfg, logger, base)
 {{- end}}
 	return mux
+}
+
+// applyPolicies defines every named policy the composition declares on router.
+//
+// It is the one place a policy name becomes middleware. A name the composition
+// never declared panics when a route references it, which is the fail-closed
+// behavior: a typo can never serve a route unguarded.
+func applyPolicies(router *httpx.Router, policies []httpserver.NamedPolicy) *httpx.Router {
+	for _, policy := range policies {
+		router = router.WithPolicy(policy.Name, policy.Middleware)
+	}
+	return router
 }
 {{- if .Caps.Has "api"}}
 
@@ -378,19 +389,19 @@ func composeMux(
 // it keeps the signature a project's edited di_test.go was written against; the
 // graph calls composeMuxWithAPI with the config and logger so a development
 // environment logs the routes.
-func newMuxWithAPI(adminGuard httpx.Middleware, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
-	return composeMuxWithAPI(nil, nil, adminGuard, service{{range .Modules}}, {{.Name}}Service{{end}})
+func newMuxWithAPI(policies []httpserver.NamedPolicy, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
+	return composeMuxWithAPI(nil, nil, policies, service{{range .Modules}}, {{.Name}}Service{{end}})
 }
 
 // composeMuxWithAPI composes the API and module routes onto one policy-aware
-// base, mounted at httpserver.APIPrefix, behind the one injected administrator
-// guard, and logs the composed routes in a development environment.
-func composeMuxWithAPI(cfg *config.Config, logger *slog.Logger, adminGuard httpx.Middleware, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
+// base, mounted at httpserver.APIPrefix, behind the project's named policies, and
+// logs the composed routes in a development environment.
+func composeMuxWithAPI(cfg *config.Config, logger *slog.Logger, policies []httpserver.NamedPolicy, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 {{- if .Caps.Has "web"}}
 	mux.Handle("/", web.Handler(httpserver.APIPrefix))
 {{- end}}
-	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, adminGuard)
+	base := applyPolicies(httpx.NewRouter(mux), policies)
 	api.Register(base.Group(httpserver.APIPrefix), service)
 {{- range .Modules}}
 	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
@@ -442,10 +453,10 @@ func NewServer(
 	lc *loom.Lifecycle,
 	cfg *config.Config,
 	logger *slog.Logger,
-	adminGuard httpx.Middleware,{{range .Modules}}
+	policies []httpserver.NamedPolicy,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
-	return newServer(lc, cfg, logger, composeMux(cfg, logger, adminGuard,{{range .Modules}}
+	return newServer(lc, cfg, logger, composeMux(cfg, logger, policies,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	))
 }
@@ -458,11 +469,11 @@ func NewServerWithAPI(
 	lc *loom.Lifecycle,
 	cfg *config.Config,
 	logger *slog.Logger,
-	adminGuard httpx.Middleware,
+	policies []httpserver.NamedPolicy,
 	service api.Service,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
-	return newServer(lc, cfg, logger, composeMuxWithAPI(cfg, logger, adminGuard, service,{{range .Modules}}
+	return newServer(lc, cfg, logger, composeMuxWithAPI(cfg, logger, policies, service,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	))
 }

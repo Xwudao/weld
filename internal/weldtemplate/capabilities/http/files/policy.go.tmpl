@@ -37,9 +37,31 @@ func ModulePrefix(name string) string {
 
 // PolicyAdmin is the name of the administrator route policy. A module marks its
 // administrator routes with httpx.Policy(PolicyAdmin) and implements no check
-// itself; the generated server graph resolves the name once with WithPolicy, so
-// every module shares one guard.
+// itself; the generated server graph resolves the name once, so every module
+// shares one guard.
 const PolicyAdmin = "admin"
+
+// NamedPolicy binds a policy name to the middleware that enforces it.
+type NamedPolicy struct {
+	Name       string
+	Middleware httpx.Middleware
+}
+
+// Policies returns every named policy the generated server graph applies, in
+// order.
+//
+// The graph declares this function as a Loom provider and loops over its result,
+// so adding a policy — a "login" policy that requires a signed-in caller next to
+// the administrator one, say — is an edit here, in this stable project file,
+// rather than an edit to the regenerated internal/di/di.go. Each policy can take
+// the dependencies it needs as parameters, because Loom constructs it; a policy
+// that returns an error fails startup rather than serving its routes unguarded.
+//
+// A module references a name with httpx.Policy(name) and a name no route uses yet
+// is harmless, so the set can grow ahead of the routes that need it.
+func Policies() ([]NamedPolicy, error) {
+	return []NamedPolicy{{Name: PolicyAdmin, Middleware: AdminGuard()}}, nil
+}
 
 // AdminGuard is the project's administrator policy: the guard the generated
 // server graph registers for every module route marked httpx.Policy("admin").

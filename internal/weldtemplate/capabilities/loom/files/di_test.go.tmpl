@@ -40,6 +40,15 @@ import (
 // only parsed (never connected) and only when a consumer asks for it, the API
 // service is served in memory, and the lifecycle's bind, serve-failure and
 // graceful-stop behavior is checked on loopback sockets.
+{{- if .Caps.Has "http"}}
+
+// testPolicies is the composition's policy list for these tests: the "admin"
+// policy with the shipped placeholder guard. The generated graph applies
+// httpserver.Policies, so a test passes the list it needs instead.
+var testPolicies = []httpserver.NamedPolicy{
+	{Name: httpserver.PolicyAdmin, Middleware: httpserver.AdminGuard()},
+}
+{{- end}}
 
 // fakeLoader builds a config.Loader over in-memory files and environment, so
 // configuration tests never touch the filesystem or the process environment.
@@ -213,7 +222,7 @@ func ({{.Name}}FakeService) Create(_ context.Context, req {{.Name}}.CreateReques
 // same reason.{{end}}
 func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
 	t.Helper()
-	server, err := NewServer{{if .Caps.Has "api"}}WithAPI{{end}}(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger, httpserver.AdminGuard(){{if .Caps.Has "api"}}, api.NewService(){{end}}{{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	server, err := NewServer{{if .Caps.Has "api"}}WithAPI{{end}}(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger, testPolicies{{if .Caps.Has "api"}}, api.NewService(){{end}}{{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -224,7 +233,7 @@ func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logg
 // TestComposedMuxHasNoDocumentEndpoint proves the composition no longer serves
 // a documentation endpoint: the reserved path is an ordinary 404.
 func TestComposedMuxHasNoDocumentEndpoint(t *testing.T) {
-	mux := newMuxWithAPI(httpserver.AdminGuard(), api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	mux := newMuxWithAPI(testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
 	if recorder.Code != nethttp.StatusNotFound {
@@ -238,14 +247,14 @@ func TestComposedMuxHasNoDocumentEndpoint(t *testing.T) {
 func TestDevelopmentLogsTheComposedRoutes(t *testing.T) {
 	var buf bytes.Buffer
 	logger := logging.New(&buf, logging.TextFormat, nil)
-	composeMuxWithAPI(&config.Config{Environment: config.EnvironmentLocal}, logger, httpserver.AdminGuard(), api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	composeMuxWithAPI(&config.Config{Environment: config.EnvironmentLocal}, logger, testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	out := buf.String()
 	if !strings.Contains(out, "registered routes") || !strings.Contains(out, httpserver.APIPrefix) {
 		t.Fatalf("a development composition did not log its routes:\n%s", out)
 	}
 
 	buf.Reset()
-	composeMuxWithAPI(&config.Config{Environment: config.EnvironmentProduction}, logger, httpserver.AdminGuard(), api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	composeMuxWithAPI(&config.Config{Environment: config.EnvironmentProduction}, logger, testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	if buf.Len() != 0 {
 		t.Fatalf("a production composition logged its routes:\n%s", buf.String())
 	}
@@ -371,7 +380,7 @@ func TestServerLogsLifecycle(t *testing.T) {
 
 {{- if .Caps.Has "api"}}
 func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
-	mux := newMuxWithAPI(httpserver.AdminGuard(), api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	mux := newMuxWithAPI(testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	body := `{"name":"widget","quantity":2,"status":"active"}`
 	request := httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -471,7 +480,7 @@ func getJSON(t *testing.T, url string) []byte {
 // TestComposedMuxServesModulesWithoutSocket proves the graph registers every
 // installed business module on the composed mux, with no socket and no database.
 func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
-	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}(httpserver.AdminGuard(), {{if .Caps.Has "api"}}api.NewService(),{{end}}{{range .Modules}}{{.Name}}FakeService{},{{end}})
+	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}(testPolicies, {{if .Caps.Has "api"}}api.NewService(),{{end}}{{range .Modules}}{{.Name}}FakeService{},{{end}})
 	prefix := httpserver.ModulePrefix({{(index .Modules 0).Name}}.Name)
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, prefix, nil))
@@ -485,7 +494,7 @@ func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
 // business module on the composed mux, including its guarded administrator
 // route: the public route answers and the unauthenticated write is refused.
 func TestComposedMuxServesModuleRoutes(t *testing.T) {
-	mux := newMuxWithAPI(httpserver.AdminGuard(), api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	mux := newMuxWithAPI(testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	{{- range .Modules}}
 	{
 		prefix := httpserver.ModulePrefix({{.Name}}.Name)
