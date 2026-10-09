@@ -15,24 +15,19 @@ make build             # builds the frontend, embeds it, builds the app
 make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
 ```
 
-## Two tightly coupled repos
+## Versioned templates
 
 | repo | owns |
 | --- | --- |
 | [`../weld-template`](../weld-template) | declarative capability payloads, exposed as an embedded `io/fs.FS` |
 | `weld` (this repo) | CLI: catalog loading, rendering, manifest, planning, safe apply |
 
-`weld` imports `github.com/Xwudao/weld-template` and reads payloads through
-`weldtemplate.FS()`. The embedded FS means a built `weld` binary carries its
-whole scaffold — no checkout, network access, or environment variable at run
-time. During development `go.mod` uses:
-
-```
-replace github.com/Xwudao/weld-template => ../weld-template
-```
-
-To release, publish `weld-template` and pin a real version, then drop the
-`replace`. That module is the single, versioned seam between the two repos.
+`weld` imports the released `github.com/Xwudao/weld-template v0.1.0` and reads
+payloads through `weldtemplate.FS()`. The embedded FS means a built `weld`
+binary carries its whole scaffold — no template checkout, network access or
+environment variable is needed at runtime. During local template development,
+use a temporary Go workspace or local module replacement without committing it.
+The versioned template module is the contract between the two repos.
 
 ## Commands
 
