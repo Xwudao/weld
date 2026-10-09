@@ -265,8 +265,8 @@ func TestAPICapabilityRequiresHTTP(t *testing.T) {
 		t.Fatalf("read loom graph: %v", err)
 	}
 	if !strings.Contains(string(graph), `{{- if .Caps.Has "api"}}`) ||
-		!strings.Contains(string(graph), "api.Register(mux, service)") {
-		t.Error("the Loom graph does not call api.Register under an api guard")
+		!strings.Contains(string(graph), "api.Register(mux, service, cfg.OpenAPIDocumentEnabled())") {
+		t.Error("the Loom graph does not call api.Register with the configuration-resolved gate under an api guard")
 	}
 }
 
@@ -1564,6 +1564,7 @@ func TestModuleTemplateIsWellFormed(t *testing.T) {
 		Files   []struct {
 			Path   string `json:"path"`
 			Source string `json:"source"`
+			Shared bool   `json:"shared"`
 		} `json:"files"`
 	}
 	if err := json.Unmarshal(raw, &d); err != nil {
@@ -1588,12 +1589,16 @@ func TestModuleTemplateIsWellFormed(t *testing.T) {
 		}
 	}
 
-	// sources maps each declared payload to its target path. A target path must
-	// carry the module-name token: that substitution is what makes a per-module
-	// path unique.
+	// sources maps each declared payload to its target path. A per-module target
+	// path must carry the module-name token; a shared path is written once and is
+	// deliberately token-free.
 	sources := map[string]string{}
 	for _, file := range d.Files {
-		if !strings.Contains(file.Path, "__modname__") {
+		if file.Shared {
+			if strings.Contains(file.Path, "__modname__") {
+				t.Errorf("shared module file path %q must not carry __modname__", file.Path)
+			}
+		} else if !strings.Contains(file.Path, "__modname__") {
 			t.Errorf("module file path %q does not carry __modname__", file.Path)
 		}
 		sources[file.Source] = file.Path
@@ -1896,6 +1901,73 @@ func TestCommandGraphIsLoomAware(t *testing.T) {
 		}
 		if strings.Contains(string(body), "github.com/Xwudao/loom") {
 			t.Errorf("%s imports the Loom runtime; the command package must stay decoupled", source)
+		}
+	}
+}
+
+// TestSharedOpenAPIContractIsOneSource guards the shared contract both the api
+// capability and the module template ship at internal/openapi/openapi.go: the
+// two payloads must stay byte-identical, or an api-first and a module-first
+// project would generate a different contract package for the same file.
+func TestSharedOpenAPIContractIsOneSource(t *testing.T) {
+	apiPayload, err := fs.ReadFile(FS(), "capabilities/api/files/openapi_contract.go.tmpl")
+	if err != nil {
+		t.Fatalf("read api contract payload: %v", err)
+	}
+	modulePayload, err := fs.ReadFile(FS(), "modules/files/openapi_contract.go.tmpl")
+	if err != nil {
+		t.Fatalf("read module contract payload: %v", err)
+	}
+	if !bytes.Equal(apiPayload, modulePayload) {
+		t.Fatal("the api and module openapi contract payloads differ; they share the internal/openapi/openapi.go target")
+	}
+	// The shared package must render to gofmt-clean Go.
+	if _, err := format.Source(apiPayload); err != nil {
+		t.Fatalf("the shared openapi contract payload is not valid Go: %v", err)
+	}
+}
+
+// TestCapabilityGoPayloadsRenderClean guards every capability's Go payload: once
+// the weld tokens are substituted it must be valid, gofmt-clean Go, so a
+// generated project never needs a formatting pass and a broken doc comment or
+// template cannot ship. The Loom DI sources are text/templates validated by the
+// DI render tests instead.
+func TestCapabilityGoPayloadsRenderClean(t *testing.T) {
+	entries, err := fs.ReadDir(FS(), "capabilities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacer := strings.NewReplacer(
+		"__name__", "demo",
+		"__module__", "example.com/demo",
+		"__version__", "0.1.0",
+		"__modname__", "widget",
+		"__ModName__", "Widget",
+	)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		root := path.Join("capabilities", entry.Name())
+		if err := fs.WalkDir(FS(), root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(p, ".go.tmpl") || strings.HasPrefix(p, "capabilities/loom/files/di") {
+				return nil
+			}
+			body, err := fs.ReadFile(FS(), p)
+			if err != nil {
+				t.Errorf("read %s: %v", p, err)
+				return nil
+			}
+			rendered := []byte(replacer.Replace(string(body)))
+			if _, err := format.Source(rendered); err != nil {
+				t.Errorf("%s does not render to valid Go: %v", p, err)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("walk %s: %v", root, err)
 		}
 	}
 }

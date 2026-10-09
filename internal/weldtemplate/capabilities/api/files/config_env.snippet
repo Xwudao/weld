@@ -1,0 +1,7 @@
+	// weld:api:installed __version__
+	// The OpenAPI gate is resolved from the one configuration path, so the
+	// environment label and the enable switch cannot disagree with the rest of
+	// the process. See internal/config/openapi.go.
+	if err := cfg.applyOpenAPIEnv(l.lookupEnv); err != nil {
+		return err
+	}

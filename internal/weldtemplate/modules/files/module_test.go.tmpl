@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	nethttp "net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	"__module__/internal/httpx"
+	"__module__/internal/openapi"
 )
 
 // envelope is the decoded {code,msg,data} response body.
@@ -57,4 +61,69 @@ func TestRegisterGreetsWorldByDefault(t *testing.T) {
 	if recorder.Code != nethttp.StatusOK {
 		t.Fatalf("GET %s = %d", RoutePrefix, recorder.Code)
 	}
+}
+
+// TestContractMatchesRoute proves the route table and the OpenAPI contract
+// agree: every operation Register installs on the mux is registered with the
+// shared internal/openapi contract under the same method and path, so the
+// document cannot claim an endpoint the module does not serve.
+func TestContractMatchesRoute(t *testing.T) {
+	registered := map[string]openapi.Operation{}
+	for _, operation := range openapi.Operations() {
+		registered[operation.Method+" "+operation.Path] = operation
+	}
+	for _, op := range operations() {
+		contract, ok := registered[op.method+" "+op.path]
+		if !ok {
+			t.Errorf("%s %s is served but not registered in the shared openapi contract", op.method, op.path)
+			continue
+		}
+		if contract.OperationID == "" || contract.SuccessStatus == 0 || contract.Success == nil {
+			t.Errorf("%s %s contract is incomplete: %+v", op.method, op.path, contract)
+		}
+	}
+}
+
+// TestContractDocumentsTheResponseDTO guards against drift between the module's
+// Response DTO and the documented success schema: the schema must name exactly
+// the DTO's JSON fields, so changing one without the other turns this red.
+func TestContractDocumentsTheResponseDTO(t *testing.T) {
+	contract := greetingContract()
+	if contract.Success == nil {
+		t.Fatal("the greeting contract documents no success response")
+	}
+	schema, err := contract.Success()
+	if err != nil {
+		t.Fatalf("success schema: %v", err)
+	}
+	got := schemaFieldNames(schema)
+	want := jsonFieldNames(Response{})
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("documented success fields = %v, Response JSON fields = %v", got, want)
+	}
+}
+
+// jsonFieldNames returns the JSON names of a struct's fields, sorted.
+func jsonFieldNames(value any) []string {
+	typ := reflect.TypeOf(value)
+	names := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// schemaFieldNames returns an object schema's property names, sorted.
+func schemaFieldNames(schema *openapi.Schema) []string {
+	names := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

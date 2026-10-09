@@ -596,7 +596,7 @@ func TestAddAPIInstallsHTTPDependency(t *testing.T) {
 		t.Error("the api capability wrote the retired non-Loom route seam")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	if !strings.Contains(di, "api.Register(mux, service)") {
+	if !strings.Contains(di, "api.Register(mux, service, cfg.OpenAPIDocumentEnabled())") {
 		t.Errorf("the Loom server graph does not mount the API:\n%s", di)
 	}
 	goMod := readFile(t, filepath.Join(dir, "go.mod"))
@@ -713,7 +713,7 @@ func TestAddAPIAndWebInEitherOrder(t *testing.T) {
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
 			for _, want := range []string{
 				"web.Handler()",
-				"api.Register(mux, service)",
+				"api.Register(mux, service, cfg.OpenAPIDocumentEnabled())",
 			} {
 				if !strings.Contains(di, want) {
 					t.Errorf("%q missing from the Loom server graph:\n%s", want, di)
@@ -1413,8 +1413,11 @@ func TestAPIDBMatrixServesInMemoryWithoutDatabase(t *testing.T) {
 			if !goModTidy(t, dir) {
 				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 			}
-			clean := envWithout("DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME")
-			env := append(clean, tc.extraEnv...)
+			clean := envWithout("DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "APP_ENV", "OPENAPI_ENABLED")
+			// serveProbe waits on the document endpoint. It is fail-closed by
+			// default, so opt in explicitly for this development-only probe.
+			env := append(clean, "APP_ENV=development", "OPENAPI_ENABLED=true")
+			env = append(env, tc.extraEnv...)
 			binary := buildAppBinary(t, dir, env)
 
 			// First run: the API is reachable and keeps an item in memory.

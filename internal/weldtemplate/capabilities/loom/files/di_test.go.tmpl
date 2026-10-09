@@ -23,6 +23,9 @@ import (
 {{- end}}
 {{- if .Caps.Has "api"}}
 	"__module__/internal/api"
+{{- if .Modules}}
+	"github.com/getkin/kin-openapi/openapi3"
+{{- end}}
 {{- end}}
 	"__module__/internal/config"
 {{- if .Caps.Has "http"}}
@@ -212,6 +215,109 @@ func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logg
 	}
 	return server
 }
+{{- if .Caps.Has "api"}}
+
+// TestComposedMuxOpenAPIDocumentGate pins the OpenAPI gate on the real
+// composition the server serves: configuration in, HTTP decision out. The
+// document is served only for an explicit development environment with the
+// switch enabled; every other configuration — including a production
+// environment mistakenly switched on and an unrecognized environment — answers
+// 404 and leaks nothing.
+func TestComposedMuxOpenAPIDocumentGate(t *testing.T) {
+	enabled := config.OpenAPI{Enabled: true}
+	cases := []struct {
+		name    string
+		cfg     *config.Config
+		wantDoc bool
+	}{
+		{name: "unconfigured", cfg: &config.Config{}, wantDoc: false},
+		{name: "development without the enable switch", cfg: &config.Config{Environment: config.EnvironmentDevelopment}, wantDoc: false},
+		{name: "enabled without an environment", cfg: &config.Config{OpenAPI: enabled}, wantDoc: false},
+		{name: "development opt-in", cfg: &config.Config{Environment: config.EnvironmentDevelopment, OpenAPI: enabled}, wantDoc: true},
+		{name: "local opt-in", cfg: &config.Config{Environment: config.EnvironmentLocal, OpenAPI: enabled}, wantDoc: true},
+		{name: "production misconfigured on is refused", cfg: &config.Config{Environment: config.EnvironmentProduction, OpenAPI: enabled}, wantDoc: false},
+		{name: "unknown environment opt-in is refused", cfg: &config.Config{Environment: config.Environment("staging"), OpenAPI: enabled}, wantDoc: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := newMuxWithAPI(tc.cfg, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
+			if !tc.wantDoc {
+				if recorder.Code != nethttp.StatusNotFound {
+					t.Fatalf("GET /api/openapi.json = %d, want 404: %s", recorder.Code, recorder.Body)
+				}
+				for _, marker := range []string{"openapi", "paths", "operationId"} {
+					if strings.Contains(recorder.Body.String(), marker) {
+						t.Fatalf("the refused endpoint leaked %q: %s", marker, recorder.Body)
+					}
+				}
+				return
+			}
+			if recorder.Code != nethttp.StatusOK {
+				t.Fatalf("GET /api/openapi.json = %d, want 200: %s", recorder.Code, recorder.Body)
+			}
+			var document struct {
+				OpenAPI string `json:"openapi"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
+				t.Fatalf("document is not JSON: %v", err)
+			}
+			if document.OpenAPI != "3.1.0" {
+				t.Fatalf("openapi = %q, want 3.1.0", document.OpenAPI)
+			}
+		})
+	}
+}
+
+// TestComposedMuxBusinessRoutesUnaffectedByOpenAPIGate proves the gate never
+// touches the business routes: with a production configuration that refuses the
+// document, the items API still serves.
+func TestComposedMuxBusinessRoutesUnaffectedByOpenAPIGate(t *testing.T) {
+	cfg := &config.Config{Environment: config.EnvironmentProduction, OpenAPI: config.OpenAPI{Enabled: true}}
+	mux := newMuxWithAPI(cfg, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/items", nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET /api/items = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+}
+
+// TestComposedMuxOpenAPIGateUsesRealConfiguration proves the mux decision comes
+// from the real loader path, not a parallel read: a development file with the
+// switch on serves the document, and an environment override to production
+// refuses it.
+func TestComposedMuxOpenAPIGateUsesRealConfiguration(t *testing.T) {
+	devLoader := fakeLoader(map[string]string{
+		config.DefaultPath: "environment: development\nopenapi:\n  enabled: true\n",
+	}, nil)
+	devCfg, err := NewConfig(context.Background(), devLoader)
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
+	mux := newMuxWithAPI(devCfg, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("development opt-in = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+
+	prodLoader := fakeLoader(
+		map[string]string{config.DefaultPath: "environment: development\nopenapi:\n  enabled: true\n"},
+		map[string]string{config.EnvAppEnv: "production"},
+	)
+	prodCfg, err := NewConfig(context.Background(), prodLoader)
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
+	mux = newMuxWithAPI(prodCfg, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
+	if recorder.Code != nethttp.StatusNotFound {
+		t.Fatalf("production override = %d, want 404: %s", recorder.Code, recorder.Body)
+	}
+}
+{{- end}}
 
 // discardLogger is the injected logger for lifecycle tests that do not assert
 // on output.
@@ -332,7 +438,7 @@ func TestServerLogsLifecycle(t *testing.T) {
 
 {{- if .Caps.Has "api"}}
 func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
-	mux := newMuxWithAPI(api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	mux := newMuxWithAPI(&config.Config{}, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	body := `{"name":"widget","quantity":2,"status":"active"}`
 	request := httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -432,13 +538,70 @@ func getJSON(t *testing.T, url string) []byte {
 // TestComposedMuxServesModulesWithoutSocket proves the graph registers every
 // installed business module on the composed mux, with no socket and no database.
 func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
-	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}({{if .Caps.Has "api"}}api.NewService(){{end}}{{range .Modules}}{{if $.Caps.Has "api"}}, {{end}}{{.Name}}FakeService{},{{end}})
+	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}({{if .Caps.Has "api"}}&config.Config{}, api.NewService(){{end}}{{range .Modules}}{{if $.Caps.Has "api"}}, {{end}}{{.Name}}FakeService{},{{end}})
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, {{(index .Modules 0).Name}}.RoutePrefix, nil))
 	if recorder.Code != nethttp.StatusOK {
 		t.Fatalf("GET %s = %d: %s", {{(index .Modules 0).Name}}.RoutePrefix, recorder.Code, recorder.Body)
 	}
 }
+{{- if .Caps.Has "api"}}
+
+// TestDocumentIncludesBusinessModules proves the module OpenAPI contract is
+// merged into the composed document: each installed module's registered route
+// appears with its method and its response schema, without hand-written
+// documentation. It is the module-then-api and api-then-module acceptance path.
+func TestDocumentIncludesBusinessModules(t *testing.T) {
+	mux := newMuxWithAPI(&config.Config{Environment: config.EnvironmentDevelopment, OpenAPI: config.OpenAPI{Enabled: true}}, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET /api/openapi.json = %d: %s", recorder.Code, recorder.Body)
+	}
+	var document struct {
+		OpenAPI string `json:"openapi"`
+		Paths   map[string]map[string]struct {
+			OperationID string `json:"operationId"`
+			Responses   map[string]struct {
+				Content map[string]struct {
+					Schema struct {
+						Properties map[string]struct {
+							Properties map[string]any `json:"properties"`
+						} `json:"properties"`
+					} `json:"schema"`
+				} `json:"content"`
+			} `json:"responses"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
+		t.Fatalf("decode document: %v", err)
+	}
+	if document.OpenAPI != "3.1.0" {
+		t.Fatalf("openapi = %q, want 3.1.0", document.OpenAPI)
+	}
+	parsed, err := openapi3.NewLoader().LoadFromData(recorder.Body.Bytes())
+	if err != nil {
+		t.Fatalf("parse composed OpenAPI: %v", err)
+	}
+	if err := parsed.Validate(t.Context()); err != nil {
+		t.Fatalf("validate composed OpenAPI: %v", err)
+	}
+	{{- range .Modules}}
+	module := document.Paths[{{.Name}}.RoutePrefix]
+	operation, ok := module["get"]
+	if !ok {
+		t.Fatalf("%s is served by module {{.Name}} but is not documented", {{.Name}}.RoutePrefix)
+	}
+	if operation.OperationID == "" {
+		t.Fatalf("%s has no operationId in the document", {{.Name}}.RoutePrefix)
+	}
+	data := operation.Responses["200"].Content["application/json"].Schema.Properties["data"].Properties
+	if data["module"] == nil || data["message"] == nil {
+		t.Fatalf("%s success data = %+v, want the module response fields", {{.Name}}.RoutePrefix, data)
+	}
+	{{- end}}
+}
+{{- end}}
 {{- end}}
 
 {{if .Caps.Has "cron"}}

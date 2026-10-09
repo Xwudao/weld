@@ -31,6 +31,12 @@ type File struct {
 	// vary deterministically with the installed capability set.
 	When       []string `json:"when,omitempty"`
 	WhenAbsent []string `json:"whenAbsent,omitempty"`
+	// Shared marks a file several capabilities contribute identically, such as
+	// the neutral openapi contract package both api and module depend on. The
+	// first capability installed writes it and a later one leaves it untouched,
+	// so either install order works. A file that already exists without weld
+	// owning it is still a conflict, so a user file is never overwritten.
+	Shared bool `json:"shared,omitempty"`
 }
 
 // Patch is a snippet inserted at a named extension point in an existing file.

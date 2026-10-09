@@ -124,7 +124,14 @@ func AddModule(req Request, name string) (*Result, error) {
 			return nil, err
 		}
 		path := string(template.Render([]byte(file.Path), vars))
-		if err := p.planNewFile(path, capability, template.Render(content, vars)); err != nil {
+		rendered := template.Render(content, vars)
+		if file.Shared {
+			if err := p.planSharedFile(path, capability, rendered); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if err := p.planNewFile(path, capability, rendered); err != nil {
 			return nil, err
 		}
 	}

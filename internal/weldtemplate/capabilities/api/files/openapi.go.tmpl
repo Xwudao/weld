@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/Xwudao/go-validate"
+
+	"__module__/internal/openapi"
 )
 
 // openAPIVersion is the emitted document version. The field metadata is
@@ -22,22 +24,14 @@ const (
 	apiVersion  = "__version__"
 )
 
-// JSONSchema is the small, bounded subset of JSON Schema that go-validate field
-// metadata can express. There is deliberately no broader schema system here: if
-// a Spec carries a constraint without a mapping, schemaFromSpec fails instead
-// of emitting a document that silently omits the rule.
-type JSONSchema struct {
-	Type       any                    `json:"type,omitempty"`
-	Properties map[string]*JSONSchema `json:"properties,omitempty"`
-	Items      *JSONSchema            `json:"items,omitempty"`
-	Required   []string               `json:"required,omitempty"`
-	MinLength  *int                   `json:"minLength,omitempty"`
-	MaxLength  *int                   `json:"maxLength,omitempty"`
-	Minimum    any                    `json:"minimum,omitempty"`
-	Maximum    any                    `json:"maximum,omitempty"`
-	Format     string                 `json:"format,omitempty"`
-	Enum       []any                  `json:"enum,omitempty"`
-}
+// JSONSchema is the bounded subset of JSON Schema 2020-12 the document uses.
+//
+// It is the shared openapi.Schema type, so the built-in operations and the
+// operations a business module registers describe themselves with one schema
+// vocabulary. go-validate field metadata is mapped into it by schemaFromSpec,
+// which fails on a constraint it cannot express instead of emitting a document
+// that silently omits the rule.
+type JSONSchema = openapi.Schema
 
 // schemaFunc produces a schema on demand so a contract error can be returned
 // instead of panicking at package initialization.
@@ -60,13 +54,21 @@ type Operation struct {
 	Errors        []OperationError
 
 	handle func(service Service) http.HandlerFunc
+	// documented marks an operation the document states but this package does
+	// not serve: its route is owned by a business module that registered it
+	// through internal/openapi. A documented operation carries no handler.
+	documented bool
 }
 
-// QueryParameter is one query parameter, documented from the same Spec field
-// that validates it.
+// QueryParameter is one documented query parameter. A built-in operation
+// documents it from the go-validate Spec field that validates it (Spec); a
+// documented module operation declares it directly (Schema and Required).
+// Exactly one of Spec and Schema is set.
 type QueryParameter struct {
-	Name string
-	Spec func() validate.Spec
+	Name     string
+	Spec     func() validate.Spec
+	Schema   *JSONSchema
+	Required bool
 }
 
 // OperationError is one non-success response. Its body is the shared
@@ -196,11 +198,63 @@ func schemaFromField(field validate.FieldSchema, nullable bool) *JSONSchema {
 	return schema
 }
 
-// Document builds the OpenAPI 3.1 document from the route table. It fails when
-// the contract is incomplete or uses a constraint the document cannot express,
-// so a broken contract is rejected rather than documented incorrectly.
+// Document builds the OpenAPI 3.1 document from the built-in route table plus
+// the operations every linked business module registered through
+// internal/openapi. It fails when a contract is incomplete, uses a constraint
+// the document cannot express, or collides with another operation, so a broken
+// or conflicting contract is rejected rather than documented incorrectly.
+//
+// A module's documented operation and the route its Register installs come from
+// the same declaration, so the document cannot state an endpoint a module does
+// not serve. This package never infers a route, schema or authorization rule
+// from a handler; it states only what a module explicitly declared.
 func Document() (*OpenAPIDocument, error) {
-	return buildDocument(operations())
+	return buildDocument(allOperations())
+}
+
+// allOperations is the built-in route table followed by the documented
+// operations every linked business module registered. The two are one document:
+// a duplicate operationId or route is an error, never a silent overwrite.
+func allOperations() []Operation {
+	served := operations()
+	registered := openapi.Operations()
+	if len(registered) == 0 {
+		return served
+	}
+	merged := make([]Operation, 0, len(served)+len(registered))
+	merged = append(merged, served...)
+	for _, operation := range registered {
+		merged = append(merged, documentedOperation(operation))
+	}
+	return merged
+}
+
+// documentedOperation converts a module's registered contract into a
+// document-only Operation. It has no handler: the module owns the route, and
+// this package only states its contract.
+func documentedOperation(operation openapi.Operation) Operation {
+	query := make([]QueryParameter, 0, len(operation.Query))
+	for _, parameter := range operation.Query {
+		query = append(query, QueryParameter{Name: parameter.Name, Required: parameter.Required, Schema: parameter.Schema})
+	}
+	errors := make([]OperationError, 0, len(operation.Errors))
+	for _, response := range operation.Errors {
+		errors = append(errors, OperationError{Status: response.Status, Description: response.Description})
+	}
+	return Operation{
+		Method:        operation.Method,
+		Path:          operation.Path,
+		OperationID:   operation.OperationID,
+		Summary:       operation.Summary,
+		PathParams:    operation.PathParams,
+		Query:         query,
+		Body:          operation.RequestBody,
+		BodyRequired:  operation.RequestBodyRequired,
+		SuccessStatus: operation.SuccessStatus,
+		Success:       operation.Success,
+		Errors:        errors,
+		documented:    true,
+	}
 }
 
 // OpenAPIJSON returns the document as indented JSON: the artifact served at
@@ -273,8 +327,9 @@ func buildDocument(ops []Operation) (*OpenAPIDocument, error) {
 		Paths: make(map[string]PathItem, len(ops)),
 	}
 	seen := make(map[string]bool, len(ops))
+	routes := make(map[string]bool, len(ops))
 	for _, operation := range ops {
-		if err := validateOperation(operation, seen); err != nil {
+		if err := validateOperation(operation, seen, routes); err != nil {
 			return nil, err
 		}
 		built, err := buildOperation(operation)
@@ -292,8 +347,9 @@ func buildDocument(ops []Operation) (*OpenAPIDocument, error) {
 }
 
 // validateOperation rejects an incomplete contract instead of emitting a
-// document that quietly omits it.
-func validateOperation(operation Operation, seen map[string]bool) error {
+// document that quietly omits it, and rejects a route or operationId declared
+// twice instead of silently overwriting one operation with another.
+func validateOperation(operation Operation, seen, routes map[string]bool) error {
 	if operation.Method == "" || operation.Path == "" {
 		return fmt.Errorf("operation %q: method and path are required", operation.OperationID)
 	}
@@ -304,7 +360,14 @@ func validateOperation(operation Operation, seen map[string]bool) error {
 		return fmt.Errorf("duplicate operationId %q", operation.OperationID)
 	}
 	seen[operation.OperationID] = true
-	if operation.handle == nil {
+	route := strings.ToLower(operation.Method) + " " + operation.Path
+	if routes[route] {
+		return fmt.Errorf("%s is declared twice", route)
+	}
+	routes[route] = true
+	// A served operation needs a handler; a documented module operation is
+	// stated by the module that owns its route and deliberately has none.
+	if operation.handle == nil && !operation.documented {
 		return fmt.Errorf("operation %q: no handler", operation.OperationID)
 	}
 	if operation.SuccessStatus == 0 || operation.Success == nil {
@@ -333,6 +396,17 @@ func buildOperation(operation Operation) (*OperationDocument, error) {
 		})
 	}
 	for _, parameter := range operation.Query {
+		if parameter.Schema != nil {
+			// A business module declared the parameter directly, without a
+			// go-validate Spec.
+			document.Parameters = append(document.Parameters, ParameterDocument{
+				Name:     parameter.Name,
+				In:       "query",
+				Required: parameter.Required,
+				Schema:   parameter.Schema,
+			})
+			continue
+		}
 		if parameter.Spec == nil {
 			return nil, fmt.Errorf("query parameter %q: missing spec", parameter.Name)
 		}

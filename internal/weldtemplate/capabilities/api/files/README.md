@@ -7,6 +7,40 @@ constraints. `operations()` is the single route table behind both the mux
 registration (`Register`) and the document (`Document`, served at
 `GET /api/openapi.json`).
 
+## Business modules in the document
+
+The document merges two sources: the built-in `operations()` table and the
+operations every linked business module registered with the shared
+`internal/openapi` package. A module registers the same route table its
+`Register` installs, so a module route cannot exist undocumented and a
+documented operation cannot exist unrouted. This package never imports a module
+and never infers a route, a schema or an authorization rule from a handler: it
+states only what a module explicitly declared.
+
+A duplicate `operationId`, method or path between the two sources is an error,
+never a silent overwrite, so `weld add module` and `weld add api` compose in
+either order without one hiding the other. A module that predates this package
+simply contributes no documented operation; it never breaks the build.
+
+## The document switch (fail-closed)
+
+`GET /api/openapi.json` is **off by default**. It is served only when the
+deployment names itself a development or local environment *and* explicitly
+enables the switch:
+
+- `environment` in `config.yml`, overridden by the `APP_ENV` environment
+  variable, must be `development` or `local`;
+- `openapi.enabled`, overridden by the `OPENAPI_ENABLED` environment variable,
+  must be `true`.
+
+An unset, unknown or production environment never serves the document, even if
+the switch is enabled. The decision is resolved once from the typed
+configuration (`config.Config.OpenAPIDocumentEnabled`) and passed to
+`api.Register` as a plain bool, so no `os.Getenv` bypass can disagree with the
+process configuration. A refused request is a `404` with no document, not a
+hidden endpoint that still returns the document. The built-in items API and the
+business module routes are unaffected by the switch.
+
 ## Request and response format
 
 Request bodies are the DTOs themselves. Responses are wrapped in the shared

@@ -1,0 +1,62 @@
+package api
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+)
+
+// The OpenAPI endpoint is gated by an explicit bool the composition resolves
+// from configuration (see config.Config.OpenAPIDocumentEnabled). These tests
+// exercise the HTTP handler seam: with the document disabled the endpoint must
+// reject the request at the HTTP layer and leak nothing, not merely hide a UI.
+
+// TestHandlerRejectsOpenAPIWhenDisabled proves the disabled endpoint answers
+// 404 indistinguishably from a missing route and its body carries no schema or
+// route marker.
+func TestHandlerRejectsOpenAPIWhenDisabled(t *testing.T) {
+	handler := Handler(newFakeService(), false)
+
+	recorder := serve(t, handler, http.MethodGet, openAPIPath, "")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("GET %s = %d, want 404: %s", openAPIPath, recorder.Code, recorder.Body)
+	}
+	missing := serve(t, handler, http.MethodGet, "/api/does-not-exist", "")
+	if recorder.Body.String() != missing.Body.String() {
+		t.Fatalf("the disabled endpoint is distinguishable from a missing route:\n%q\n%q", recorder.Body.String(), missing.Body.String())
+	}
+	assertNoDocumentLeak(t, recorder.Body.String())
+}
+
+// TestHandlerServesOpenAPIWhenEnabled is the opt-in counterpart: the handler
+// serves the raw OpenAPI 3.1 document.
+func TestHandlerServesOpenAPIWhenEnabled(t *testing.T) {
+	recorder := serve(t, Handler(newFakeService(), true), http.MethodGet, openAPIPath, "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200: %s", openAPIPath, recorder.Code, recorder.Body)
+	}
+	if !strings.Contains(recorder.Body.String(), `"openapi":"3.1.0"`) {
+		t.Fatalf("body is not the OpenAPI document: %s", recorder.Body)
+	}
+}
+
+// TestHandlerKeepsItemsRoutesWhenOpenAPIDisabled proves the gate never touches
+// the business routes: the items demo still serves with the document refused.
+func TestHandlerKeepsItemsRoutesWhenOpenAPIDisabled(t *testing.T) {
+	handler := Handler(newFakeService(), false)
+	recorder := serve(t, handler, http.MethodGet, "/api/items", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /api/items = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+}
+
+// assertNoDocumentLeak asserts a rejected response reveals none of the markers
+// that would expose the schema or the routed surface.
+func assertNoDocumentLeak(t *testing.T, body string) {
+	t.Helper()
+	for _, marker := range []string{"openapi", "paths", "schema", "operationId", "/api/items"} {
+		if strings.Contains(body, marker) {
+			t.Fatalf("disabled response leaked %q: %s", marker, body)
+		}
+	}
+}

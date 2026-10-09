@@ -9,6 +9,8 @@ import (
 
 	"github.com/Xwudao/go-validate"
 	"github.com/getkin/kin-openapi/openapi3"
+
+	"__module__/internal/openapi"
 )
 
 // TestDocumentIsValidOpenAPI31 parses the artifact with a standards-based
@@ -225,21 +227,47 @@ func TestDocumentRejectsMissingOperationID(t *testing.T) {
 	}
 }
 
-// TestDocumentCoversEveryRoute keeps the route table and the document in step:
-// every registered operation appears in the document under the same method.
-func TestDocumentCoversEveryRoute(t *testing.T) {
-	document, err := Document()
+// TestDocumentMergesRegisteredModuleOperations proves a module's registered
+// contract reaches the document with the shared envelope wrapping its success
+// data and without a handler in this package: the module owns the route.
+func TestDocumentMergesRegisteredModuleOperations(t *testing.T) {
+	operation := documentedOperation(openapi.Operation{
+		Method:        http.MethodGet,
+		Path:          "/api/example",
+		OperationID:   "getExample",
+		Summary:       "Example",
+		Query:         []openapi.QueryParameter{{Name: "name", Schema: &openapi.Schema{Type: "string"}}},
+		SuccessStatus: http.StatusOK,
+		Success:       func() (*JSONSchema, error) { return openapi.SchemaOf[ItemResponse]() },
+	})
+	document, err := buildDocument(append(operations(), operation))
 	if err != nil {
-		t.Fatalf("Document: %v", err)
+		t.Fatalf("buildDocument: %v", err)
 	}
-	for _, operation := range operations() {
-		path := document.Paths[operation.Path]
-		if path == nil {
-			t.Errorf("%s is not documented", operation.route())
-			continue
-		}
-		if path[strings.ToLower(operation.Method)] == nil {
-			t.Errorf("%s has no %s operation", operation.Path, operation.Method)
-		}
+	get := document.Paths["/api/example"]["get"]
+	if get == nil || get.OperationID != "getExample" {
+		t.Fatalf("registered operation is missing: %+v", get)
+	}
+	if len(get.Parameters) != 1 || get.Parameters[0].Name != "name" || get.Parameters[0].Required {
+		t.Fatalf("query parameter = %+v", get.Parameters)
+	}
+	data := get.Responses["200"].Content["application/json"].Schema.Properties["data"]
+	if data == nil || data.Properties["id"] == nil {
+		t.Fatalf("success data = %+v, want the module response object schema", data)
+	}
+}
+
+// TestDocumentRejectsDuplicateRoute proves a module cannot silently overwrite a
+// built-in route: a colliding method and path is an error, not a shadow.
+func TestDocumentRejectsDuplicateRoute(t *testing.T) {
+	operation := documentedOperation(openapi.Operation{
+		Method:        http.MethodPost,
+		Path:          "/api/items",
+		OperationID:   "shadowCreateItem",
+		SuccessStatus: http.StatusOK,
+		Success:       func() (*JSONSchema, error) { return openapi.SchemaOf[ItemResponse]() },
+	})
+	if _, err := buildDocument(append(operations(), operation)); err == nil {
+		t.Fatal("expected an error for a duplicate route")
 	}
 }

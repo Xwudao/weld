@@ -1,0 +1,47 @@
+package __modname__
+
+import (
+	nethttp "net/http"
+
+	"__module__/internal/openapi"
+)
+
+// greetingContract is the documented contract for the module's greeting route.
+//
+// Its method and path are the same ones operations() installs, its query
+// parameter is the one the handler reads, and its response is rendered from the
+// module's own Response DTO through openapi.SchemaOf, so the wire shape and the
+// document cannot drift. Change the DTO and this contract follows; add an
+// endpoint and add its contract here.
+func greetingContract() openapi.Operation {
+	return openapi.Operation{
+		Method:      nethttp.MethodGet,
+		Path:        RoutePrefix,
+		OperationID: "greet__ModName__",
+		Summary:     "Greet the caller",
+		Query: []openapi.QueryParameter{
+			{Name: "name", Schema: &openapi.Schema{Type: "string"}},
+		},
+		SuccessStatus: nethttp.StatusOK,
+		Success:       func() (*openapi.Schema, error) { return openapi.SchemaOf[Response]() },
+		Errors: []openapi.Error{
+			{Status: nethttp.StatusInternalServerError, Description: "Greeting failed"},
+		},
+	}
+}
+
+// init registers the module's contract with the shared internal/openapi
+// registry, so the api capability's document includes these routes whenever the
+// module is linked into the server. Registration is explicit: an operation is
+// documented because this module declared it, never inferred from a handler.
+func init() {
+	contracts := make([]openapi.Operation, 0, len(operations()))
+	for _, op := range operations() {
+		contract := op.contract()
+		// Method and path always come from the same operation Register mounts.
+		// A customized route cannot silently retain stale URL documentation.
+		contract.Method, contract.Path = op.method, op.path
+		contracts = append(contracts, contract)
+	}
+	openapi.Register(contracts...)
+}

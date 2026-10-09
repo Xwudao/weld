@@ -492,6 +492,12 @@ func TestAddRefreshesUneditedDITest(t *testing.T) {
 				t.Fatalf("drift after add: %+v", drift)
 			}
 			gofmtCheck(t, dir)
+			// This executes the generated DI mux test as well as module/API tests:
+			// /api/openapi.json must include the module's GET route and response
+			// schema in both install orders, not merely compile the graph.
+			if !buildAndTestGeneratedProject(t, dir) {
+				t.Skip("cannot resolve generated project's dependencies (network/module cache unavailable)")
+			}
 		})
 	}
 }

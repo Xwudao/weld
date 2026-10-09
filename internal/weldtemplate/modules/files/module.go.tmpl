@@ -2,8 +2,8 @@
 //
 // weld generated this package once, when `weld add module __modname__` ran, and
 // recorded every file in weld.json. It is a small, replaceable example: a typed
-// request and response, a Service seam, and a Go HTTP handler registered under
-// /api/__modname__. Editing it is expected; weld never regenerates it, so your
+// request and response, a Service seam, a route table, and the OpenAPI contract
+// for those routes. Editing it is expected; weld never regenerates it, so your
 // changes survive later `weld add` commands.
 //
 // The default Service is an in-memory demo. It keeps no state across restarts
@@ -19,6 +19,14 @@
 // httpx.RawText, httpx.Bytes or httpx.NoContent for a response that must stay
 // unwrapped.
 //
+// operations() is the single route table: Register installs each entry on the
+// composed mux and contract.go documents the same entry, so the route and its
+// OpenAPI contract cannot drift. The contract is registered with the shared
+// internal/openapi registry at package initialization, so `weld add api` includes
+// these routes in GET /api/openapi.json without this package being imported by
+// the api package. When you add or change an endpoint, add its operation here
+// and its contract in contract.go together.
+//
 // Wiring is entirely through the generated internal/di graph: the server graph
 // provides __modname__.NewService and registers this module on the composed mux
 // (di.newMux). A module added after Loom appears in the graph without weld
@@ -32,11 +40,37 @@ import (
 	nethttp "net/http"
 
 	"__module__/internal/httpx"
+	"__module__/internal/openapi"
 )
 
 // RoutePrefix is the URL path this module serves. It owns one segment under the
 // reserved /api namespace.
 const RoutePrefix = "/api/__modname__"
+
+// operation is one HTTP operation this module serves. It is the single source
+// for the route Register installs and the contract the OpenAPI document states:
+// the same method and path drive both, so a route cannot exist undocumented and
+// a documented operation cannot exist unrouted.
+type operation struct {
+	method   string
+	path     string
+	handle   func(Service) nethttp.HandlerFunc
+	contract func() openapi.Operation
+}
+
+// operations is the module's explicit route table. Register installs every entry
+// on the mux and contract.go documents it, so add an endpoint in one place and
+// its handler and contract follow together.
+func operations() []operation {
+	return []operation{
+		{
+			method:   nethttp.MethodGet,
+			path:     RoutePrefix,
+			handle:   handle,
+			contract: greetingContract,
+		},
+	}
+}
 
 // Register installs the module's routes on mux.
 //
@@ -44,7 +78,9 @@ const RoutePrefix = "/api/__modname__"
 // module's dependencies and a test can inject a fake. The Loom server graph
 // calls it with the Service it provides.
 func Register(mux *nethttp.ServeMux, service Service) {
-	mux.HandleFunc("GET "+RoutePrefix, handle(service))
+	for _, op := range operations() {
+		mux.HandleFunc(op.method+" "+op.path, op.handle(service))
+	}
 }
 
 // handle adapts the Service to net/http.

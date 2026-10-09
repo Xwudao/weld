@@ -1,0 +1,211 @@
+// Package openapi is the shared, transport-neutral description of one HTTP
+// operation: the method and path a handler serves and the JSON Schema contract
+// the generated /api/openapi.json states for it.
+//
+// The api capability renders the document from its own route table plus every
+// operation a business module registers here. A module registers from its own
+// package, so the api package never imports the module and a project whose
+// modules predate this package still compiles: an old module simply contributes
+// no documented operation instead of breaking the build.
+//
+// This package is written once, by the first of the api and module capabilities
+// installed, and never rewritten, so edits survive later `weld add` commands.
+//
+// Schema is a bounded subset of JSON Schema 2020-12, the dialect OpenAPI 3.1
+// uses. There is deliberately no broader schema system: an operation states the
+// constraints it means to document, and the api package reports a contract it
+// cannot merge rather than emitting a document that quietly disagrees with the
+// routes.
+package openapi
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+	"sync"
+)
+
+// Schema is the bounded subset of JSON Schema 2020-12 the document uses.
+type Schema struct {
+	Description          string             `json:"description,omitempty"`
+	Type                 any                `json:"type,omitempty"`
+	Properties           map[string]*Schema `json:"properties,omitempty"`
+	AdditionalProperties any                `json:"additionalProperties,omitempty"`
+	Nullable             bool               `json:"nullable,omitempty"`
+	Items                *Schema            `json:"items,omitempty"`
+	Required             []string           `json:"required,omitempty"`
+	MinLength            *int               `json:"minLength,omitempty"`
+	MaxLength            *int               `json:"maxLength,omitempty"`
+	Minimum              any                `json:"minimum,omitempty"`
+	Maximum              any                `json:"maximum,omitempty"`
+	Format               string             `json:"format,omitempty"`
+	Enum                 []any              `json:"enum,omitempty"`
+}
+
+// Operation is one documented HTTP operation. A module declares the same
+// entries its Register installs on the mux, so a route cannot exist undocumented
+// and a documented operation cannot exist unrouted.
+type Operation struct {
+	Method      string
+	Path        string
+	OperationID string
+	Summary     string
+	Description string
+	PathParams  []string
+	Query       []QueryParameter
+	// RequestBody and Success produce the schema on demand, so a contract the
+	// api package cannot express is reported when the document is built rather
+	// than panicking during package initialization.
+	RequestBody         func() (*Schema, error)
+	RequestBodyRequired bool
+	SuccessStatus       int
+	Success             func() (*Schema, error)
+	Errors              []Error
+}
+
+// QueryParameter is one documented query parameter.
+type QueryParameter struct {
+	Name     string
+	Required bool
+	Schema   *Schema
+}
+
+// Error is one documented non-success response. Its body is the shared
+// {code,msg,data} envelope with data null, so only the transport status and a
+// description are needed.
+type Error struct {
+	Status      int
+	Description string
+}
+
+// registry holds the operations modules registered during package
+// initialization. It is process-local: a module package registers once when it is
+// linked, and the api package reads the table when it builds the document.
+var registry struct {
+	mu         sync.Mutex
+	operations []Operation
+}
+
+// Register records the operations a module documents. A generated module calls
+// it from its package initialization, so the contract is present whenever the
+// module is linked into the server without the api package importing the module
+// or the dependency graph naming a per-module symbol.
+func Register(operations ...Operation) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.operations = append(registry.operations, operations...)
+}
+
+// Operations returns a copy of every registered operation, in registration
+// order.
+func Operations() []Operation {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	operations := make([]Operation, len(registry.operations))
+	copy(operations, registry.operations)
+	return operations
+}
+
+// SchemaOf renders T as a JSON Schema object from its exported fields and their
+// json struct tags: string, bool, integer, number, slices, maps and nested
+// structs are supported, a pointer field is nullable, and a field tagged
+// omitempty is optional. It is the one source a generated module uses to
+// document its own Request and Response, so the wire shape and the document
+// cannot drift.
+//
+// It is deliberately bounded: a field whose kind it cannot express is an error
+// rather than a silently dropped property.
+func SchemaOf[T any]() (*Schema, error) {
+	var zero T
+	return schemaOf(reflect.TypeOf(zero))
+}
+
+func schemaOf(typ reflect.Type) (*Schema, error) {
+	if typ == nil {
+		return nil, fmt.Errorf("openapi: nil type")
+	}
+	if typ.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("openapi: %s is not a struct", typ)
+	}
+	object := &Schema{Type: "object", Properties: make(map[string]*Schema, typ.NumField())}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name, required := jsonField(field)
+		if name == "" {
+			continue
+		}
+		schema, err := schemaOfType(field.Type)
+		if err != nil {
+			return nil, fmt.Errorf("openapi: field %s: %w", field.Name, err)
+		}
+		object.Properties[name] = schema
+		if required {
+			object.Required = append(object.Required, name)
+		}
+	}
+	return object, nil
+}
+
+// jsonField returns the JSON name of a field and whether it is required. An
+// unexported or json:"-" field is skipped (name ""); an omitempty field is
+// optional.
+func jsonField(field reflect.StructField) (name string, required bool) {
+	if field.PkgPath != "" {
+		return "", false
+	}
+	parts := strings.Split(field.Tag.Get("json"), ",")
+	name = parts[0]
+	if name == "-" {
+		return "", false
+	}
+	if name == "" {
+		name = field.Name
+	}
+	for _, option := range parts[1:] {
+		if option == "omitempty" {
+			return name, false
+		}
+	}
+	return name, true
+}
+
+func schemaOfType(typ reflect.Type) (*Schema, error) {
+	if typ.Kind() == reflect.Pointer {
+		element, err := schemaOfType(typ.Elem())
+		if err != nil {
+			return nil, err
+		}
+		element.Nullable = true
+		return element, nil
+	}
+	switch typ.Kind() {
+	case reflect.String:
+		return &Schema{Type: "string"}, nil
+	case reflect.Bool:
+		return &Schema{Type: "boolean"}, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return &Schema{Type: "integer"}, nil
+	case reflect.Float32, reflect.Float64:
+		return &Schema{Type: "number"}, nil
+	case reflect.Slice, reflect.Array:
+		items, err := schemaOfType(typ.Elem())
+		if err != nil {
+			return nil, err
+		}
+		return &Schema{Type: "array", Items: items}, nil
+	case reflect.Map:
+		if typ.Key().Kind() != reflect.String {
+			return nil, fmt.Errorf("map key %s is not a string", typ.Key())
+		}
+		value, err := schemaOfType(typ.Elem())
+		if err != nil {
+			return nil, err
+		}
+		return &Schema{Type: "object", AdditionalProperties: value}, nil
+	case reflect.Struct:
+		return schemaOf(typ)
+	default:
+		return nil, fmt.Errorf("unsupported kind %s", typ.Kind())
+	}
+}
