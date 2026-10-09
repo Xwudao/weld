@@ -224,6 +224,12 @@ func TestInternalErrorIsNotLeaked(t *testing.T) {
 // wrapped: tooling must receive the document itself.
 func TestOpenAPIEndpointServesRawDocument(t *testing.T) {
 	recorder := serve(t, Handler(newFakeService(), true), http.MethodGet, "/api/openapi.json", "")
+	if !OpenAPIBuildEnabled {
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("default build must refuse the document, got %d", recorder.Code)
+		}
+		return
+	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
 	}

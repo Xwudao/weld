@@ -498,6 +498,9 @@ func TestAddRefreshesUneditedDITest(t *testing.T) {
 			if !buildAndTestGeneratedProject(t, dir) {
 				t.Skip("cannot resolve generated project's dependencies (network/module cache unavailable)")
 			}
+			// A default build rejects the endpoint. The opt-in build must
+			// actually serve and parse the composed module document.
+			runGo(t, dir, "test", "-tags", "openapi", "./internal/api", "./internal/di")
 		})
 	}
 }

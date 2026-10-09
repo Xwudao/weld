@@ -243,7 +243,7 @@ func TestComposedMuxOpenAPIDocumentGate(t *testing.T) {
 			mux := newMuxWithAPI(tc.cfg, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 			recorder := httptest.NewRecorder()
 			mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
-			if !tc.wantDoc {
+			if !tc.wantDoc || !api.OpenAPIBuildEnabled {
 				if recorder.Code != nethttp.StatusNotFound {
 					t.Fatalf("GET /api/openapi.json = %d, want 404: %s", recorder.Code, recorder.Body)
 				}
@@ -298,8 +298,12 @@ func TestComposedMuxOpenAPIGateUsesRealConfiguration(t *testing.T) {
 	mux := newMuxWithAPI(devCfg, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
-	if recorder.Code != nethttp.StatusOK {
-		t.Fatalf("development opt-in = %d, want 200: %s", recorder.Code, recorder.Body)
+	wantStatus := nethttp.StatusNotFound
+	if api.OpenAPIBuildEnabled {
+		wantStatus = nethttp.StatusOK
+	}
+	if recorder.Code != wantStatus {
+		t.Fatalf("development opt-in = %d, want %d: %s", recorder.Code, wantStatus, recorder.Body)
 	}
 
 	prodLoader := fakeLoader(
@@ -555,6 +559,12 @@ func TestDocumentIncludesBusinessModules(t *testing.T) {
 	mux := newMuxWithAPI(&config.Config{Environment: config.EnvironmentDevelopment, OpenAPI: config.OpenAPI{Enabled: true}}, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
+	if !api.OpenAPIBuildEnabled {
+		if recorder.Code != nethttp.StatusNotFound {
+			t.Fatalf("default build leaked document: HTTP %d", recorder.Code)
+		}
+		return
+	}
 	if recorder.Code != nethttp.StatusOK {
 		t.Fatalf("GET /api/openapi.json = %d: %s", recorder.Code, recorder.Body)
 	}

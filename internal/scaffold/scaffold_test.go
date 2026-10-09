@@ -1413,11 +1413,8 @@ func TestAPIDBMatrixServesInMemoryWithoutDatabase(t *testing.T) {
 			if !goModTidy(t, dir) {
 				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 			}
-			clean := envWithout("DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "APP_ENV", "OPENAPI_ENABLED")
-			// serveProbe waits on the document endpoint. It is fail-closed by
-			// default, so opt in explicitly for this development-only probe.
-			env := append(clean, "APP_ENV=development", "OPENAPI_ENABLED=true")
-			env = append(env, tc.extraEnv...)
+			clean := envWithout("DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME")
+			env := append(clean, tc.extraEnv...)
 			binary := buildAppBinary(t, dir, env)
 
 			// First run: the API is reachable and keeps an item in memory.
@@ -1498,7 +1495,8 @@ func (b *syncBuffer) String() string {
 }
 
 // serveProbe starts the generated serve command on a fresh loopback address,
-// waits until it answers, and returns the process, its base URL and its captured
+// waits for the items business API (not the build-tagged OpenAPI document),
+// and returns the process, its base URL and its captured
 // stderr. The process is killed when the test finishes.
 func serveProbe(t *testing.T, binary, dir string, env []string) (*exec.Cmd, string, *syncBuffer) {
 	t.Helper()
@@ -1518,7 +1516,7 @@ func serveProbe(t *testing.T, binary, dir string, env []string) (*exec.Cmd, stri
 	base := "http://" + addr
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := nethttp.Get(base + "/api/openapi.json")
+		resp, err := nethttp.Get(base + "/api/items")
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == nethttp.StatusOK {

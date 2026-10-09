@@ -135,13 +135,14 @@ func getItemHandler(service Service) http.HandlerFunc {
 // raw with httpx.RawJSON and is deliberately not wrapped in the response
 // envelope: a spec generator must receive the OpenAPI document itself.
 //
-// When serveOpenAPI is false the handler fails closed: it answers with the same
+// Without the explicit openapi build tag, or when serveOpenAPI is false,
+// the handler fails closed: it answers with the same
 // 404 a missing route produces and never builds the document, so the schema and
 // the routed surface never leave the process. This rejects the request at the
 // HTTP layer; it is not merely a hidden UI.
 func openAPIHandler(serveOpenAPI bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !serveOpenAPI {
+		if !OpenAPIBuildEnabled || !serveOpenAPI {
 			http.NotFound(w, r)
 			return
 		}

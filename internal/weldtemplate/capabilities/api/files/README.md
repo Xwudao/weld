@@ -24,9 +24,11 @@ simply contributes no documented operation; it never breaks the build.
 
 ## The document switch (fail-closed)
 
-`GET /api/openapi.json` is **off by default**. It is served only when the
-deployment names itself a development or local environment *and* explicitly
-enables the switch:
+`GET /api/openapi.json` is **off by default**. A normal build cannot serve it,
+even if configuration or a caller mistakenly enables it. A development binary
+must opt in with `go build -tags openapi ./...` (or `go test -tags openapi ./...`).
+Even in that build, the deployment must name itself a development/local
+environment *and* explicitly enable the runtime switch:
 
 - `environment` in `config.yml`, overridden by the `APP_ENV` environment
   variable, must be `development` or `local`;
@@ -34,7 +36,7 @@ enables the switch:
   must be `true`.
 
 An unset, unknown or production environment never serves the document, even if
-the switch is enabled. The decision is resolved once from the typed
+the binary was built with `-tags openapi` and the switch is enabled. The decision is resolved once from the typed
 configuration (`config.Config.OpenAPIDocumentEnabled`) and passed to
 `api.Register` as a plain bool, so no `os.Getenv` bypass can disagree with the
 process configuration. A refused request is a `404` with no document, not a

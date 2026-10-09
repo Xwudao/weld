@@ -28,10 +28,17 @@ func TestHandlerRejectsOpenAPIWhenDisabled(t *testing.T) {
 	assertNoDocumentLeak(t, recorder.Body.String())
 }
 
-// TestHandlerServesOpenAPIWhenEnabled is the opt-in counterpart: the handler
-// serves the raw OpenAPI 3.1 document.
+// TestHandlerServesOpenAPIWhenEnabled requires both independent gates: a
+// default build refuses even a true flag; an opt-in build serves the document.
 func TestHandlerServesOpenAPIWhenEnabled(t *testing.T) {
 	recorder := serve(t, Handler(newFakeService(), true), http.MethodGet, openAPIPath, "")
+	if !OpenAPIBuildEnabled {
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("without -tags openapi: GET %s = %d, want 404", openAPIPath, recorder.Code)
+		}
+		assertNoDocumentLeak(t, recorder.Body.String())
+		return
+	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("GET %s = %d, want 200: %s", openAPIPath, recorder.Code, recorder.Body)
 	}

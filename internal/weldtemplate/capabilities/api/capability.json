@@ -9,6 +9,8 @@
     { "path": "internal/api/dto.go", "source": "files/dto.go.tmpl" },
     { "path": "internal/api/service.go", "source": "files/service.go.tmpl" },
     { "path": "internal/api/handler.go", "source": "files/handler.go.tmpl" },
+    { "path": "internal/api/openapi_build_disabled.go", "source": "files/openapi_build_disabled.go.tmpl" },
+    { "path": "internal/api/openapi_build_enabled.go", "source": "files/openapi_build_enabled.go.tmpl" },
     { "path": "internal/api/openapi.go", "source": "files/openapi.go.tmpl" },
     { "path": "internal/api/api_test.go", "source": "files/api_test.go.tmpl" },
     { "path": "internal/api/openapi_test.go", "source": "files/openapi_test.go.tmpl" },
