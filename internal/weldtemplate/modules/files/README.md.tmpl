@@ -12,13 +12,34 @@ An HTTP business module wired through `internal/httpx`:
   `CreateRequest.Validate`.
 - `service.go` — the `Service` interface, the default `NewService`, and the
   `NewDemoService` demo constructor the package's tests use.
-- `module.go` — `Register`, where every route is declared once.
+- `module.go` — `Register`: the route table, one statement per route, with each
+  handler named rather than inlined.
+- `handler.go` — the handlers themselves, one function per route.
 - `module_test.go` — an in-process `httptest` suite with the demo service.
+
+## Where code goes
+
+The module follows the same split as the rest of the project: a file that wires
+things together stays readable because the work lives elsewhere.
+
+- `module.go` declares routes and nothing else. A route reads as a goal —
+  `httpx.Get(router, "/greet", handleGreet(service))` — so the module's surface
+  is legible and a handler has a name in a stack trace.
+- `handler.go` holds the handler bodies. A handler that needs the `Service` is a
+  small constructor over it (`handleGreet(service) httpx.Handler[Request,
+  Response]`); one that needs nothing is a bare function (`handleHealth`).
+- `dto.go` and `params.go` hold the wire types, and a request type's `Validate`
+  holds its rules, so no handler repeats a manual check.
+- `service.go` holds the business logic and the dependencies it needs.
+
+Keep the handler bodies out of `Register`: a route declared with an inline
+closure hides the surface and makes the logic untestable on its own.
 
 ## Routes
 
-`Register` declares every route in one statement, and paths are relative to the
-mount the composition root gives it:
+`Register` declares every route in one statement, the handler named rather than
+inlined (the bodies are in `handler.go`), and paths are relative to the mount the
+composition root gives it:
 
 - `GET {prefix}/` — `httpx.NoInput`, a public route with no parameters.
 - `GET {prefix}/greet?name=Ada` — `httpx.Get`, which binds the query into

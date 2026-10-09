@@ -355,7 +355,10 @@ func writeModules(b *strings.Builder, manifest *project.Manifest) {
 	b.WriteString("weld writes them once and never regenerates them, so they are yours to edit;\n")
 	b.WriteString("the default service is an in-memory example, not persistence. Adding another\n")
 	b.WriteString("capability re-renders the Loom graph around them but leaves the module\n")
-	b.WriteString("packages untouched.\n\n")
+	b.WriteString("packages untouched. Each module keeps `module.go` a route table — one statement\n")
+	b.WriteString("per route, the handler named rather than inlined — and the handler bodies in\n")
+	b.WriteString("`handler.go`; follow that split when you add a route, so the module's surface\n")
+	b.WriteString("stays legible and each handler stays testable on its own.\n\n")
 	for _, module := range manifest.Modules {
 		fmt.Fprintf(b, "- **%s** v%s — `internal/modules/%s`, mounted by the server graph under `httpserver.APIPrefix` (so `/api/%s` by default).\n", module.Name, module.Version, module.Name, module.Name)
 	}

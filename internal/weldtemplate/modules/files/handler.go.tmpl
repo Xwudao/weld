@@ -1,0 +1,46 @@
+// The handlers for the routes Register declares in module.go.
+//
+// module.go is the route table: one statement per route. The bodies live here, so
+// a route reads as a goal rather than as a paragraph, and a handler has a name of
+// its own in a stack trace and in a test.
+//
+// A handler that needs the module's Service is a small constructor over it, so the
+// route table writes handleGreet(service) and never an inline closure. One that
+// needs nothing is the bare function, like handleHealth.
+package __modname__
+
+import (
+	"context"
+	nethttp "net/http"
+
+	"__module__/internal/httpx"
+)
+
+// handleIndex answers GET {prefix}/ and is the module's no-input example.
+func handleIndex(service Service) func(ctx context.Context) (Response, error) {
+	return func(ctx context.Context) (Response, error) {
+		return service.Greet(ctx, Request{})
+	}
+}
+
+// handleGreet answers GET {prefix}/greet?name=Ada: the request is already bound
+// from the query and validated before this runs.
+func handleGreet(service Service) httpx.Handler[Request, Response] {
+	return func(ctx context.Context, request Request) (Response, error) {
+		return service.Greet(ctx, request)
+	}
+}
+
+// handleCreateItem answers POST {prefix}/admin/items. The admin policy has already
+// refused an unauthenticated caller and the JSON body is bound and validated.
+func handleCreateItem(service Service) httpx.Handler[CreateRequest, Item] {
+	return func(ctx context.Context, request CreateRequest) (Item, error) {
+		return service.Create(ctx, request)
+	}
+}
+
+// handleHealth answers GET {prefix}/health with a body that stays unwrapped. It is
+// a raw handler, so it writes the response itself.
+func handleHealth(w nethttp.ResponseWriter, _ *nethttp.Request) {
+	httpx.RawText(w, nethttp.StatusOK, "ok")
+}

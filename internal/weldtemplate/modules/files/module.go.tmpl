@@ -28,6 +28,13 @@
 // the composition root defines once; this package never implements a guard, so
 // authorization policy lives in one place.
 //
+// The handlers themselves live in handler.go, and this file is the route table:
+// one statement per route, with the handler named rather than inlined, so the
+// module's surface can be read at a glance and a handler is a function with a
+// name of its own in a stack trace. A handler that needs the Service is a small
+// constructor over it (handleGreet(service)); one that needs nothing is the bare
+// function (handleHealth).
+//
 // Wiring is entirely through the generated internal/di graph: the server graph
 // provides __modname__.NewService, mounts this module under the versioned prefix
 // and defines its policies. A module added after Loom appears in the graph
@@ -38,7 +45,6 @@
 package __modname__
 
 import (
-	"context"
 	nethttp "net/http"
 
 	"__module__/internal/httpx"
@@ -57,9 +63,10 @@ const adminPolicy = "admin"
 
 // Register installs the module's routes on router.
 //
-// Each route is declared once: the method, the relative path, the request
-// binding, the handler and any policy are together, so there is no separate
-// route table to keep in sync.
+// Each route is declared once: the method, the relative path, the handler and
+// any policy are together, so there is no separate route table to keep in sync.
+// The handler is named rather than inlined — its body lives in handler.go — so
+// this function reads as the module's route table.
 //
 // It takes the Service rather than constructing one, so the caller owns the
 // module's dependencies and a test can inject a fake. The Loom server graph
@@ -77,26 +84,18 @@ const adminPolicy = "admin"
 //	admin.Post("/create", handler)
 func Register(router *httpx.Router, service Service) {
 	// GET {prefix}/ — public, no input.
-	httpx.NoInput(router, nethttp.MethodGet, "", func(ctx context.Context) (Response, error) {
-		return service.Greet(ctx, Request{})
-	})
+	httpx.NoInput(router, nethttp.MethodGet, "", handleIndex(service))
 
 	// GET {prefix}/greet?name=Ada — public, query binding.
-	httpx.Get(router, "/greet", func(ctx context.Context, request Request) (Response, error) {
-		return service.Greet(ctx, request)
-	})
+	httpx.Get(router, "/greet", handleGreet(service))
 
 	// POST {prefix}/admin/items — administrator. The named policy rejects an
 	// unauthenticated caller before the handler runs; the JSON body is bound and
-	// validated, then the handler creates the item.
-	httpx.Post(router, "/admin/items", func(ctx context.Context, request CreateRequest) (Item, error) {
-		return service.Create(ctx, request)
-	}, httpx.Policy(adminPolicy), httpx.WithStatus(nethttp.StatusCreated))
+	// validated, then handleCreateItem creates the item.
+	httpx.Post(router, "/admin/items", handleCreateItem(service), httpx.Policy(adminPolicy), httpx.WithStatus(nethttp.StatusCreated))
 
 	// GET {prefix}/health — the raw escape hatch: a response that must not be
 	// wrapped in the JSON envelope. The raw Get method keeps the method out of the
 	// path, so the path stays a plain constant.
-	router.Get("/health", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
-		httpx.RawText(w, nethttp.StatusOK, "ok")
-	})
+	router.Get("/health", handleHealth)
 }

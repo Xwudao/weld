@@ -884,13 +884,26 @@ func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
 		}
 	}
 	module := read("modules/files/module.go.tmpl")
-	for _, want := range []string{"httpx.NoInput(", "httpx.Get(", "httpx.Post(", "httpx.Policy(", "httpx.RawText("} {
+	moduleHandler := read("modules/files/handler.go.tmpl")
+	for _, want := range []string{"httpx.NoInput(", "httpx.Get(", "httpx.Post(", "httpx.Policy(", "handleIndex(service)", "handleGreet(service)", "handleCreateItem(service)", "handleHealth"} {
 		if !strings.Contains(module, want) {
 			t.Errorf("the module template is missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"contract", "openapi", "OpenAPI"} {
+	// The route table names its handlers; no handler body is inlined into
+	// Register, and the raw writer lives with the handler that uses it.
+	for _, forbidden := range []string{"func(ctx context.Context", "httpx.RawText("} {
 		if strings.Contains(module, forbidden) {
+			t.Errorf("the module template still inlines a handler body (%q)", forbidden)
+		}
+	}
+	for _, want := range []string{"httpx.Handler[Request, Response]", "httpx.Handler[CreateRequest, Item]", "httpx.RawText("} {
+		if !strings.Contains(moduleHandler, want) {
+			t.Errorf("the module handler template is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"contract", "openapi", "OpenAPI"} {
+		if strings.Contains(module, forbidden) || strings.Contains(moduleHandler, forbidden) {
 			t.Errorf("the module template still references %q", forbidden)
 		}
 	}
