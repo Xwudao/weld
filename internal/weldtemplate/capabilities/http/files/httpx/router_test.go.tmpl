@@ -213,6 +213,56 @@ func TestRawRouteRunsBaselineAndPolicy(t *testing.T) {
 	}
 }
 
+// TestRawVerbMethodsRegisterRunnableRoutes proves the raw Get/Post/... methods
+// register a route for their own method under the group prefix and still run the
+// mount's policies, so they are an ergonomic HandleFunc rather than a way around
+// the guard.
+func TestRawVerbMethodsRegisterRunnableRoutes(t *testing.T) {
+	mux := http.NewServeMux()
+	trail := []string{}
+	router := NewRouter(mux).
+		WithPolicy("base", marker(&trail, "base")).
+		Require("base")
+	ok := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+	router.Get("/get", ok)
+	router.Post("/post", ok)
+	router.Put("/put", ok)
+	router.Patch("/patch", ok)
+	router.Delete("/delete", ok)
+	router.Raw(http.MethodHead, "/head", ok)
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/get"},
+		{http.MethodPost, "/post"},
+		{http.MethodPut, "/put"},
+		{http.MethodPatch, "/patch"},
+		{http.MethodDelete, "/delete"},
+		{http.MethodHead, "/head"},
+	} {
+		trail = nil
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s %s = %d, want 200", tc.method, tc.path, recorder.Code)
+		}
+		if got := strings.Join(trail, ","); got != "base" {
+			t.Fatalf("%s %s policies = %q, want base", tc.method, tc.path, got)
+		}
+	}
+
+	// A helper registers only its own method: the same path with another verb is
+	// not served.
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/post", nil))
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /post = %d, want 405", recorder.Code)
+	}
+
+	if got := len(router.Routes()); got != 6 {
+		t.Fatalf("Routes() = %d entries, want 6", got)
+	}
+}
+
 // TestUndefinedPolicyPanics proves a route that references a policy the
 // composition never defined fails at registration rather than serving unguarded.
 func TestUndefinedPolicyPanics(t *testing.T) {

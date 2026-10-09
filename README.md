@@ -59,7 +59,10 @@ Capabilities:
 - `http` (add) — HTTP server lifecycle, the shared `internal/httpx` toolkit, a
   composable handler builder, and the single `serve` command. Requires `loom`.
   The toolkit owns the `{code,msg,data}` response envelope, the `Router` with
-  grouping and named route policies, typed endpoint helpers, query/path and JSON
+  grouping and named route policies, typed endpoint helpers, raw route methods
+  (`Router.Get`, `Router.Post`, ...) for a response the typed envelope does not
+  model,
+  query/path and JSON
   binding, and the composable middleware chain; the global stack is declared in
   the stable, project-owned `internal/httpserver/middleware.go` and the route
   policies in `internal/httpserver/policy.go`. The router records every route it

@@ -134,6 +134,51 @@ func (r *Router) HandleFunc(pattern string, handler http.HandlerFunc, opts ...Op
 	r.Handle(pattern, handler, opts...)
 }
 
+// Raw registers a raw handler for one method at pattern.
+//
+// Get, Delete, Post, Put and Patch cover the common verbs; Raw is for a method
+// they do not (HEAD, OPTIONS). All of them take the method and the path as
+// separate arguments, so a route built from a path constant does not assemble a
+// "METHOD /path" string by hand. The handler writes its own response, while the
+// router still applies the mount baseline and any Policy, exactly like
+// HandleFunc.
+func (r *Router) Raw(method, pattern string, handler http.HandlerFunc, opts ...Option) {
+	r.HandleFunc(method+" "+pattern, handler, opts...)
+}
+
+// Get registers a raw GET handler at pattern.
+//
+// It is the raw counterpart of the package-level Get: the handler receives the
+// *http.Request and writes the response itself — a legacy envelope, a download, a
+// stream — while the router still applies the mount's baseline and any Policy. Go
+// has no generic methods, so the typed endpoint helpers are package functions
+// (httpx.Get[Req, Resp]) and these raw verb methods live on the Router:
+//
+//	router.Get(RoutePrefix+"/all", handleAll(service))
+func (r *Router) Get(pattern string, handler http.HandlerFunc, opts ...Option) {
+	r.Raw(http.MethodGet, pattern, handler, opts...)
+}
+
+// Delete registers a raw DELETE handler at pattern; see Get.
+func (r *Router) Delete(pattern string, handler http.HandlerFunc, opts ...Option) {
+	r.Raw(http.MethodDelete, pattern, handler, opts...)
+}
+
+// Post registers a raw POST handler at pattern; see Get.
+func (r *Router) Post(pattern string, handler http.HandlerFunc, opts ...Option) {
+	r.Raw(http.MethodPost, pattern, handler, opts...)
+}
+
+// Put registers a raw PUT handler at pattern; see Get.
+func (r *Router) Put(pattern string, handler http.HandlerFunc, opts ...Option) {
+	r.Raw(http.MethodPut, pattern, handler, opts...)
+}
+
+// Patch registers a raw PATCH handler at pattern; see Get.
+func (r *Router) Patch(pattern string, handler http.HandlerFunc, opts ...Option) {
+	r.Raw(http.MethodPatch, pattern, handler, opts...)
+}
+
 // clone returns a copy that shares the mux but owns its own configuration, so a
 // derived router never mutates its parent.
 func (r *Router) clone() *Router {

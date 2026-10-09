@@ -359,11 +359,14 @@ business modules use: the `{code,msg,data}` JSON envelope (`JSON`, `Error`) and
 the raw writers for responses that must stay unwrapped (`RawJSON`, `RawText`,
 `Bytes`, `NoContent`); typed request binding (`DecodeJSON`, `QueryInt`) with a
 configurable body limit, a content-type check, single-value and unknown-field
-rejection and an optional code-first validator callback; and the composable
-middleware (`Chain`, `RequestID`, `AccessLog`, `Recover`). It depends only on
-the standard library — binding takes a validator callback, so `httpx` never
-imports `go-validate`, which stays a concern of `api`. The `AccessLog` recorder
-forwards `Flush` and `Hijack`, so a streaming or SSE response and a WebSocket
+rejection and an optional code-first validator callback; raw route methods on the
+router (`Router.Get`, `Router.Post`, ...), so a route built from a path constant
+never assembles a `"METHOD /path"` string by hand; and the
+composable middleware (`Chain`, `RequestID`, `AccessLog`, `Recover`). It depends
+only on the standard library — binding takes a validator callback, so `httpx`
+never imports `go-validate`, which stays a concern of `api`. The `AccessLog`
+recorder forwards `Flush` and `Hijack`, so a streaming or SSE response and a
+WebSocket
 upgrade keep working.
 
 `web` and `api` register their handler on the Loom server graph's `newMux`

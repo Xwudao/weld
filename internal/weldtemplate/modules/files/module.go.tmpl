@@ -17,10 +17,10 @@
 // request and returns the response or an error, and httpx writes the shared
 // {code,msg,data} envelope: httpx.JSON for a success and httpx.Error, or a
 // returned *httpx.HTTPError, for a failure. A request type that implements
-// Validate runs its rules after binding. Use router.HandleFunc with
-// httpx.RawText, httpx.Bytes or httpx.RawJSON for a response that must stay
-// unwrapped; a raw route still runs the mount's policies, so it is not a way
-// around the guard.
+// Validate runs its rules after binding. Use the router's raw route methods
+// (router.Get, router.Post, ...) with httpx.RawText, httpx.Bytes or httpx.RawJSON
+// for a response that must stay unwrapped; a raw route still runs the mount's
+// policies, so it is not a way around the guard.
 //
 // The module declares only relative paths; the composition root owns the mount
 // prefix, so the same module can serve /api/v1/__modname__ and /api/v2/__modname__
@@ -83,8 +83,9 @@ func Register(router *httpx.Router, service Service) {
 	}, httpx.Policy(adminPolicy), httpx.WithStatus(nethttp.StatusCreated))
 
 	// GET {prefix}/health — the raw escape hatch: a response that must not be
-	// wrapped in the JSON envelope.
-	router.HandleFunc("GET /health", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+	// wrapped in the JSON envelope. The raw Get method keeps the method out of the
+	// path, so the path stays a plain constant.
+	router.Get("/health", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 		httpx.RawText(w, nethttp.StatusOK, "ok")
 	})
 }

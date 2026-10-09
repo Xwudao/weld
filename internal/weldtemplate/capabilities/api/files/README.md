@@ -73,8 +73,8 @@ Every handler writes through the shared `{code,msg,data}` envelope:
 `code` always repeats the HTTP transport status; the API does not invent a
 separate business-code space. For a response that must stay unwrapped — a file
 download, a stream, SSE — register a raw handler with
-`router.HandleFunc("GET /export", ...)` and write it with `httpx.RawText`,
-`httpx.Bytes` or `httpx.RawJSON`.
+`router.Get("/export", ...)` (or `router.Raw` for another method) and write it
+with `httpx.RawText`, `httpx.Bytes` or `httpx.RawJSON`.
 
 ## Replaceable example, not persistence
 

@@ -1,5 +1,5 @@
 {
-  "version": "0.3.1",
+  "version": "0.3.2",
   "files": [
     { "path": "internal/modules/__modname__/dto.go", "source": "files/dto.go.tmpl" },
     { "path": "internal/modules/__modname__/service.go", "source": "files/service.go.tmpl" },
