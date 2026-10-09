@@ -183,6 +183,34 @@ func TestRequireIsFailClosedAndOpenOptsOut(t *testing.T) {
 	}
 }
 
+// TestRawRouteRunsBaselineAndPolicy proves the escape hatch is not a way around
+// the guard: a raw handler still runs the mount baseline and any Policy it is
+// given, and Open is the explicit way out, exactly like a typed route.
+func TestRawRouteRunsBaselineAndPolicy(t *testing.T) {
+	mux := http.NewServeMux()
+	trail := []string{}
+	router := NewRouter(mux).
+		WithPolicy("base", marker(&trail, "base")).
+		WithPolicy("extra", marker(&trail, "extra")).
+		Require("base")
+	ok := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+	router.HandleFunc("GET /guarded", ok)
+	router.HandleFunc("GET /extra", ok, Policy("extra"))
+	router.HandleFunc("GET /open", ok, Open())
+
+	for _, tc := range []struct{ path, want string }{
+		{"/guarded", "base"},
+		{"/extra", "base,extra"},
+		{"/open", ""},
+	} {
+		trail = nil
+		mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if got := strings.Join(trail, ","); got != tc.want {
+			t.Fatalf("raw %s policies = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
 // TestUndefinedPolicyPanics proves a route that references a policy the
 // composition never defined fails at registration rather than serving unguarded.
 func TestUndefinedPolicyPanics(t *testing.T) {

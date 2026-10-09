@@ -72,16 +72,19 @@ func (r *Router) Group(prefix string, middleware ...Middleware) *Router {
 
 // Handle registers a raw handler under the router's prefix.
 //
-// It is the escape hatch for responses the typed helpers do not express. The
-// pattern may carry an explicit method ("GET /items") or be a plain path, and it
-// is wrapped with the router's middleware exactly like a typed route.
-func (r *Router) Handle(pattern string, handler http.Handler) {
-	r.mux.Handle(r.fullPattern(pattern), r.wrap(handler))
+// It is the escape hatch for a response the typed helpers do not express, such
+// as a file download, a stream or a body in another envelope. The pattern may
+// carry an explicit method ("GET /items") or be a plain path. A raw route still
+// runs the router's baseline policies and any Policy it is given, exactly like a
+// typed route, so a guarded surface cannot be bypassed through a raw handler;
+// pass Open() for a raw route that must skip the baseline.
+func (r *Router) Handle(pattern string, handler http.Handler, opts ...Option) {
+	r.mux.Handle(r.fullPattern(pattern), r.wrap(Chain(r.routePolicies(resolveEndpoint(opts))...)(handler)))
 }
 
 // HandleFunc registers a raw handler function under the router's prefix.
-func (r *Router) HandleFunc(pattern string, handler http.HandlerFunc) {
-	r.Handle(pattern, handler)
+func (r *Router) HandleFunc(pattern string, handler http.HandlerFunc, opts ...Option) {
+	r.Handle(pattern, handler, opts...)
 }
 
 // clone returns a copy that shares the mux but owns its own configuration, so a
@@ -103,6 +106,19 @@ func (r *Router) clone() *Router {
 // wrap applies the router's middleware to one handler, outermost first.
 func (r *Router) wrap(handler http.Handler) http.Handler {
 	return Chain(r.middleware...)(handler)
+}
+
+// routePolicies resolves the middleware a route runs: the mount baseline unless
+// the route opts out with Open, followed by the route's own policies. Both typed
+// and raw routes go through it, so the baseline guards every route under the
+// mount and Open is the one explicit way out.
+func (r *Router) routePolicies(cfg *endpoint) []Middleware {
+	names := make([]string, 0, len(r.required)+len(cfg.policy))
+	if !cfg.open {
+		names = append(names, r.required...)
+	}
+	names = append(names, cfg.policy...)
+	return r.resolvePolicies(names)
 }
 
 // resolvePolicies turns route policy names into one ordered middleware chain.
