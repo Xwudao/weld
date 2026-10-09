@@ -95,6 +95,46 @@ func TestEnvironmentOverridesFile(t *testing.T) {
 	}
 }
 
+// TestEnvironmentDefaultsToProductionAndGatesDevelopment proves the environment
+// is production unless the file or APP_ENV says otherwise, and that only local
+// and development enable the development conveniences.
+func TestEnvironmentDefaultsToProductionAndGatesDevelopment(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Environment != EnvironmentProduction || cfg.Environment.IsDevelopment() {
+		t.Fatalf("default environment = %q, want production and not development", cfg.Environment)
+	}
+
+	cfg, err = fakeLoader(map[string]string{DefaultPath: "environment: Local\n"}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Environment != EnvironmentLocal || !cfg.Environment.IsDevelopment() {
+		t.Fatalf("environment = %q, want the normalized local and development", cfg.Environment)
+	}
+
+	loader := fakeLoader(map[string]string{DefaultPath: "environment: \"production\"\n"}, map[string]string{EnvEnvironment: "development"})
+	cfg, err = loader.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Environment != EnvironmentDevelopment || !cfg.Environment.IsDevelopment() {
+		t.Fatalf("environment = %q, want the APP_ENV value development", cfg.Environment)
+	}
+}
+
+// TestUnknownEnvironmentIsNotDevelopment proves an unrecognized value never
+// enables the development conveniences.
+func TestUnknownEnvironmentIsNotDevelopment(t *testing.T) {
+	for _, value := range []Environment{"", "staging", "prod", EnvironmentTest} {
+		if value.IsDevelopment() {
+			t.Fatalf("environment %q enabled development", value)
+		}
+	}
+}
+
 func TestLoadReadsDatabaseFromFile(t *testing.T) {
 	loader := fakeLoader(map[string]string{
 		DefaultPath: "database:\n  host: db.example\n  port: 6543\n  user: app\n  password: file-secret\n  name: appdb\n",

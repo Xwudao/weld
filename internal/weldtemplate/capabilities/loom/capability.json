@@ -1,6 +1,6 @@
 {
   "name": "loom",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "kind": "add",
   "summary": "Compile-time dependency injection: one Loom graph wires the configuration, the logger and the installed bindings, and, once http is installed, the HTTP server and the business modules. Every added capability is a Loom project.",
   "requires": ["config"],

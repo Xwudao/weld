@@ -312,7 +312,34 @@ func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service ap
 	return &App{Config: cfg, Server: server{{if .Caps.Has "api"}}, API: service{{end}}{{if .Caps.Has "cron"}}, Scheduler: scheduler{{end}}}
 }
 
-// newMux composes the application handler from the installed capabilities.
+// logRoutes logs the composed route table, with the policy guarding each route,
+// when the configuration marks a development environment; it is silent
+// everywhere else, so a production server never logs its surface. The router
+// records every route as it registers it, so the table is complete by the time
+// the composition calls this.
+func logRoutes(cfg *config.Config, logger *slog.Logger, router *httpx.Router) {
+	if cfg == nil || !cfg.Environment.IsDevelopment() {
+		return
+	}
+	logger.Info("registered routes", "count", len(router.Routes()), "environment", string(cfg.Environment))
+	router.LogRoutes(logger)
+}
+
+// newMux composes the module-only handler. It keeps the signature a project's
+// edited di_test.go was written against, so adding configuration to the
+// composition never breaks that preserved test; the graph itself calls
+// composeMux with the config and logger so a development environment logs the
+// routes.
+func newMux(
+	adminGuard httpx.Middleware,{{range .Modules}}
+	{{.Name}}Service {{.Name}}.Service,{{end}}
+) *nethttp.ServeMux {
+	return composeMux(nil, nil, adminGuard,{{range .Modules}}
+		{{.Name}}Service,{{end}}
+	)
+}
+
+// composeMux composes the application handler from the installed modules.
 //
 // Route composition is explicit here rather than through a global registry, so
 // the dependency graph is the single source of composition. Each module's mount
@@ -322,7 +349,12 @@ func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service ap
 // here with the guard the graph injects (httpserver.AdminGuard, a provider in the
 // stable policy file), so every module's administrator routes share one guard
 // and that guard can take the dependencies it needs.
-func newMux(
+//
+// A development environment logs the composed routes, so the surface and its
+// policy coverage are visible at startup.
+func composeMux(
+	cfg *config.Config,
+	logger *slog.Logger,
 	adminGuard httpx.Middleware,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) *nethttp.ServeMux {
@@ -335,16 +367,25 @@ func newMux(
 {{- range .Modules}}
 	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
 {{- end}}
+	logRoutes(cfg, logger, base)
 {{- end}}
 	return mux
 }
 {{- if .Caps.Has "api"}}
 
 // newMuxWithAPI composes the API and module routes. The API-specific wrapper
-// keeps newMux's module-only test seam source-compatible when api is added.
-// The API and the modules share one policy-aware base, mounted at
-// httpserver.APIPrefix, and one injected administrator guard.
+// keeps newMux's module-only test seam source-compatible when api is added, and
+// it keeps the signature a project's edited di_test.go was written against; the
+// graph calls composeMuxWithAPI with the config and logger so a development
+// environment logs the routes.
 func newMuxWithAPI(adminGuard httpx.Middleware, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
+	return composeMuxWithAPI(nil, nil, adminGuard, service{{range .Modules}}, {{.Name}}Service{{end}})
+}
+
+// composeMuxWithAPI composes the API and module routes onto one policy-aware
+// base, mounted at httpserver.APIPrefix, behind the one injected administrator
+// guard, and logs the composed routes in a development environment.
+func composeMuxWithAPI(cfg *config.Config, logger *slog.Logger, adminGuard httpx.Middleware, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 {{- if .Caps.Has "web"}}
 	mux.Handle("/", web.Handler(httpserver.APIPrefix))
@@ -354,6 +395,7 @@ func newMuxWithAPI(adminGuard httpx.Middleware, service api.Service{{range .Modu
 {{- range .Modules}}
 	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
 {{- end}}
+	logRoutes(cfg, logger, base)
 	return mux
 }
 {{- end}}
@@ -403,7 +445,7 @@ func NewServer(
 	adminGuard httpx.Middleware,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
-	return newServer(lc, cfg, logger, newMux(adminGuard,{{range .Modules}}
+	return newServer(lc, cfg, logger, composeMux(cfg, logger, adminGuard,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	))
 }
@@ -420,7 +462,7 @@ func NewServerWithAPI(
 	service api.Service,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
-	return newServer(lc, cfg, logger, newMuxWithAPI(adminGuard, service,{{range .Modules}}
+	return newServer(lc, cfg, logger, composeMuxWithAPI(cfg, logger, adminGuard, service,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	))
 }

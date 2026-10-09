@@ -1,6 +1,6 @@
 {
   "name": "config",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "kind": "add",
   "summary": "Typed YAML configuration: config.yml loaded from the working directory with environment and flag overrides, and a redacting Secret type.",
   "requires": ["base"],

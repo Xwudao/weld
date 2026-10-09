@@ -11,5 +11,13 @@
 # DATABASE_URL instead of committing a credential.
 #
 # Each capability appends only the section it needs inside the marked region.
+#
+# Deployment environment. It gates development conveniences only (for example,
+# logging the registered routes at startup) and has no security weight; use
+# "production" for anything others can reach. Recognized values are "local",
+# "development", "test" and "production"; an empty or unknown value means
+# production, so a development surface is never on by accident. APP_ENV
+# overrides it.
+environment: "production"
 # weld:config:begin
 # weld:config:end

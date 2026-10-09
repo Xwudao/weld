@@ -2,8 +2,11 @@ package httpx
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // Router registers routes on a *http.ServeMux under a shared path prefix,
@@ -14,7 +17,9 @@ import (
 // and the typed endpoint helpers without owning a global registry or a server.
 // Group derives a sub-router; Handle and HandleFunc register a raw net/http
 // handler for a response the typed helpers do not model, such as a file
-// download, a stream or SSE.
+// download, a stream or SSE. The router also records every route it registers,
+// so a development build can log the composed surface and the policies guarding
+// each route (see Routes and LogRoutes).
 type Router struct {
 	mux        *http.ServeMux
 	prefix     string
@@ -27,11 +32,49 @@ type Router struct {
 	// fail-closed, so forgetting a Policy on a sensitive route still runs the
 	// baseline rather than serving it unguarded.
 	required []string
+	// routes is the composition-wide route table. Every router derived from the
+	// same NewRouter shares this one table because they all register on the same
+	// mux, so Routes reports the whole composed surface regardless of which group
+	// registered a route.
+	routes *routeTable
+}
+
+// Route describes one route registered on the composition's mux. It is what
+// Router.Routes returns so a development build can print the composed surface.
+type Route struct {
+	// Method is the HTTP method, or "*" when the pattern carried no method.
+	Method string
+	// Pattern is the full path pattern registered on the mux, including any
+	// group prefix.
+	Pattern string
+	// Policies lists the named policies that guard the route, mount baseline
+	// first. An empty slice means the route is public.
+	Policies []string
+}
+
+// routeTable is the shared, append-only record of the routes registered on one
+// mux. A mutex guards it because registration and a route dump need not share a
+// goroutine.
+type routeTable struct {
+	mu     sync.Mutex
+	routes []Route
+}
+
+func (t *routeTable) add(route Route) {
+	t.mu.Lock()
+	t.routes = append(t.routes, route)
+	t.mu.Unlock()
+}
+
+func (t *routeTable) all() []Route {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]Route(nil), t.routes...)
 }
 
 // NewRouter returns a Router that registers routes on mux.
 func NewRouter(mux *http.ServeMux) *Router {
-	return &Router{mux: mux}
+	return &Router{mux: mux, routes: &routeTable{}}
 }
 
 // WithPolicy defines a named policy as a middleware chain, outermost first.
@@ -79,7 +122,11 @@ func (r *Router) Group(prefix string, middleware ...Middleware) *Router {
 // typed route, so a guarded surface cannot be bypassed through a raw handler;
 // pass Open() for a raw route that must skip the baseline.
 func (r *Router) Handle(pattern string, handler http.Handler, opts ...Option) {
-	r.mux.Handle(r.fullPattern(pattern), r.wrap(Chain(r.routePolicies(resolveEndpoint(opts))...)(handler)))
+	cfg := resolveEndpoint(opts)
+	names := r.routePolicyNames(cfg)
+	full := r.fullPattern(pattern)
+	r.record(full, names)
+	r.mux.Handle(full, r.wrap(Chain(r.resolvePolicies(names)...)(handler)))
 }
 
 // HandleFunc registers a raw handler function under the router's prefix.
@@ -100,6 +147,7 @@ func (r *Router) clone() *Router {
 		middleware: append([]Middleware(nil), r.middleware...),
 		policies:   policies,
 		required:   append([]string(nil), r.required...),
+		routes:     r.routes,
 	}
 }
 
@@ -108,37 +156,46 @@ func (r *Router) wrap(handler http.Handler) http.Handler {
 	return Chain(r.middleware...)(handler)
 }
 
-// routePolicies resolves the middleware a route runs: the mount baseline unless
-// the route opts out with Open, followed by the route's own policies. Both typed
-// and raw routes go through it, so the baseline guards every route under the
-// mount and Open is the one explicit way out.
-func (r *Router) routePolicies(cfg *endpoint) []Middleware {
+// routePolicyNames lists the policies a route runs: the mount baseline unless
+// the route opts out with Open, followed by the route's own policies, with
+// duplicates removed so a route that repeats a baseline policy runs it once.
+func (r *Router) routePolicyNames(cfg *endpoint) []string {
 	names := make([]string, 0, len(r.required)+len(cfg.policy))
 	if !cfg.open {
 		names = append(names, r.required...)
 	}
 	names = append(names, cfg.policy...)
-	return r.resolvePolicies(names)
+	return dedupePolicies(names)
+}
+
+// dedupePolicies removes repeated policy names, keeping the first occurrence.
+func dedupePolicies(names []string) []string {
+	if len(names) < 2 {
+		return names
+	}
+	seen := make(map[string]bool, len(names))
+	unique := make([]string, 0, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		unique = append(unique, name)
+	}
+	return unique
 }
 
 // resolvePolicies turns route policy names into one ordered middleware chain.
 //
-// names is the baseline followed by the route's own policies, deduplicated by
-// name so a route that repeats a baseline policy does not run it twice. An
-// unknown name is a startup error, not a silent pass-through: a policy the
+// An unknown name is a startup error, not a silent pass-through: a policy the
 // composition never defined must fail loudly rather than serve the route
 // unguarded.
 func (r *Router) resolvePolicies(names []string) []Middleware {
 	if len(names) == 0 {
 		return nil
 	}
-	seen := make(map[string]bool, len(names))
 	chain := make([]Middleware, 0, len(names))
 	for _, name := range names {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
 		middleware, ok := r.policies[name]
 		if !ok {
 			panic(fmt.Sprintf("httpx: route references undefined policy %q", name))
@@ -182,4 +239,60 @@ func joinPath(prefix, path string) string {
 		return prefix
 	}
 	return prefix + "/" + strings.TrimPrefix(path, "/")
+}
+
+// record adds one registered route to the shared table.
+func (r *Router) record(pattern string, policies []string) {
+	if r.routes == nil {
+		return
+	}
+	method, path, ok := splitMethod(pattern)
+	if !ok {
+		method = "*"
+	}
+	r.routes.add(Route{Method: method, Pattern: path, Policies: append([]string(nil), policies...)})
+}
+
+// Routes returns the routes registered on the composition's mux, in
+// registration order. Every router derived from the same NewRouter shares one
+// table, so it reports the whole composed surface regardless of which group
+// registered a route. The result is a copy the caller may keep.
+func (r *Router) Routes() []Route {
+	if r.routes == nil {
+		return nil
+	}
+	return r.routes.all()
+}
+
+// LogRoutes logs one line per registered route with its full pattern and the
+// policies that guard it. The composition calls it in a development
+// environment, so the composed surface and its coverage are visible at startup
+// without a request. A nil logger is a no-op.
+func (r *Router) LogRoutes(logger *slog.Logger) {
+	if logger == nil {
+		return
+	}
+	for _, route := range r.Routes() {
+		logger.Info("route", "method", route.Method, "path", route.Pattern, "policies", policyLabel(route.Policies))
+	}
+}
+
+// PrintRoutes writes the registered routes to w as a plain table, for a command
+// or a test. It is the writer form of LogRoutes. A nil writer is a no-op.
+func (r *Router) PrintRoutes(w io.Writer) {
+	if w == nil {
+		return
+	}
+	for _, route := range r.Routes() {
+		fmt.Fprintf(w, "%-7s %-40s %s\n", route.Method, route.Pattern, policyLabel(route.Policies))
+	}
+}
+
+// policyLabel renders a route's guarding policies for the route dump: the names
+// joined, or "public" when the route runs none.
+func policyLabel(policies []string) string {
+	if len(policies) == 0 {
+		return "public"
+	}
+	return strings.Join(policies, ",")
 }

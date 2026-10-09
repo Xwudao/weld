@@ -14,6 +14,11 @@
 // development; the Secret type keeps it out of logs and formatted output, and a
 // production environment overrides it through DB_PASSWORD or DATABASE_URL.
 //
+// The environment setting gates development conveniences only — for example,
+// logging the composed route table at startup — and carries no security weight,
+// so an unrecognized value simply is not development. See
+// Environment.IsDevelopment.
+//
 // The typed sections are closed but extensible: three marker regions
 // (weld:configfields, weld:configenv, weld:configdefaults) let a later
 // capability add its own field, environment overrides and defaults through a
@@ -55,6 +60,7 @@ const (
 // Environment variable names. A production environment overrides the YAML file
 // through these; none is required when the corresponding setting is in the file.
 const (
+	EnvEnvironment = "APP_ENV"
 	EnvHTTPAddr    = "HTTP_ADDR"
 	EnvDBHost      = "DB_HOST"
 	EnvDBPort      = "DB_PORT"
@@ -100,10 +106,59 @@ func (s *Secret) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// Environment names the deployment environment.
+//
+// It gates development conveniences only — currently, logging the composed
+// route table at startup — and carries no security weight: authorization is
+// enforced by named policies, never by the environment name. An empty or
+// unknown value is production, so a development surface is never enabled by
+// accident. Set APP_ENV to override the file.
+type Environment string
+
+const (
+	// EnvironmentLocal and EnvironmentDevelopment both enable the development
+	// conveniences; they differ only in the operator's intent.
+	EnvironmentLocal       Environment = "local"
+	EnvironmentDevelopment Environment = "development"
+	// EnvironmentTest is the test environment. It does not enable the
+	// development conveniences, so a test asserts the production code path
+	// unless it opts in explicitly.
+	EnvironmentTest Environment = "test"
+	// EnvironmentProduction is the default, used when the setting is empty or
+	// unrecognized.
+	EnvironmentProduction Environment = "production"
+)
+
+// UnmarshalYAML reads the environment from a YAML scalar, normalizing case and
+// surrounding space so "Local" and "production " still compare.
+func (e *Environment) UnmarshalYAML(value *yaml.Node) error {
+	var raw string
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*e = Environment(strings.ToLower(strings.TrimSpace(raw)))
+	return nil
+}
+
+// IsDevelopment reports whether the development conveniences are enabled: the
+// environment is local or development. Every other value, including empty and
+// unknown, is not development.
+func (e Environment) IsDevelopment() bool {
+	switch e {
+	case EnvironmentLocal, EnvironmentDevelopment:
+		return true
+	default:
+		return false
+	}
+}
+
 // Config is the typed application configuration.
 type Config struct {
-	HTTP     HTTP     `yaml:"http"`
-	Database Database `yaml:"database"`
+	// Environment gates development conveniences only; it carries no security
+	// weight. See Environment.IsDevelopment.
+	Environment Environment `yaml:"environment"`
+	HTTP        HTTP        `yaml:"http"`
+	Database    Database    `yaml:"database"`
 	// weld:configfields:begin
 	// A capability that extends the typed configuration appends its field here
 	// through a marker patch; weld never rewrites the region's owner. The base
@@ -194,6 +249,11 @@ func (l *Loader) Load(path string) (*Config, error) {
 // applyEnv overrides the file with environment variables. A variable that
 // cannot be parsed is an error rather than a silent fallback.
 func (l *Loader) applyEnv(cfg *Config) error {
+	if value, ok := l.lookupEnv(EnvEnvironment); ok {
+		// A blank or unknown value is not an error: it simply is not a
+		// development environment, so no development convenience turns on.
+		cfg.Environment = Environment(strings.ToLower(strings.TrimSpace(value)))
+	}
 	if value, ok := l.lookupEnv(EnvHTTPAddr); ok {
 		addr := strings.TrimSpace(value)
 		if addr == "" {
@@ -235,6 +295,9 @@ func (l *Loader) applyEnv(cfg *Config) error {
 // applyDefaults fills the explicit code defaults, after the file and the
 // environment. It never invents a database credential.
 func (l *Loader) applyDefaults(cfg *Config) {
+	if cfg.Environment == "" {
+		cfg.Environment = EnvironmentProduction
+	}
 	if strings.TrimSpace(cfg.HTTP.Addr) == "" {
 		cfg.HTTP.Addr = DefaultHTTPAddr
 	}

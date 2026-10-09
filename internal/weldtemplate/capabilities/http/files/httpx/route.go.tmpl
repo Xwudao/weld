@@ -137,8 +137,10 @@ func register[Req, Resp any](
 	opts []Option,
 ) {
 	cfg := resolveEndpoint(opts)
-	policies := r.routePolicies(cfg)
-	r.mux.Handle(method+" "+r.fullPattern(pattern), r.wrap(Chain(policies...)(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	names := r.routePolicyNames(cfg)
+	path := r.fullPattern(pattern)
+	r.record(method+" "+path, names)
+	r.mux.Handle(method+" "+path, r.wrap(Chain(r.resolvePolicies(names)...)(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		req, err := bind(request, cfg)
 		if err != nil {
 			WriteError(w, err)

@@ -231,6 +231,25 @@ func TestComposedMuxHasNoDocumentEndpoint(t *testing.T) {
 		t.Fatalf("GET /api/openapi.json = %d, want 404", recorder.Code)
 	}
 }
+
+// TestDevelopmentLogsTheComposedRoutes proves the composition logs every
+// registered route, with the policy guarding it, in a development environment,
+// and stays silent in production.
+func TestDevelopmentLogsTheComposedRoutes(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, logging.TextFormat, nil)
+	composeMuxWithAPI(&config.Config{Environment: config.EnvironmentLocal}, logger, httpserver.AdminGuard(), api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	out := buf.String()
+	if !strings.Contains(out, "registered routes") || !strings.Contains(out, httpserver.APIPrefix) {
+		t.Fatalf("a development composition did not log its routes:\n%s", out)
+	}
+
+	buf.Reset()
+	composeMuxWithAPI(&config.Config{Environment: config.EnvironmentProduction}, logger, httpserver.AdminGuard(), api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	if buf.Len() != 0 {
+		t.Fatalf("a production composition logged its routes:\n%s", buf.String())
+	}
+}
 {{- end}}
 
 // discardLogger is the injected logger for lifecycle tests that do not assert

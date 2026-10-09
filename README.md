@@ -51,7 +51,10 @@ Capabilities:
   It ships no configuration and no server; the only dependency is Cobra itself.
 - `config` (add) — the shared typed configuration capability: `config.yml` from
   the working directory, environment and flag overrides, and a redacting
-  `Secret` type. Installed automatically with `loom`, which every added
+  `Secret` type. `environment` (overridden by `APP_ENV`) is `local`,
+  `development`, `test` or `production`; it gates development conveniences only
+  — currently logging the composed route table at startup — and carries no
+  security weight. Installed automatically with `loom`, which every added
   capability requires.
 - `http` (add) — HTTP server lifecycle, the shared `internal/httpx` toolkit, a
   composable handler builder, and the single `serve` command. Requires `loom`.
@@ -59,7 +62,10 @@ Capabilities:
   grouping and named route policies, typed endpoint helpers, query/path and JSON
   binding, and the composable middleware chain; the global stack is declared in
   the stable, project-owned `internal/httpserver/middleware.go` and the route
-  policies in `internal/httpserver/policy.go`. Its `Serve` takes the injected
+  policies in `internal/httpserver/policy.go`. The router records every route it
+  registers (`Routes`, `LogRoutes`, `PrintRoutes`), and the composition logs the
+  table with each route's policies at startup in a development environment. Its
+  `Serve` takes the injected
   `*slog.Logger`, and `serve` reads the listen address through the shared
   `config` loader. No authentication, CORS or rate limiting is enabled by
   default.

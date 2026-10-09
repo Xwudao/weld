@@ -1,7 +1,9 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -242,5 +244,58 @@ func TestPoliciesPropagateThroughGroup(t *testing.T) {
 	}
 	if got := strings.Join(trail, ","); got != "base,extra" {
 		t.Fatalf("derived group policies = %q, want base,extra", got)
+	}
+}
+
+// TestRoutesRecordsTheComposedSurface proves the router records every route,
+// its full pattern and the policies guarding it, and marks an unguarded route
+// public, so a development build can print the composed surface.
+func TestRoutesRecordsTheComposedSurface(t *testing.T) {
+	mux := http.NewServeMux()
+	router := NewRouter(mux).
+		WithPolicy("base", func(next http.Handler) http.Handler { return next }).
+		Require("base")
+	NoInput(router, http.MethodGet, "/public", func(_ context.Context) (string, error) { return "ok", nil }, Open())
+	group := router.Group("/admin")
+	Post[struct{}, struct{}](group, "/items", func(_ context.Context, _ struct{}) (struct{}, error) { return struct{}{}, nil })
+	group.HandleFunc("GET /raw", func(http.ResponseWriter, *http.Request) {})
+
+	want := []Route{
+		{Method: "GET", Pattern: "/public"},
+		{Method: "POST", Pattern: "/admin/items", Policies: []string{"base"}},
+		{Method: "GET", Pattern: "/admin/raw", Policies: []string{"base"}},
+	}
+	got := router.Routes()
+	if len(got) != len(want) {
+		t.Fatalf("Routes = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].Method != want[i].Method || got[i].Pattern != want[i].Pattern || strings.Join(got[i].Policies, ",") != strings.Join(want[i].Policies, ",") {
+			t.Fatalf("route %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// A router derived from the same base shares the table, so any group reports
+	// the whole composed surface.
+	if len(group.Routes()) != len(want) {
+		t.Fatalf("derived group routes = %+v, want the whole surface", group.Routes())
+	}
+
+	// A nil logger and a nil writer are no-ops, so a caller never needs a guard.
+	router.LogRoutes(nil)
+	router.PrintRoutes(nil)
+
+	var printed bytes.Buffer
+	router.PrintRoutes(&printed)
+	for _, fragment := range []string{"/public", "/admin/items", "/admin/raw", "public", "base"} {
+		if !strings.Contains(printed.String(), fragment) {
+			t.Fatalf("PrintRoutes output %q is missing %q", printed.String(), fragment)
+		}
+	}
+
+	printed.Reset()
+	router.LogRoutes(slog.New(slog.NewTextHandler(&printed, nil)))
+	if !strings.Contains(printed.String(), "/admin/items") || !strings.Contains(printed.String(), "base") {
+		t.Fatalf("LogRoutes output %q is missing a route or its policy", printed.String())
 	}
 }

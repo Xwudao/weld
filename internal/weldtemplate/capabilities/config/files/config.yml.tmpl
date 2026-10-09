@@ -4,5 +4,13 @@
 # capability, weld only appends a new section inside the marked region below, so
 # the values you change — including a local database password — are preserved.
 # Each capability appends only the section it needs.
+#
+# Deployment environment. It gates development conveniences only (for example,
+# logging the registered routes at startup) and has no security weight; use
+# "production" for anything others can reach. Recognized values are "local",
+# "development", "test" and "production"; an empty or unknown value means
+# production, so a development surface is never on by accident. APP_ENV
+# overrides it.
+environment: "local"
 # weld:config:begin
 # weld:config:end

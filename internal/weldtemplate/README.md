@@ -38,8 +38,8 @@ capabilities/
                    registered by the Loom server graph
   api/             kind: add    -> JSON API, requires http
     capability.json
-    files/         internal/api (DTOs, go-validate Spec, route table,
-                   OpenAPI 3.1 document, httptest-driven tests),
+    files/         internal/api (DTOs with go-validate validation, typed routes
+                   registered with internal/httpx, httptest-driven tests),
                    internal/di/api_provider.go (stable Loom seam)
   db/              kind: add    -> PostgreSQL, requires loom
     capability.json
@@ -332,7 +332,11 @@ to patch an unmanaged file.
 
 The Loom server graph (`internal/di/di.go`) owns `newMux`, the single route
 composition point: it registers the SPA, the JSON API and the installed business
-modules on one mux, and wraps it with the shared middleware chain.
+modules on one mux, and wraps it with the shared middleware chain. The
+`httpx.Router` records every route it registers, and in a development
+environment (`environment: local` or `development`) the graph logs the composed
+table with each route's policies at startup, so the surface and its coverage are
+visible without a request; production stays silent.
 `internal/httpserver/http.go` exposes the test seams:
 
 - `NewHandler(logger, routes ...Route) http.Handler` builds a handler from
@@ -372,37 +376,29 @@ return 404 instead of the HTML shell, and only browser navigations fall back to
 `index.html`. It keeps that exclusion even though a more specific `/api/` route
 wins on the mux, because an uninstalled API must not answer with the SPA.
 
-## API contract and OpenAPI
+## API contract
 
 `api` owns `internal/api`. Request and response DTOs carry JSON serialization
-tags only; the validation rules live in a single `Spec()` method per DTO, built
-from `go-validate`'s `Spec`/`Constraint` constructors. The very same `Spec`
-feeds `Spec.Validate()` at runtime and `Spec.Schema()` into the OpenAPI 3.1
-document, so the rules and the document cannot drift. An explicit route table
-(method, path, operationId, path/query/body/response/error schemas) is the one
-source for both the mux registration and the document; a compact adapter maps
-go-validate metadata to the small subset of JSON Schema 2020-12 that OpenAPI
-3.1 uses. A `Spec` with a constraint that has no machine-readable form (for
-example `Custom` or `Conditional`) makes the document build fail instead of
-silently omitting the rule.
+tags only; the validation rules live in a single `Validate() error` per request
+DTO, built from `go-validate`'s `Spec`/`Constraint` constructors. The `httpx`
+typed helpers call `Validate()` automatically after binding, so the rules run at
+runtime and there is no separate description to keep in sync. `Register`
+declares each route in one place — the method, the relative path, the binding and
+the handler together — so there is no route table beside the code, and the
+caller owns the mount prefix (see `internal/httpserver.APIPrefix`).
 
 Enums show the pattern: `ItemStatus` is a typed string alias with named
-constants, and `validate.Enum(itemStatusValues()...)` both rejects an invalid
-value and exports the same values as the OpenAPI `enum`. If that boilerplate
-repeats across resources, a future `weld add enum` step (or go-enum code
-generation) is the right home; the API capability deliberately does not grow
-its own enum framework.
+constants, and `validate.Enum(itemStatusValues()...)` rejects an invalid value.
+If that boilerplate repeats across resources, a future `weld add enum` step (or
+go-enum code generation) is the right home; the API capability deliberately does
+not grow its own enum framework.
 
 The wire format is a default JSON envelope: responses are `{code, msg, data}`,
 where `code` repeats the HTTP transport status (200, 201, 400, 404, 500) instead
 of inventing a business code, `msg` is `success` or a client-safe error message,
 and `data` is the payload or `null`. Request bodies are the DTOs themselves. The
-handler binds and validates with `httpx.DecodeJSON`, passing `Spec().Validate`
-as the code-first validator callback. The OpenAPI response schemas describe the
-same envelope, so the document matches the wire format. `GET
-/api/openapi.json` is the one unwrapped response: it is served with
-`httpx.RawJSON`, because a spec generator must receive the OpenAPI document
-itself.
+`httpx` typed helpers bind and validate the request, and weld ships no OpenAPI
+document, generator or `/api/openapi.json` endpoint.
 
 ## Business modules (`modules/`)
 
@@ -479,8 +475,7 @@ payload exists, that `base` stays CLI-only and ships no configuration, that
 regions, that `http` owns the serve command, ships the `internal/httpx` toolkit
 and the project-owned middleware configuration, and appends its section to the
 `config` files, that `api` and the module payload write the shared response
-envelope while the OpenAPI document stays raw, that `web` requires `http` and
-`api` requires `http` (not `web`) and patches the `go.mod` dependency extension
+envelope, that `web` requires `http` and `api` requires `http` (not `web`) and patches the `go.mod` dependency extension
 point, and that `db` requires `loom` but not `http`, ships genuine sqlc output
 plus a pinned sqlc/goose tool module, and patches the `go.mod` dependency,
 Makefile `db` and both `config` extension points. It also proves the migration
