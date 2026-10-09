@@ -1,16 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
-	"net/http"
-
-	"github.com/Xwudao/go-validate"
+	nethttp "net/http"
 
 	"__module__/internal/httpx"
 )
-
-// openAPIPath is the endpoint that serves the generated document.
-const openAPIPath = "/api/openapi.json"
 
 // maxBodyBytes bounds a JSON request body. It is the shared default, so every
 // generated handler binds bodies the same way.
@@ -18,150 +14,49 @@ const maxBodyBytes = httpx.DefaultMaxBytes
 
 // Handler returns the API as a plain http.Handler with the given service.
 //
-// It is the injectable seam for tests: build a Handler with a fake Service and
-// exercise it with net/http/httptest, with no socket and no database.
-//
-// serveOpenAPI is the resolved OpenAPI access decision (see
-// config.Config.OpenAPIDocumentEnabled). It is a plain bool, not the
-// configuration itself, so this package never imports internal/config: the
-// caller computes it from the one configuration path and passes the result.
-func Handler(service Service, serveOpenAPI bool) http.Handler {
-	mux := http.NewServeMux()
-	Register(mux, service, serveOpenAPI)
+// It mounts the API at the default /api prefix and is the injectable seam for
+// tests: build a Handler with a fake Service and exercise it with
+// net/http/httptest, with no socket and no database. The generated server graph
+// mounts the API itself with Register, so a project can change the prefix.
+func Handler(service Service) nethttp.Handler {
+	mux := nethttp.NewServeMux()
+	Register(httpx.NewRouter(mux).Group(defaultPrefix), service)
 	return mux
 }
 
-// Register installs every API route on mux, including the OpenAPI endpoint.
-//
-// Routes come from operations(), the same table the document is built from, so
-// a route cannot exist undocumented and an operation cannot exist unrouted. The
-// OpenAPI route is always registered, but when serveOpenAPI is false its handler
-// rejects every request with 404 and never builds the document, so the endpoint
-// leaks neither the schema nor the migrated route list. The caller decides from
-// the configuration, so a production environment (or any unconfigured one)
-// cannot serve the document.
-func Register(mux *http.ServeMux, service Service, serveOpenAPI bool) {
-	for _, operation := range operations() {
-		mux.HandleFunc(operation.route(), operation.handle(service))
-	}
-	mux.HandleFunc("GET "+openAPIPath, openAPIHandler(serveOpenAPI))
-}
+// defaultPrefix is the mount Handler uses. The server graph passes its own
+// prefix (see internal/httpserver.APIPrefix) so the surface can be versioned.
+const defaultPrefix = "/api"
 
-// speced is a DTO that declares its go-validate Spec. The Spec is the single
-// source for both runtime validation and the OpenAPI constraints.
-type speced interface {
-	Spec() validate.Spec
-}
-
-// decodeBody decodes and validates a JSON request body using the shared binding
-// helper and the same Spec used for documentation.
+// Register installs every API route on router.
 //
-// httpx owns the transport checks — content type, body size, JSON syntax, a
-// second value or unknown field — and maps each to a real transport status; the
-// Spec is passed as the code-first validator callback, so this package keeps
-// its go-validate dependency while httpx stays free of it. Any failure is
-// written to w and reported false.
-func decodeBody[T speced](w http.ResponseWriter, r *http.Request) (T, bool) {
-	var zero T
-	body, err := httpx.DecodeJSON(r, maxBodyBytes, func(value T) error {
-		return value.Spec().Validate()
+// The caller owns the mount prefix, so the same routes can serve /api/v1/items
+// and /api/v2/items without changing this package. Each route is declared once:
+// the method, the relative path, the request binding and the handler are one
+// statement, so there is no separate route table to keep in sync.
+func Register(router *httpx.Router, service Service) {
+	// GET {prefix}/items?limit=...
+	httpx.Get(router, "/items", func(ctx context.Context, query ListItemsQuery) ([]ItemResponse, error) {
+		limit := defaultLimit
+		if query.Limit != nil {
+			limit = *query.Limit
+		}
+		return service.List(ctx, limit)
 	})
-	if err != nil {
-		httpx.WriteError(w, err)
-		return zero, false
-	}
-	return body, true
-}
 
-func createItemHandler(service Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		request, ok := decodeBody[CreateItemRequest](w, r)
-		if !ok {
-			return
-		}
-		item, err := service.Create(r.Context(), request)
-		if err != nil {
-			writeServiceError(w, err)
-			return
-		}
-		httpx.JSON(w, http.StatusCreated, item)
-	}
-}
+	// POST {prefix}/items
+	httpx.Post(router, "/items", func(ctx context.Context, request CreateItemRequest) (ItemResponse, error) {
+		return service.Create(ctx, request)
+	}, httpx.WithStatus(nethttp.StatusCreated), httpx.WithMaxBytes(maxBodyBytes))
 
-func listItemsHandler(service Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		query := listItemsQuery{}
-		limit, present, err := httpx.QueryInt(r, "limit")
-		if err != nil {
-			httpx.WriteError(w, err)
-			return
+	// GET {prefix}/items/{id}
+	httpx.Get(router, "/items/{id}", func(ctx context.Context, request GetItemRequest) (ItemResponse, error) {
+		item, err := service.Get(ctx, request.ID)
+		if errors.Is(err, ErrNotFound) {
+			// Map the domain sentinel to a transport status and a client-safe
+			// message; every other error stays a generic 500.
+			return ItemResponse{}, httpx.NotFound(err.Error())
 		}
-		if present {
-			query.Limit = &limit
-		}
-		if err := query.Spec().Validate(); err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		effective := defaultLimit
-		if present {
-			effective = limit
-		}
-		items, err := service.List(r.Context(), effective)
-		if err != nil {
-			writeServiceError(w, err)
-			return
-		}
-		httpx.JSON(w, http.StatusOK, items)
-	}
-}
-
-func getItemHandler(service Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		item, err := service.Get(r.Context(), r.PathValue("id"))
-		if err != nil {
-			writeServiceError(w, err)
-			return
-		}
-		httpx.JSON(w, http.StatusOK, item)
-	}
-}
-
-// openAPIHandler serves the OpenAPI 3.1 document when serveOpenAPI is true. It
-// is rebuilt per request so a contract error surfaces as a 500 rather than a
-// silently stale document.
-//
-// The document is a complete artifact for tooling to consume, so it is written
-// raw with httpx.RawJSON and is deliberately not wrapped in the response
-// envelope: a spec generator must receive the OpenAPI document itself.
-//
-// Without the explicit openapi build tag, or when serveOpenAPI is false,
-// the handler fails closed: it answers with the same
-// 404 a missing route produces and never builds the document, so the schema and
-// the routed surface never leave the process. This rejects the request at the
-// HTTP layer; it is not merely a hidden UI.
-func openAPIHandler(serveOpenAPI bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !OpenAPIBuildEnabled || !serveOpenAPI {
-			http.NotFound(w, r)
-			return
-		}
-		document, err := Document()
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "openapi document unavailable")
-			return
-		}
-		httpx.RawJSON(w, http.StatusOK, document)
-	}
-}
-
-// writeServiceError maps a Service error to a response envelope. ErrNotFound is
-// a 404; every other error is a generic 500 and never leaks the internal
-// message.
-func writeServiceError(w http.ResponseWriter, err error) {
-	if errors.Is(err, ErrNotFound) {
-		httpx.Error(w, http.StatusNotFound, err.Error())
-		return
-	}
-	httpx.Error(w, http.StatusInternalServerError, "internal error")
+		return item, err
+	})
 }

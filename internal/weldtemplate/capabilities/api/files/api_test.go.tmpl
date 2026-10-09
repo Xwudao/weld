@@ -99,7 +99,7 @@ func decodeEnvelope(t *testing.T, recorder *httptest.ResponseRecorder) envelope 
 
 func TestCreateItemSucceeds(t *testing.T) {
 	service := newFakeService()
-	recorder := serve(t, Handler(service, false), http.MethodPost, "/api/items", `{"name":"widget","quantity":3,"status":"active"}`)
+	recorder := serve(t, Handler(service), http.MethodPost, "/api/items", `{"name":"widget","quantity":3,"status":"active"}`)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusCreated, recorder.Body)
 	}
@@ -132,7 +132,7 @@ func TestCreateItemRejectsInvalidRequest(t *testing.T) {
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			recorder := serve(t, Handler(newFakeService(), false), http.MethodPost, "/api/items", body)
+			recorder := serve(t, Handler(newFakeService()), http.MethodPost, "/api/items", body)
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body)
 			}
@@ -148,7 +148,7 @@ func TestCreateItemRejectsInvalidRequest(t *testing.T) {
 }
 
 func TestCreateItemRejectsWrongContentType(t *testing.T) {
-	recorder := serveWithContentType(t, Handler(newFakeService(), false), http.MethodPost, "/api/items", "text/plain", `{"name":"widget","quantity":1,"status":"active"}`)
+	recorder := serveWithContentType(t, Handler(newFakeService()), http.MethodPost, "/api/items", "text/plain", `{"name":"widget","quantity":1,"status":"active"}`)
 	if recorder.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnsupportedMediaType)
 	}
@@ -156,7 +156,7 @@ func TestCreateItemRejectsWrongContentType(t *testing.T) {
 
 func TestCreateItemRejectsOversizedBody(t *testing.T) {
 	body := `{"name":"` + strings.Repeat("a", httpx.DefaultMaxBytes+1) + `"}`
-	recorder := serve(t, Handler(newFakeService(), false), http.MethodPost, "/api/items", body)
+	recorder := serve(t, Handler(newFakeService()), http.MethodPost, "/api/items", body)
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
 	}
@@ -165,7 +165,7 @@ func TestCreateItemRejectsOversizedBody(t *testing.T) {
 func TestGetItemSucceeds(t *testing.T) {
 	service := newFakeService()
 	service.items["item-1"] = ItemResponse{ID: "item-1", Name: "widget", Quantity: 2, Status: ItemStatusDraft}
-	recorder := serve(t, Handler(service, false), http.MethodGet, "/api/items/item-1", "")
+	recorder := serve(t, Handler(service), http.MethodGet, "/api/items/item-1", "")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
 	}
@@ -179,14 +179,17 @@ func TestGetItemSucceeds(t *testing.T) {
 }
 
 func TestGetItemNotFound(t *testing.T) {
-	recorder := serve(t, Handler(newFakeService(), false), http.MethodGet, "/api/items/missing", "")
+	recorder := serve(t, Handler(newFakeService()), http.MethodGet, "/api/items/missing", "")
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+	if msg := decodeEnvelope(t, recorder).Msg; msg != ErrNotFound.Error() {
+		t.Fatalf("msg = %q, want the mapped not-found message", msg)
 	}
 }
 
 func TestListItemsValidatesLimit(t *testing.T) {
-	handler := Handler(newFakeService(), false)
+	handler := Handler(newFakeService())
 	if recorder := serve(t, handler, http.MethodGet, "/api/items?limit=0", ""); recorder.Code != http.StatusBadRequest {
 		t.Fatalf("limit=0 status = %d, want 400", recorder.Code)
 	}
@@ -204,7 +207,7 @@ func TestListItemsValidatesLimit(t *testing.T) {
 func TestInternalErrorIsNotLeaked(t *testing.T) {
 	service := newFakeService()
 	service.err = errors.New("storage exploded")
-	recorder := serve(t, Handler(service, false), http.MethodGet, "/api/items/item-1", "")
+	recorder := serve(t, Handler(service), http.MethodGet, "/api/items/item-1", "")
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", recorder.Code)
 	}
@@ -217,33 +220,5 @@ func TestInternalErrorIsNotLeaked(t *testing.T) {
 	}
 	if string(failure.Data) != "null" {
 		t.Fatalf("error data = %s, want null", failure.Data)
-	}
-}
-
-// TestOpenAPIEndpointServesRawDocument proves the OpenAPI artifact is not
-// wrapped: tooling must receive the document itself.
-func TestOpenAPIEndpointServesRawDocument(t *testing.T) {
-	recorder := serve(t, Handler(newFakeService(), true), http.MethodGet, "/api/openapi.json", "")
-	if !OpenAPIBuildEnabled {
-		if recorder.Code != http.StatusNotFound {
-			t.Fatalf("default build must refuse the document, got %d", recorder.Code)
-		}
-		return
-	}
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
-	}
-	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
-		t.Fatalf("content-type = %q, want application/json", got)
-	}
-	var document map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
-		t.Fatalf("document is not JSON: %v", err)
-	}
-	if document["openapi"] != openAPIVersion {
-		t.Fatalf("openapi = %v, want %s", document["openapi"], openAPIVersion)
-	}
-	if _, wrapped := document["code"]; wrapped {
-		t.Fatalf("the OpenAPI document was wrapped in the response envelope: %v", document)
 	}
 }

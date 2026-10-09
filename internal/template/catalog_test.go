@@ -142,36 +142,40 @@ func TestAPICapabilityLoads(t *testing.T) {
 	if len(capability.Requires) != 1 || capability.Requires[0] != "http" {
 		t.Errorf("requires = %v, want [http]", capability.Requires)
 	}
-	// The api capability patches the go.mod dependency region, the two
-	// internal/config markers that carry the fail-closed OpenAPI switch, and
-	// the two config file regions.
+	// The api capability patches only the go.mod dependency region. It carries no
+	// configuration of its own: the removed OpenAPI gate was its only config
+	// section, and http already installs the configuration it needs.
 	markers := map[string]bool{}
 	for _, patch := range capability.Patches {
 		markers[patch.Path+"|"+patch.Marker] = true
-		if patch.Path == "config.yml" && patch.Bootstrap != "config.example.yml" {
-			t.Errorf("api config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
-		}
 	}
-	for _, want := range []string{
-		"go.mod|deps",
-		"internal/config/config.go|configfields",
-		"internal/config/config.go|configenv",
-		"config.yml|config",
-		"config.example.yml|config",
-	} {
+	for _, want := range []string{"go.mod|deps"} {
 		if !markers[want] {
 			t.Errorf("api does not patch %s: %+v", want, capability.Patches)
 		}
 	}
-	// The api capability ships the shared openapi contract package and the typed
-	// api config section.
+	if len(capability.Patches) != 1 {
+		t.Errorf("api patches = %+v, want only go.mod|deps", capability.Patches)
+	}
+	// The api capability ships the typed DTOs, service and handler only; the
+	// shared OpenAPI contract package is gone.
 	paths := map[string]bool{}
 	for _, file := range capability.Files {
 		paths[file.Path] = true
 	}
-	for _, want := range []string{"internal/openapi/openapi.go", "internal/config/openapi.go"} {
+	for _, want := range []string{
+		"internal/api/dto.go",
+		"internal/api/service.go",
+		"internal/api/handler.go",
+		"internal/api/api_test.go",
+	} {
 		if !paths[want] {
 			t.Errorf("api does not ship %s", want)
+		}
+	}
+	for pathName := range paths {
+		if strings.Contains(pathName, "openapi") {
+			t.Errorf("api still ships %s", pathName)
 		}
 	}
 }

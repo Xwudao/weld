@@ -25,9 +25,6 @@ func TestLoadModulesIsWellFormed(t *testing.T) {
 		if len(content) == 0 {
 			t.Errorf("payload for %s is empty", file.Source)
 		}
-		if file.Shared {
-			continue
-		}
 		if !strings.Contains(file.Path, "__modname__") {
 			t.Errorf("module file path %q does not carry __modname__", file.Path)
 		}

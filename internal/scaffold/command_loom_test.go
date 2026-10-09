@@ -393,8 +393,8 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 // TestAddAPIPreservesCustomizedModuleDITest proves the cross-capability seam:
 // after a module's constructor and DI test have been customized, adding api
 // regenerates the production graph without replacing the project's test.
-// The generated project still runs the API OpenAPI tests and the pre-existing
-// module route tests together, so both route families remain buildable.
+// The generated project still runs the API tests and the pre-existing module
+// route tests together, so both route families remain buildable.
 func TestAddAPIPreservesCustomizedModuleDITest(t *testing.T) {
 	goValidate := goValidateDir(t)
 	loomToolAvailable(t)
@@ -492,22 +492,18 @@ func TestAddRefreshesUneditedDITest(t *testing.T) {
 				t.Fatalf("drift after add: %+v", drift)
 			}
 			gofmtCheck(t, dir)
-			// This executes the generated DI mux test as well as module/API tests:
-			// /api/openapi.json must include the module's GET route and response
-			// schema in both install orders, not merely compile the graph.
+			// This executes the generated DI mux test as well as the module and API
+			// tests, so the composed graph is exercised, not merely compiled.
 			if !buildAndTestGeneratedProject(t, dir) {
 				t.Skip("cannot resolve generated project's dependencies (network/module cache unavailable)")
 			}
-			// A default build rejects the endpoint. The opt-in build must
-			// actually serve and parse the composed module document.
-			runGo(t, dir, "test", "-tags", "openapi", "./internal/api", "./internal/di")
 		})
 	}
 }
 
 // TestTwoModulesKeepGeneratedDITestValid catches template argument delimiters
-// that a single-module project cannot expose. Both module routes must appear
-// in the real composed document with an opt-in development build.
+// that a single-module project cannot expose. The generated DI test builds a
+// mux with both module fakes, and the composed server routes both modules.
 func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
 	loomToolAvailable(t)
 	dir := create(t, t.TempDir())
@@ -517,7 +513,6 @@ func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
 	if !buildAndTestGeneratedProject(t, dir) {
 		t.Skip("cannot resolve generated project's dependencies (network/module cache unavailable)")
 	}
-	runGo(t, dir, "test", "-tags", "openapi", "./internal/api", "./internal/di")
 }
 
 // TestAddKeepsEditedDITestAndDocumentsTheBoundary proves the other half of the

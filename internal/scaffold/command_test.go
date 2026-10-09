@@ -341,7 +341,7 @@ func TestAddModuleCommandWithLoom(t *testing.T) {
 		t.Error("a Loom project also wrote the non-Loom route seam")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	if !strings.Contains(di, "widget.Register(mux, widgetService)") {
+	if !strings.Contains(di, `widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`) {
 		t.Errorf("the Loom graph does not register the module:\n%s", di)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "internal", "commands", "widget", "command.go")); err != nil {

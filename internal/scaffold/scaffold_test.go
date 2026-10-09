@@ -572,15 +572,25 @@ func TestAddAPIInstallsHTTPDependency(t *testing.T) {
 		"internal/api/dto.go",
 		"internal/api/service.go",
 		"internal/api/handler.go",
-		"internal/api/openapi.go",
 		"internal/api/api_test.go",
-		"internal/api/openapi_test.go",
 		"internal/httpserver/http.go",
 		"internal/di/di.go",
 		"internal/di/api_provider.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
+		}
+	}
+	// The OpenAPI capability is gone: no contract package, no document test and
+	// no gate configuration.
+	for _, path := range []string{
+		"internal/openapi",
+		"internal/api/openapi.go",
+		"internal/api/openapi_test.go",
+		"internal/config/openapi.go",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
+			t.Errorf("add api created %s; the OpenAPI capability was removed", path)
 		}
 	}
 	// api requires http but never web or db.
@@ -596,12 +606,15 @@ func TestAddAPIInstallsHTTPDependency(t *testing.T) {
 		t.Error("the api capability wrote the retired non-Loom route seam")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	if !strings.Contains(di, "api.Register(mux, service, cfg.OpenAPIDocumentEnabled())") {
+	if !strings.Contains(di, "api.Register(base.Group(httpserver.APIPrefix), service)") {
 		t.Errorf("the Loom server graph does not mount the API:\n%s", di)
 	}
 	goMod := readFile(t, filepath.Join(dir, "go.mod"))
 	if !strings.Contains(goMod, "require github.com/Xwudao/go-validate") {
 		t.Errorf("go.mod does not require go-validate:\n%s", goMod)
+	}
+	if strings.Contains(goMod, "kin-openapi") {
+		t.Errorf("go.mod still requires kin-openapi:\n%s", goMod)
 	}
 	if !strings.Contains(goMod, "weld:api:installed") {
 		t.Errorf("go.mod deps region not patched:\n%s", goMod)
@@ -673,8 +686,8 @@ func TestAddAPIRejectsMissingExtensionPoint(t *testing.T) {
 }
 
 // TestAddAPIGeneratedProjectBuildsAndTests compiles and tests a real generated
-// API project with the published go-validate dependency and the kin-openapi
-// test dependency. It skips only when dependencies cannot be resolved.
+// API project with the published go-validate dependency. It skips only when
+// dependencies cannot be resolved.
 func TestAddAPIGeneratedProjectBuildsAndTests(t *testing.T) {
 	goValidate := goValidateDir(t)
 	root := t.TempDir()
@@ -713,7 +726,7 @@ func TestAddAPIAndWebInEitherOrder(t *testing.T) {
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
 			for _, want := range []string{
 				"web.Handler()",
-				"api.Register(mux, service, cfg.OpenAPIDocumentEnabled())",
+				"api.Register(base.Group(httpserver.APIPrefix), service)",
 			} {
 				if !strings.Contains(di, want) {
 					t.Errorf("%q missing from the Loom server graph:\n%s", want, di)
@@ -1495,9 +1508,8 @@ func (b *syncBuffer) String() string {
 }
 
 // serveProbe starts the generated serve command on a fresh loopback address,
-// waits for the items business API (not the build-tagged OpenAPI document),
-// and returns the process, its base URL and its captured
-// stderr. The process is killed when the test finishes.
+// waits for the items business API, and returns the process, its base URL and
+// its captured stderr. The process is killed when the test finishes.
 func serveProbe(t *testing.T, binary, dir string, env []string) (*exec.Cmd, string, *syncBuffer) {
 	t.Helper()
 	addr := freeAddr(t)

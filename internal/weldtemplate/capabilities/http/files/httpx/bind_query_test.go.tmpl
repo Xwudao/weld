@@ -1,0 +1,77 @@
+package httpx
+
+import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+// bindTarget exercises the supported field kinds, including an untagged field
+// that must stay untouched and an optional pointer.
+type bindTarget struct {
+	Name    string   `query:"name"`
+	Count   int      `query:"count"`
+	Ratio   float64  `query:"ratio"`
+	Enabled bool     `query:"enabled"`
+	Labels  []string `query:"label"`
+	Page    *int     `query:"page"`
+	Ignored string
+}
+
+func TestBindQueryParsesEveryKind(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/x?name=Ada&count=3&ratio=0.5&enabled=true&label=a&label=b&page=4", nil)
+	got, err := BindQuery[bindTarget](request)
+	if err != nil {
+		t.Fatalf("BindQuery: %v", err)
+	}
+	if got.Name != "Ada" || got.Count != 3 || got.Ratio != 0.5 || !got.Enabled {
+		t.Fatalf("bound = %+v", got)
+	}
+	if len(got.Labels) != 2 || got.Labels[0] != "a" || got.Labels[1] != "b" {
+		t.Fatalf("labels = %v", got.Labels)
+	}
+	if got.Page == nil || *got.Page != 4 {
+		t.Fatalf("page = %v, want 4", got.Page)
+	}
+	if got.Ignored != "" {
+		t.Fatalf("an untagged field was bound: %q", got.Ignored)
+	}
+}
+
+func TestBindQueryLeavesAbsentOptionalNil(t *testing.T) {
+	got, err := BindQuery[bindTarget](httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("BindQuery: %v", err)
+	}
+	if got.Page != nil {
+		t.Fatalf("page = %v, want nil", got.Page)
+	}
+}
+
+func TestBindQueryRejectsMalformedValue(t *testing.T) {
+	_, err := BindQuery[bindTarget](httptest.NewRequest(http.MethodGet, "/x?count=abc", nil))
+	var decodeErr *DecodeError
+	if !errors.As(err, &decodeErr) || decodeErr.Status != http.StatusBadRequest {
+		t.Fatalf("err = %v, want a 400 *DecodeError", err)
+	}
+}
+
+// pathTarget reads a path parameter, so a field can be bound from the matched
+// route rather than the query string.
+type pathTarget struct {
+	ID   string `path:"id"`
+	Name string `query:"name"`
+}
+
+func TestBindQueryReadsPathValues(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/items/item-9?name=Ada", nil)
+	request.SetPathValue("id", "item-9")
+	got, err := BindQuery[pathTarget](request)
+	if err != nil {
+		t.Fatalf("BindQuery: %v", err)
+	}
+	if got.ID != "item-9" || got.Name != "Ada" {
+		t.Fatalf("bound = %+v, want id item-9 and name Ada", got)
+	}
+}

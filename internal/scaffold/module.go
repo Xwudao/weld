@@ -18,9 +18,8 @@ var moduleNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*$`)
 // are reserved whether or not the api capability is installed, so adding api
 // later can never collide with a module already on disk.
 var reservedModuleNames = map[string]string{
-	"api":     "the /api/ namespace is owned by the built-in api capability",
-	"items":   "GET/POST /api/items is the built-in api capability's resource",
-	"openapi": "GET /api/openapi.json is the built-in api capability's document",
+	"api":   "the /api/ namespace is owned by the built-in api capability",
+	"items": "GET/POST /api/items is the built-in api capability's resource",
 }
 
 // ValidateModuleName reports why a business-module name is unusable. A usable
@@ -125,12 +124,6 @@ func AddModule(req Request, name string) (*Result, error) {
 		}
 		path := string(template.Render([]byte(file.Path), vars))
 		rendered := template.Render(content, vars)
-		if file.Shared {
-			if err := p.planSharedFile(path, capability, rendered); err != nil {
-				return nil, err
-			}
-			continue
-		}
 		if err := p.planNewFile(path, capability, rendered); err != nil {
 			return nil, err
 		}

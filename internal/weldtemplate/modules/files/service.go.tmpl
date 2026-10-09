@@ -4,17 +4,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 )
 
-// moduleName is the module's package name and URL segment, recorded so a
-// response is self-describing.
-const moduleName = "__modname__"
-
-// Service is the business logic the HTTP handler depends on. It is a small
-// interface so a test can inject a fake and a real implementation can replace
-// the demo without touching the HTTP layer.
+// Service is the business logic the HTTP handler and the generated command group
+// share. It is a small interface so a test can inject a fake and a real
+// implementation can replace the demo without touching the HTTP layer.
 type Service interface {
 	Greet(ctx context.Context, req Request) (Response, error)
+	Create(ctx context.Context, req CreateRequest) (Item, error)
 }
 
 // NewService returns the default in-memory Service.
@@ -36,16 +34,26 @@ func NewService() Service {
 // NewService gains a dependency for the Loom graph. Replace NewService instead
 // when you want your own implementation.
 func NewDemoService() Service {
-	return demoService{}
+	return &demoService{}
 }
 
 // demoService is the default example implementation.
-type demoService struct{}
+type demoService struct {
+	mu   sync.Mutex
+	next int
+}
 
-func (demoService) Greet(_ context.Context, req Request) (Response, error) {
+func (*demoService) Greet(_ context.Context, req Request) (Response, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		name = "world"
 	}
-	return Response{Module: moduleName, Message: fmt.Sprintf("Hello, %s!", name)}, nil
+	return Response{Module: Name, Message: fmt.Sprintf("Hello, %s!", name)}, nil
+}
+
+func (s *demoService) Create(_ context.Context, req CreateRequest) (Item, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.next++
+	return Item{ID: fmt.Sprintf("%s-%d", Name, s.next), Name: req.Name}, nil
 }

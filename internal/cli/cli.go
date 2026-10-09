@@ -216,8 +216,8 @@ Capabilities:
   http   (add)      HTTP lifecycle, shared JSON/middleware toolkit and a serve
                     command
   web    (add)      React + TypeScript + Vite frontend (requires http)
-  api    (add)      JSON API with a {code,msg,data} envelope, go-validate rules
-                    and an OpenAPI 3.1 document
+  api    (add)      JSON API: typed handlers, self-validating DTOs and the
+                    {code,msg,data} response envelope
   db     (add)      PostgreSQL: SQL migrations, sqlc queries, an injectable pool
                     and repository
   redis  (add)      Opt-in Redis client with typed connection config; installing
@@ -236,12 +236,12 @@ Capabilities:
 
 Modules:
   add module <name> generates internal/modules/<name>: a small HTTP business
-  module (typed request/response, a Service seam and a handler under
-  /api/<name>) plus its route wiring. It installs http and config automatically
-  when absent, validates the name, and records the module in weld.json. Without
-  Loom it registers through the weld:routes extension point; with Loom the
-  generated graph picks it up, whichever is installed first. Its files are
-  written once and never regenerated, so your edits survive later adds.
+  module (typed request/response, a Service seam and routes declared once with
+  the internal/httpx helpers) under /api/<name>. It installs http, loom and
+  config automatically when absent, validates the name, and records the module
+  in weld.json. The generated Loom server graph registers the module on the
+  composed mux, whichever is installed first. Its files are written once and
+  never regenerated, so your edits survive later adds.
   add module <name> --command additionally generates a root command group in
   internal/commands/<name> backed by the module's own Service interface and
   NewService constructor, registered through internal/app/<name>_command.go.

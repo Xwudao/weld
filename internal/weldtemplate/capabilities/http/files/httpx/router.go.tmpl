@@ -1,0 +1,169 @@
+package httpx
+
+import (
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+// Router registers routes on a *http.ServeMux under a shared path prefix,
+// middleware chain and set of named policies.
+//
+// It is a thin wrapper, not a second router: the mux a caller composes stays the
+// single routing surface, so a Router adds prefixing, middleware, named policies
+// and the typed endpoint helpers without owning a global registry or a server.
+// Group derives a sub-router; Handle and HandleFunc register a raw net/http
+// handler for a response the typed helpers do not model, such as a file
+// download, a stream or SSE.
+type Router struct {
+	mux        *http.ServeMux
+	prefix     string
+	middleware []Middleware
+	// policies maps a policy name to the middleware a route in that policy must
+	// pass. The composition root defines them; a module only references a name.
+	policies map[string][]Middleware
+	// required is the mount's baseline: every route registered under this router
+	// runs these policies unless it opts out with Open. It makes the default
+	// fail-closed, so forgetting a Policy on a sensitive route still runs the
+	// baseline rather than serving it unguarded.
+	required []string
+}
+
+// NewRouter returns a Router that registers routes on mux.
+func NewRouter(mux *http.ServeMux) *Router {
+	return &Router{mux: mux}
+}
+
+// WithPolicy defines a named policy as a middleware chain, outermost first.
+//
+// The composition root declares policies here once; a module references one by
+// name with the Policy option. Redefining a name replaces it. The receiver is
+// unchanged, so a caller can build a base and derive mounts from it.
+func (r *Router) WithPolicy(name string, middleware ...Middleware) *Router {
+	next := r.clone()
+	next.policies[name] = append([]Middleware(nil), middleware...)
+	return next
+}
+
+// Require sets the mount's baseline policies: every route registered under the
+// returned router runs them, in order, unless the route opts out with Open.
+//
+// It is what makes policy coverage fail-closed: a new route under the mount is
+// guarded by the baseline even when its author forgets to add a Policy. A route
+// that must be reachable without the baseline declares it explicitly with Open.
+func (r *Router) Require(names ...string) *Router {
+	next := r.clone()
+	next.required = append(next.required, names...)
+	return next
+}
+
+// Group returns a sub-router whose routes share prefix and additionally run
+// middleware, outermost first.
+//
+// The receiver is unchanged, so deriving and discarding a group never affects
+// routes registered elsewhere. An empty prefix keeps the parent's path and adds
+// only the middleware. Policies and the baseline are inherited.
+func (r *Router) Group(prefix string, middleware ...Middleware) *Router {
+	next := r.clone()
+	next.prefix = joinPath(r.prefix, prefix)
+	next.middleware = append(next.middleware, middleware...)
+	return next
+}
+
+// Handle registers a raw handler under the router's prefix.
+//
+// It is the escape hatch for responses the typed helpers do not express. The
+// pattern may carry an explicit method ("GET /items") or be a plain path, and it
+// is wrapped with the router's middleware exactly like a typed route.
+func (r *Router) Handle(pattern string, handler http.Handler) {
+	r.mux.Handle(r.fullPattern(pattern), r.wrap(handler))
+}
+
+// HandleFunc registers a raw handler function under the router's prefix.
+func (r *Router) HandleFunc(pattern string, handler http.HandlerFunc) {
+	r.Handle(pattern, handler)
+}
+
+// clone returns a copy that shares the mux but owns its own configuration, so a
+// derived router never mutates its parent.
+func (r *Router) clone() *Router {
+	policies := make(map[string][]Middleware, len(r.policies)+1)
+	for name, chain := range r.policies {
+		policies[name] = chain
+	}
+	return &Router{
+		mux:        r.mux,
+		prefix:     r.prefix,
+		middleware: append([]Middleware(nil), r.middleware...),
+		policies:   policies,
+		required:   append([]string(nil), r.required...),
+	}
+}
+
+// wrap applies the router's middleware to one handler, outermost first.
+func (r *Router) wrap(handler http.Handler) http.Handler {
+	return Chain(r.middleware...)(handler)
+}
+
+// resolvePolicies turns route policy names into one ordered middleware chain.
+//
+// names is the baseline followed by the route's own policies, deduplicated by
+// name so a route that repeats a baseline policy does not run it twice. An
+// unknown name is a startup error, not a silent pass-through: a policy the
+// composition never defined must fail loudly rather than serve the route
+// unguarded.
+func (r *Router) resolvePolicies(names []string) []Middleware {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(names))
+	chain := make([]Middleware, 0, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		middleware, ok := r.policies[name]
+		if !ok {
+			panic(fmt.Sprintf("httpx: route references undefined policy %q", name))
+		}
+		chain = append(chain, middleware...)
+	}
+	return chain
+}
+
+// fullPattern returns the ServeMux pattern for one route, keeping an explicit
+// method in front of the joined path.
+func (r *Router) fullPattern(pattern string) string {
+	if method, path, ok := splitMethod(pattern); ok {
+		return method + " " + joinPath(r.prefix, path)
+	}
+	return joinPath(r.prefix, pattern)
+}
+
+// splitMethod splits a ServeMux pattern that names a method ("GET /items") into
+// its method and path. A pattern without a space is a plain path.
+func splitMethod(pattern string) (method, path string, ok bool) {
+	index := strings.IndexByte(pattern, ' ')
+	if index < 0 {
+		return "", pattern, false
+	}
+	return pattern[:index], strings.TrimSpace(pattern[index+1:]), true
+}
+
+// joinPath joins a router prefix and a route path with exactly one slash. An
+// empty path keeps the prefix; an explicit trailing slash on the path is kept,
+// so a subtree pattern still ends in a slash.
+func joinPath(prefix, path string) string {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix != "" && !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
+	}
+	if path == "" {
+		if prefix == "" {
+			return "/"
+		}
+		return prefix
+	}
+	return prefix + "/" + strings.TrimPrefix(path, "/")
+}

@@ -222,12 +222,34 @@ func TestAPICapabilityRequiresHTTP(t *testing.T) {
 		"internal/api/dto.go",
 		"internal/api/service.go",
 		"internal/api/handler.go",
-		"internal/api/openapi.go",
+		"internal/api/api_test.go",
 		"internal/di/api_provider.go",
 	} {
 		if !paths[want] {
 			t.Errorf("api capability does not ship %s", want)
 		}
+	}
+	for pathName := range paths {
+		if strings.Contains(pathName, "openapi") {
+			t.Errorf("api capability still ships %s; the OpenAPI capability was removed", pathName)
+		}
+	}
+	// The api capability no longer carries its own configuration section: it has
+	// no OpenAPI gate and needs nothing from config beyond what http requires.
+	for _, patch := range d.Patches {
+		if strings.HasPrefix(patch.Path, "config") || strings.Contains(patch.Path, "config.go") {
+			t.Errorf("api still patches configuration: %+v", patch)
+		}
+	}
+	snippet, err := fs.ReadFile(FS(), "capabilities/api/files/go.mod.snippet")
+	if err != nil {
+		t.Fatalf("read api go.mod snippet: %v", err)
+	}
+	if strings.Contains(string(snippet), "kin-openapi") {
+		t.Error("api still depends on kin-openapi")
+	}
+	if !strings.Contains(string(snippet), "go-validate") {
+		t.Error("api no longer depends on go-validate")
 	}
 	for _, file := range d.Files {
 		if strings.Contains(file.Path, "httpserver") {
@@ -265,8 +287,14 @@ func TestAPICapabilityRequiresHTTP(t *testing.T) {
 		t.Fatalf("read loom graph: %v", err)
 	}
 	if !strings.Contains(string(graph), `{{- if .Caps.Has "api"}}`) ||
-		!strings.Contains(string(graph), "api.Register(mux, service, cfg.OpenAPIDocumentEnabled())") {
-		t.Error("the Loom graph does not call api.Register with the configuration-resolved gate under an api guard")
+		!strings.Contains(string(graph), "api.Register(base.Group(httpserver.APIPrefix), service)") {
+		t.Error("the Loom graph does not call api.Register under an api guard")
+	}
+	if !strings.Contains(string(graph), "httpserver.PolicyAdmin, httpserver.AdminGuard()") {
+		t.Error("the Loom graph does not define the administrator policy once")
+	}
+	if strings.Contains(string(graph), "OpenAPI") {
+		t.Error("the Loom graph still references OpenAPI")
 	}
 }
 
@@ -719,11 +747,18 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 	for _, want := range []string{
 		"internal/httpx/httpx.go",
 		"internal/httpx/bind.go",
+		"internal/httpx/bind_query.go",
+		"internal/httpx/router.go",
+		"internal/httpx/route.go",
 		"internal/httpx/middleware.go",
 		"internal/httpx/httpx_test.go",
 		"internal/httpx/bind_test.go",
+		"internal/httpx/bind_query_test.go",
+		"internal/httpx/router_test.go",
+		"internal/httpx/route_test.go",
 		"internal/httpx/middleware_test.go",
 		"internal/httpserver/middleware.go",
+		"internal/httpserver/policy.go",
 	} {
 		if _, ok := paths[want]; !ok {
 			t.Errorf("http capability does not ship %s", want)
@@ -764,6 +799,25 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 			t.Errorf("httpx middleware.go is missing %q", want)
 		}
 	}
+	routerGo := read(paths["internal/httpx/router.go"])
+	for _, want := range []string{"func NewRouter(", "func (r *Router) Group(", "func (r *Router) WithPolicy(", "func (r *Router) Require(", "func (r *Router) HandleFunc("} {
+		if !strings.Contains(routerGo, want) {
+			t.Errorf("httpx router.go is missing %q", want)
+		}
+	}
+	routeGo := read(paths["internal/httpx/route.go"])
+	for _, want := range []string{"func NoInput[", "func Get[", "func Post[", "func Policy(", "func Open(", "type Validator interface"} {
+		if !strings.Contains(routeGo, want) {
+			t.Errorf("httpx route.go is missing %q", want)
+		}
+	}
+	// The framework defines no policy names of its own: a policy name is the
+	// project's, so the toolkit must not bake "admin" or any other audience in.
+	for _, frameworkFile := range []string{httpxGo, bindGo, middlewareGo, routerGo, routeGo} {
+		if strings.Contains(frameworkFile, `"admin"`) || strings.Contains(frameworkFile, "AdminGuard") {
+			t.Errorf("httpx defines a project-specific policy name")
+		}
+	}
 	// Binding takes a validator callback rather than importing go-validate, so
 	// the toolkit stays usable by a capability that does not install api.
 	for _, source := range []string{
@@ -788,9 +842,9 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 }
 
 // TestCapabilitiesShareTheResponseEnvelope guards the wire contract: the
-// built-in API and the generated business module both write through the httpx
-// envelope, the OpenAPI document is served raw, and the document describes the
-// envelope the handlers write.
+// built-in API and the generated business module both declare routes with the
+// httpx router helpers, so both write the shared {code,msg,data} envelope and
+// neither reimplements binding or a JSON writer.
 func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
 	read := func(pathName string) string {
 		raw, err := fs.ReadFile(FS(), pathName)
@@ -801,26 +855,29 @@ func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
 	}
 
 	handler := read("capabilities/api/files/handler.go.tmpl")
-	for _, want := range []string{"httpx.DecodeJSON(", "httpx.JSON(", "httpx.RawJSON(", "func decodeBody["} {
+	for _, want := range []string{"httpx.NewRouter(", "httpx.Get(", "httpx.Post(", "httpx.WithStatus("} {
 		if !strings.Contains(handler, want) {
 			t.Errorf("api handler.go is missing %q", want)
 		}
 	}
-	openapi := read("capabilities/api/files/openapi.go.tmpl")
-	for _, want := range []string{"func successEnvelope(", "func errorEnvelope(", "func envelopeSchema("} {
-		if !strings.Contains(openapi, want) {
-			t.Errorf("api openapi.go is missing %q", want)
+	if strings.Contains(handler, "writeJSON(") {
+		t.Error("api handler.go still hand-rolls its own JSON writer")
+	}
+	for _, forbidden := range []string{"openapi", "OpenAPI"} {
+		if strings.Contains(handler, forbidden) {
+			t.Errorf("api handler.go still references %q", forbidden)
 		}
 	}
 	module := read("modules/files/module.go.tmpl")
-	for _, want := range []string{"httpx.JSON(", "httpx.Error("} {
+	for _, want := range []string{"httpx.NoInput(", "httpx.Get(", "httpx.Post(", "httpx.Policy(", "httpx.RawText("} {
 		if !strings.Contains(module, want) {
 			t.Errorf("the module template is missing %q", want)
 		}
 	}
-	// The OpenAPI artifact is a complete document for tooling, served unwrapped.
-	if strings.Contains(handler, "writeJSON(") {
-		t.Error("api handler.go still hand-rolls its own JSON writer")
+	for _, forbidden := range []string{"contract", "openapi", "OpenAPI"} {
+		if strings.Contains(module, forbidden) {
+			t.Errorf("the module template still references %q", forbidden)
+		}
 	}
 }
 
@@ -1665,8 +1722,8 @@ func TestModuleShipsNoPlainRouteTemplate(t *testing.T) {
 	}
 	graphText := string(graph)
 	if !strings.Contains(graphText, "loom.Provide({{.Name}}.NewService)") ||
-		!strings.Contains(graphText, "{{.Name}}.Register(mux, {{.Name}}Service)") {
-		t.Error("the Loom graph does not register the module service on the mux")
+		!strings.Contains(graphText, "{{.Name}}.Register(base.Group(httpserver.APIPrefix") {
+		t.Error("the Loom graph does not register the module service on the composed mux")
 	}
 }
 
@@ -1905,25 +1962,73 @@ func TestCommandGraphIsLoomAware(t *testing.T) {
 	}
 }
 
-// TestSharedOpenAPIContractIsOneSource guards the shared contract both the api
-// capability and the module template ship at internal/openapi/openapi.go: the
-// two payloads must stay byte-identical, or an api-first and a module-first
-// project would generate a different contract package for the same file.
-func TestSharedOpenAPIContractIsOneSource(t *testing.T) {
-	apiPayload, err := fs.ReadFile(FS(), "capabilities/api/files/openapi_contract.go.tmpl")
+// TestNoOpenAPIPayloadsRemain guards the removal: no capability or module
+// payload, descriptor or Go import may mention OpenAPI, the internal/openapi
+// package, kin-openapi or the openapi build tag.
+func TestNoOpenAPIPayloadsRemain(t *testing.T) {
+	entries, err := fs.ReadDir(FS(), "capabilities")
 	if err != nil {
-		t.Fatalf("read api contract payload: %v", err)
+		t.Fatal(err)
 	}
-	modulePayload, err := fs.ReadFile(FS(), "modules/files/openapi_contract.go.tmpl")
-	if err != nil {
-		t.Fatalf("read module contract payload: %v", err)
+	var walkErr error
+	check := func(pathName string, entry fs.DirEntry) {
+		if walkErr != nil || entry.IsDir() {
+			return
+		}
+		body, err := fs.ReadFile(FS(), pathName)
+		if err != nil {
+			walkErr = err
+			return
+		}
+		lower := strings.ToLower(string(body))
+		markers := []string{"kin-openapi", "internal/openapi", "openapibuildenabled", "openapidocumentenabled", "openapi.enabled", "openapi_enabled"}
+		// A descriptor must not mention the capability at all, not even as a path.
+		if strings.HasSuffix(pathName, ".json") {
+			markers = append(markers, "openapi")
+		}
+		for _, marker := range markers {
+			if strings.Contains(lower, marker) {
+				t.Errorf("%s still references %q", pathName, marker)
+			}
+		}
 	}
-	if !bytes.Equal(apiPayload, modulePayload) {
-		t.Fatal("the api and module openapi contract payloads differ; they share the internal/openapi/openapi.go target")
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		root := path.Join("capabilities", entry.Name())
+		if err := fs.WalkDir(FS(), root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			check(p, d)
+			return nil
+		}); err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
 	}
-	// The shared package must render to gofmt-clean Go.
-	if _, err := format.Source(apiPayload); err != nil {
-		t.Fatalf("the shared openapi contract payload is not valid Go: %v", err)
+	if err := fs.WalkDir(FS(), "modules", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		check(p, d)
+		return nil
+	}); err != nil {
+		t.Fatalf("walk modules: %v", err)
+	}
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+	for _, removed := range []string{
+		"capabilities/api/files/openapi.go.tmpl",
+		"capabilities/api/files/openapi_contract.go.tmpl",
+		"capabilities/api/files/config_openapi.go.tmpl",
+		"modules/files/contract.go.tmpl",
+		"modules/files/openapi_contract.go.tmpl",
+	} {
+		if _, err := fs.Stat(FS(), removed); err == nil {
+			t.Errorf("removed payload %s still exists", removed)
+		}
 	}
 }
 

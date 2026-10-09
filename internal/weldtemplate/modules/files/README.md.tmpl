@@ -6,35 +6,47 @@ survive later `weld add` commands.
 
 ## What it is
 
-An HTTP business module wired under `GET /api/__modname__`:
+An HTTP business module wired through `internal/httpx`:
 
-- `dto.go` — the typed `Request` and `Response`.
+- `dto.go` — the typed `Request`, `Response`, `CreateRequest` and `Item`, plus
+  `CreateRequest.Validate`.
 - `service.go` — the `Service` interface, the default `NewService`, and the
   `NewDemoService` demo constructor the package's tests use.
-- `module.go` — `operations()`, `Register` and the HTTP handler.
-- `contract.go` — the OpenAPI contract for those routes, registered with the
-  shared `internal/openapi` registry.
+- `module.go` — `Register`, where every route is declared once.
+- `module_test.go` — an in-process `httptest` suite with the demo service.
 
-The handler writes through `internal/httpx`, the shared toolkit: `httpx.JSON`
-wraps a value in the `{code, msg, data}` envelope and `httpx.Error` writes an
-error envelope with `data: null`. Use `httpx.RawText`, `httpx.Bytes` or
-`httpx.NoContent` for a response that must stay unwrapped.
+## Routes
 
-## Routes and the OpenAPI document
+`Register` declares every route in one statement, and paths are relative to the
+mount the composition root gives it:
 
-`operations()` in `module.go` is the single route table: `Register` installs each
-entry on the composed mux and `greetingContract` in `contract.go` documents the
-same entry. The contract is registered with `internal/openapi` when the package
-is initialized, so `weld add api` includes these routes in
-`GET /api/openapi.json` without the api package importing this one. The success
-schema is rendered from this package's own `Response` DTO, so the wire shape and
-the document cannot drift.
+- `GET {prefix}/` — `httpx.NoInput`, a public route with no parameters.
+- `GET {prefix}/greet?name=Ada` — `httpx.Get`, which binds the query into
+  `Request`.
+- `POST {prefix}/admin/items` — `httpx.Post` with `httpx.Policy(adminPolicy)`.
+  The named policy rejects an unauthenticated caller before the handler, the
+  JSON body is bound, and `CreateRequest.Validate` runs before the handler.
+- `GET {prefix}/health` — `router.HandleFunc`, the raw escape hatch for a
+  response that must stay unwrapped.
 
-Add an endpoint by adding an entry to `operations()` and its contract to
-`contract.go` together. The contract is explicit on purpose: weld never infers a
-route, a request shape or an authorization rule from a handler, so a customized
-module documents exactly what its author declares. A module that predates this
-contract simply contributes no documented operation; it never breaks the build.
+The module declares no mount prefix and no guard. `internal/httpserver.APIPrefix`
+sets the top-level path and the generated server graph mounts the module there,
+so the same module serves `/api/v1/__modname__` and `/api/v2/__modname__` without
+an edit. `adminPolicy` is only a name: the composition root defines what the
+`"admin"` policy does (`httpserver.AdminGuard` by default), so authorization
+lives in exactly one place and every module shares it.
+
+## Responses
+
+Handlers write through `internal/httpx`, the shared toolkit:
+
+- `httpx.JSON` wraps a value in the `{code, msg, data}` envelope, with `code`
+  repeating the HTTP transport status.
+- `httpx.Error` writes an error envelope with `data: null`; a handler can also
+  return an `*httpx.HTTPError` such as `httpx.NotFound("...")` and the helper
+  maps it.
+- `httpx.RawText`, `httpx.Bytes` and `httpx.RawJSON` write a response that must
+  stay unwrapped.
 
 ## Replaceable example, not persistence
 
@@ -46,12 +58,13 @@ interface and the `NewService` symbol stable.
 ## How it is wired
 
 Generating this module installed `http` and `loom` (and the `config` they
-require), and wrote the shared `internal/openapi` contract package. The generated
-Loom server graph in `internal/di` provides `__modname__.NewService` and
-registers the module on the composed mux (`di.newMux`), so you may change
-`NewService`'s signature — for example to take `data.Repository` after
-`weld add db`. Nothing in this package quotes the graph, and no separate route
-file is written.
+require). The generated Loom server graph in `internal/di` provides
+`__modname__.NewService`, mounts the module under the API prefix
+(`httpserver.APIPrefix`) and defines the `admin` policy once with
+`httpserver.AdminGuard`. You may change `NewService`'s signature — for example to
+take `data.Repository` after `weld add db` — and the graph follows it. Nothing in
+this package quotes the graph, and no separate route file is written.
 
-To change the wire format or add endpoints, edit this package; the route table
-and its contract live in `module.go` and `contract.go`.
+Adding the optional Cobra command group (`weld add module __modname__ --command`)
+reuses the same `Service`, so the command and the HTTP handler share one
+business layer.

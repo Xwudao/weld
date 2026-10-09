@@ -1,0 +1,46 @@
+package httpserver
+
+import (
+	nethttp "net/http"
+	"strings"
+
+	"__module__/internal/httpx"
+)
+
+// APIPrefix is the mount prefix for the built-in API and every business module.
+//
+// It is the one place the HTTP surface's top-level path is declared. Change it
+// (for example to "/api/v2") to version the surface, or mount a second surface
+// (for example "/ex") for another audience; the generated server graph mounts
+// from this constant, so the change survives every later `weld add`. A module
+// declares its paths relative to its mount, so it follows the prefix without an
+// edit.
+const APIPrefix = "/api"
+
+// PolicyAdmin is the name of the administrator route policy. A module marks its
+// administrator routes with httpx.Policy(PolicyAdmin); the generated server
+// graph defines the policy once with AdminGuard, so every module shares one
+// guard.
+const PolicyAdmin = "admin"
+
+// AdminGuard is the project's placeholder administrator policy: it accepts a
+// non-empty bearer token and otherwise rejects with 401 before the handler or
+// the body binder runs.
+//
+// It is a replaceable example, not authentication. Replace its body with the
+// project's real check (a JWT, a session, a role lookup), or define a different
+// policy in the generated server graph and reference that name from the module.
+// A module never implements a guard itself, so the policy lives in exactly one
+// place.
+func AdminGuard() httpx.Middleware {
+	return func(next nethttp.Handler) nethttp.Handler {
+		return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+			authorization := r.Header.Get("Authorization")
+			if !strings.HasPrefix(authorization, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")) == "" {
+				httpx.Error(w, nethttp.StatusUnauthorized, "authentication required")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}

@@ -1,30 +1,18 @@
 {
   "name": "api",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "kind": "add",
-  "summary": "JSON HTTP API: typed DTOs, go-validate rules and an OpenAPI 3.1 document from one contract.",
+  "summary": "JSON HTTP API: typed DTOs, self-validating requests, typed handlers and the shared {code,msg,data} envelope.",
   "requires": ["http"],
   "files": [
-    { "path": "internal/openapi/openapi.go", "source": "files/openapi_contract.go.tmpl", "shared": true },
-    { "path": "internal/openapi/legacy.go", "source": "files/openapi_legacy.go.tmpl", "shared": true },
     { "path": "internal/api/dto.go", "source": "files/dto.go.tmpl" },
     { "path": "internal/api/service.go", "source": "files/service.go.tmpl" },
     { "path": "internal/api/handler.go", "source": "files/handler.go.tmpl" },
-    { "path": "internal/api/openapi_build_disabled.go", "source": "files/openapi_build_disabled.go.tmpl" },
-    { "path": "internal/api/openapi_build_enabled.go", "source": "files/openapi_build_enabled.go.tmpl" },
-    { "path": "internal/api/openapi.go", "source": "files/openapi.go.tmpl" },
     { "path": "internal/api/api_test.go", "source": "files/api_test.go.tmpl" },
-    { "path": "internal/api/openapi_test.go", "source": "files/openapi_test.go.tmpl" },
-    { "path": "internal/api/openapi_gate_test.go", "source": "files/openapi_gate_test.go.tmpl" },
     { "path": "internal/api/README.md", "source": "files/README.md" },
-    { "path": "internal/config/openapi.go", "source": "files/config_openapi.go.tmpl" },
     { "path": "internal/di/api_provider.go", "source": "files/api_provider.go.tmpl", "when": ["loom"] }
   ],
   "patches": [
-    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
-    { "path": "internal/config/config.go", "marker": "configfields", "source": "files/config_fields.snippet" },
-    { "path": "internal/config/config.go", "marker": "configenv", "source": "files/config_env.snippet" },
-    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
-    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" }
+    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" }
   ]
 }

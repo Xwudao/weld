@@ -6,15 +6,19 @@
 //   - the default JSON response envelope, {code, msg, data}, and the writers
 //     that emit it (JSON, Error) next to the raw writers for responses that must
 //     stay unwrapped (RawJSON, RawText, Bytes, NoContent);
-//   - typed request binding (DecodeJSON, QueryInt) with a configurable body
-//     limit, a content-type check, single-value and unknown-field rejection and
-//     an optional code-first validator callback;
+//   - typed request binding (DecodeJSON, QueryInt, BindQuery) with a configurable
+//     body limit, a content-type check, single-value and unknown-field rejection
+//     and an optional code-first validator callback, plus the Router and typed
+//     endpoint helpers (Get, Post, NoInput, ...) that bind and respond for a
+//     handler;
 //   - the composable net/http middleware and the three middlewares the generated
-//     server installs by default (RequestID, AccessLog, Recover).
+//     server installs by default (RequestID, AccessLog, Recover), alongside the
+//     named route policies a module references and the composition root defines.
 //
 // It deliberately depends only on the standard library. In particular it does
 // not import the project's go-validate rules: binding takes a validator
-// callback, so the API wires its Spec in without this package knowing about it.
+// callback, so the API wires its validation in without this package knowing
+// about it, and it defines no policy names of its own.
 package httpx
 
 import (
@@ -60,13 +64,51 @@ func Error(w http.ResponseWriter, status int, message string) {
 	writeEnvelope(w, status, message, nil)
 }
 
+// HTTPError is a handler failure that controls the response: it carries the
+// transport status and a client-safe message. A handler returns one when it
+// wants a specific status and message; any other error becomes the fixed
+// internal-error envelope, so an unexpected error never leaks its message.
+//
+// The status is a real transport status, never an invented business code, so
+// the envelope's code keeps repeating the status the way JSON and Error write
+// it.
+type HTTPError struct {
+	Status  int
+	Message string
+}
+
+func (e *HTTPError) Error() string { return e.Message }
+
+// NewHTTPError returns an error that maps to the given transport status and
+// client-safe message.
+func NewHTTPError(status int, message string) *HTTPError {
+	return &HTTPError{Status: status, Message: message}
+}
+
+// BadRequest, Unauthorized, Forbidden, NotFound and Conflict are the common
+// mappings, so a handler returns httpx.NotFound("item not found") instead of
+// repeating the constructor.
+func BadRequest(message string) *HTTPError { return NewHTTPError(http.StatusBadRequest, message) }
+func Unauthorized(message string) *HTTPError {
+	return NewHTTPError(http.StatusUnauthorized, message)
+}
+func Forbidden(message string) *HTTPError { return NewHTTPError(http.StatusForbidden, message) }
+func NotFound(message string) *HTTPError  { return NewHTTPError(http.StatusNotFound, message) }
+func Conflict(message string) *HTTPError  { return NewHTTPError(http.StatusConflict, message) }
+
 // WriteError maps err to an error envelope. A *DecodeError carries the status
-// and message binding chose; any other error becomes the fixed internal-error
-// envelope, so an unexpected error never leaks its message.
+// and message binding chose, an *HTTPError the status and message a handler
+// chose, and any other error becomes the fixed internal-error envelope, so an
+// unexpected error never leaks its message.
 func WriteError(w http.ResponseWriter, err error) {
 	var decodeErr *DecodeError
 	if errors.As(err, &decodeErr) {
 		Error(w, decodeErr.Status, decodeErr.Message)
+		return
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		Error(w, httpErr.Status, httpErr.Message)
 		return
 	}
 	Error(w, ErrorStatus, ErrorMsg)
@@ -89,8 +131,8 @@ func writeEnvelope(w http.ResponseWriter, status int, message string, data any) 
 }
 
 // RawJSON writes v as JSON without the envelope. It is for a response that is
-// already a complete document and must stay unwrapped, such as the OpenAPI
-// document served at /api/openapi.json.
+// already a complete document and must stay unwrapped, such as a downloaded
+// JSON export.
 func RawJSON(w http.ResponseWriter, status int, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {

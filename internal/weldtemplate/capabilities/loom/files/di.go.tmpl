@@ -71,6 +71,9 @@ import (
 	"__module__/internal/cron"
 {{- end}}
 	"__module__/internal/httpserver"
+{{- if or (.Caps.Has "api") .Modules}}
+	"__module__/internal/httpx"
+{{- end}}
 {{- range .Modules}}
 	"__module__/internal/modules/{{.Name}}"
 {{- end}}
@@ -307,10 +310,11 @@ func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service ap
 // newMux composes the application handler from the installed capabilities.
 //
 // Route composition is explicit here rather than through a global registry, so
-// the dependency graph is the single source of composition. The reserved /api/
-// namespace takes precedence over the SPA catch-all because net/http resolves
-// the more specific pattern first. Business modules are registered here too, so
-// a module never needs a separate route seam.
+// the dependency graph is the single source of composition. The mount prefix
+// comes from httpserver.APIPrefix, so changing the version (or adding another
+// audience surface) is a one-line change in the stable project file rather than
+// an edit to this regenerated graph. The administrator policy is defined once
+// here, so every module's administrator routes share one guard.
 func newMux({{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) *nethttp.ServeMux {
@@ -318,8 +322,11 @@ func newMux({{range .Modules}}
 {{- if .Caps.Has "web"}}
 	mux.Handle("/", web.Handler())
 {{- end}}
+{{- if .Modules}}
+	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard())
 {{- range .Modules}}
-	{{.Name}}.Register(mux, {{.Name}}Service)
+	{{.Name}}.Register(base.Group(httpserver.APIPrefix+"/{{.Name}}"), {{.Name}}Service)
+{{- end}}
 {{- end}}
 	return mux
 }
@@ -327,19 +334,17 @@ func newMux({{range .Modules}}
 
 // newMuxWithAPI composes the API and module routes. The API-specific wrapper
 // keeps newMux's module-only test seam source-compatible when api is added.
-//
-// The OpenAPI document is gated by the one configuration path: the resolved
-// decision comes from cfg through config.Config.OpenAPIDocumentEnabled, never
-// from a direct environment read here, so the environment label and the enable
-// switch cannot disagree with the rest of the process.
-func newMuxWithAPI(cfg *config.Config, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
+// The API and the modules share one policy-aware base, mounted at
+// httpserver.APIPrefix.
+func newMuxWithAPI(service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 {{- if .Caps.Has "web"}}
 	mux.Handle("/", web.Handler())
 {{- end}}
-	api.Register(mux, service, cfg.OpenAPIDocumentEnabled())
+	base := httpx.NewRouter(mux).WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard())
+	api.Register(base.Group(httpserver.APIPrefix), service)
 {{- range .Modules}}
-	{{.Name}}.Register(mux, {{.Name}}Service)
+	{{.Name}}.Register(base.Group(httpserver.APIPrefix+"/{{.Name}}"), {{.Name}}Service)
 {{- end}}
 	return mux
 }
@@ -405,7 +410,7 @@ func NewServerWithAPI(
 	service api.Service,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
-	return newServer(lc, cfg, logger, newMuxWithAPI(cfg, service,{{range .Modules}}
+	return newServer(lc, cfg, logger, newMuxWithAPI(service,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	))
 }

@@ -97,6 +97,15 @@ func TestWriteErrorMapsDecodeErrorAndRedactsOthers(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), "sentinel") {
 		t.Fatalf("an unexpected error leaked its message: %s", recorder.Body)
 	}
+
+	recorder = httptest.NewRecorder()
+	WriteError(recorder, NotFound("item not found"))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("http error status = %d, want 404", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "item not found") {
+		t.Fatalf("an HTTPError message was not written: %s", recorder.Body)
+	}
 }
 
 type errSentinel struct{}
@@ -106,12 +115,12 @@ func (errSentinel) Error() string { return "sentinel internal detail" }
 func TestRawWritersStayUnwrapped(t *testing.T) {
 	t.Run("raw json", func(t *testing.T) {
 		recorder := httptest.NewRecorder()
-		RawJSON(recorder, http.StatusOK, map[string]any{"openapi": "3.1.0"})
+		RawJSON(recorder, http.StatusOK, map[string]any{"version": "1.0"})
 		var document map[string]any
 		if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if document["openapi"] != "3.1.0" {
+		if document["version"] != "1.0" {
 			t.Fatalf("document = %v, want the raw document", document)
 		}
 		if _, wrapped := document["code"]; wrapped {

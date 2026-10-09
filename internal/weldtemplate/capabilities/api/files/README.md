@@ -1,91 +1,85 @@
-# internal/api
+# `internal/api`
 
-The JSON HTTP contract of this project. Request and response DTOs carry JSON
-serialization tags only; each DTO's `Spec()` declares its go-validate rules
-once, and the same `Spec` produces the runtime validation and the OpenAPI 3.1
-constraints. `operations()` is the single route table behind both the mux
-registration (`Register`) and the document (`Document`, served at
-`GET /api/openapi.json`).
+`weld add api` generated this package: the JSON HTTP contract of the project.
+weld records every file in `weld.json` and never regenerates them, so your edits
+survive later `weld add` commands.
 
-## Business modules in the document
+## What it is
 
-The document merges two sources: the built-in `operations()` table and the
-operations every linked business module registered with the shared
-`internal/openapi` package. A module registers the same route table its
-`Register` installs, so a module route cannot exist undocumented and a
-documented operation cannot exist unrouted. This package never imports a module
-and never infers a route, a schema or an authorization rule from a handler: it
-states only what a module explicitly declared.
+- `dto.go` — the typed request and response DTOs plus each request's `Validate`.
+- `service.go` — the `Service` interface and the default in-memory
+  implementation.
+- `handler.go` — `Handler` and `Register`, which declare every route once.
+- `api_test.go` — an in-process `httptest` suite with an injected Service.
 
-A duplicate `operationId`, method or path between the two sources is an error,
-never a silent overwrite, so `weld add module` and `weld add api` compose in
-either order without one hiding the other. A module that predates this package
-simply contributes no documented operation; it never breaks the build.
+The HTTP surface is a plain `http.Handler`, so a test exercises it with
+`net/http/httptest`; it opens no socket and needs no database.
 
-## The document switch (fail-closed)
+## Routes
 
-`GET /api/openapi.json` is **off by default**. A normal build cannot serve it,
-even if configuration or a caller mistakenly enables it. A development binary
-must opt in with `go build -tags openapi ./...` (or `go test -tags openapi ./...`).
-Even in that build, the deployment must name itself a development/local
-environment *and* explicitly enable the runtime switch:
+`Register` declares each route in one statement: the method, the relative path,
+the request binding and the handler are together, so there is no separate route
+table or documentation file to keep in sync. The caller owns the mount prefix
+(see `internal/httpserver.APIPrefix` in the generated server graph), so the same
+routes can serve `/api/v1` and `/api/v2` without a change here.
 
-- `environment` in `config.yml`, overridden by the `APP_ENV` environment
-  variable, must be `development` or `local`;
-- `openapi.enabled`, overridden by the `OPENAPI_ENABLED` environment variable,
-  must be `true`.
+```go
+func Register(router *httpx.Router, service Service) {
+	httpx.Get(router, "/items", func(ctx context.Context, query ListItemsQuery) ([]ItemResponse, error) {
+		...
+	})
+	httpx.Post(router, "/items", func(ctx context.Context, request CreateItemRequest) (ItemResponse, error) {
+		...
+	}, httpx.WithStatus(nethttp.StatusCreated), httpx.WithMaxBytes(maxBodyBytes))
+	httpx.Get(router, "/items/{id}", func(ctx context.Context, request GetItemRequest) (ItemResponse, error) {
+		...
+	})
+}
+```
 
-An unset, unknown or production environment never serves the document, even if
-the binary was built with `-tags openapi` and the switch is enabled. The decision is resolved once from the typed
-configuration (`config.Config.OpenAPIDocumentEnabled`) and passed to
-`api.Register` as a plain bool, so no `os.Getenv` bypass can disagree with the
-process configuration. A refused request is a `404` with no document, not a
-hidden endpoint that still returns the document. The built-in items API and the
-business module routes are unaffected by the switch.
+`Handler(service)` mounts the same routes at the default `/api` prefix; it is
+the in-process seam a test uses.
 
-## Request and response format
+## Binding and validation
 
-Request bodies are the DTOs themselves. Responses are wrapped in the shared
-`{code, msg, data}` envelope from `internal/httpx`:
+The typed helpers in `internal/httpx` bind the request before calling the
+handler:
 
-- `code` repeats the HTTP transport status (200, 201, 400, 404, 500) rather than
-  inventing a separate business code, so a client may read either;
-- `msg` is `success` for a success response and a short, client-safe message for
-  an error;
-- `data` is the payload, or `null` on every error.
+- `httpx.Get` and `httpx.Delete` bind the URL query and the path parameters.
+- `httpx.Post`, `httpx.Put` and `httpx.Patch` bind the JSON body and the path
+  parameters.
+- `httpx.NoInput` binds nothing.
+- A DTO field is bound from a `query:"name"` or `path:"name"` tag; a field
+  without one keeps its zero value.
+- `httpx.DecodeJSON` enforces the content type, the body limit, a single JSON
+  value and unknown-field rejection, so `CreateItemRequest` does not repeat
+  those checks.
+- A request type that implements `Validate() error` is validated automatically
+  after binding. `CreateItemRequest` builds a go-validate `Spec`, so the rules
+  live next to the fields they describe; a failure is a `400` envelope.
 
-The handler binds and validates with `httpx.DecodeJSON`, passing
-`Spec().Validate` as the code-first validator callback, so `internal/httpx`
-stays free of the go-validate dependency while this package keeps it.
-`GET /api/openapi.json` is the one exception: it is served raw with
-`httpx.RawJSON`, because a spec generator must receive the OpenAPI document
-itself. The document's response schemas describe the same envelope.
+## Responses and errors
 
-> **Development demo:** the default `Service` is `NewService()`, an in-memory
-> service. Items live in the process only and are lost on restart, and serving
-> the API needs no database. Installing the `db` capability does **not** switch
-> this service to PostgreSQL; wire persistence in yourself (see
-> `internal/data/README.md`).
+Every handler writes through the shared `{code,msg,data}` envelope:
 
-The handler is a plain `http.Handler` built with an injected `Service`, so it is
-tested with `net/http/httptest` and a fake service: no listener and no database.
+- a success response is `httpx.JSON` with `code` equal to the HTTP status and
+  `msg` equal to `httpx.SuccessMsg` (`"success"`);
+- an error is `httpx.Error`, or a handler returns an `*httpx.HTTPError` such as
+  `httpx.NotFound("item not found")` and the helper maps it to the status and
+  message;
+- any other error becomes a fixed `500 internal error` envelope, so an
+  unexpected error never leaks its message.
 
-## Wiring a persistent Service
+`code` always repeats the HTTP transport status; the API does not invent a
+separate business-code space. For a response that must stay unwrapped — a file
+download, a stream, SSE — register a raw handler with
+`router.HandleFunc("GET /export", ...)` and write it with `httpx.RawText`,
+`httpx.Bytes` or `httpx.RawJSON`.
 
-`Service` is a small interface, so a repository-backed implementation replaces
-the demo without touching the HTTP layer. The `serve` command builds the
-application from `internal/di`; edit `internal/di/api_provider.go` — a stable
-file weld writes once and never regenerates — to return your service and, to
-persist it, to take `data.Repository` in `NewAPIService`. Do not edit
-`internal/di/di.go`: it is regenerated, and an edit there is erased by the next
-`weld add`.
+## Replaceable example, not persistence
 
-See `internal/data/README.md` for the pool and repository, and
-`internal/di/README.md` for the Loom graph.
-
-## go-validate dependency
-
-This package uses the published `github.com/Xwudao/go-validate v0.2.0` for
-its `Spec`/`Constraint`/`Schema` API. No local replacement is needed. Run
-`go mod tidy` before `go test ./...` to resolve the test-only
-`github.com/getkin/kin-openapi` dependency that validates the OpenAPI document.
+`NewService` returns an in-memory development service: items are lost on
+restart and no database is required. Installing `db` does not switch it to
+PostgreSQL. To persist the API, change `NewService` (or the `NewAPIService`
+provider in `internal/di/api_provider.go`) to consume `data.Repository`; the
+Loom graph follows the signature.

@@ -1,0 +1,218 @@
+package httpx
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestJoinPathKeepsOneSlash(t *testing.T) {
+	cases := []struct {
+		prefix, path, want string
+	}{
+		{"", "", "/"},
+		{"", "/items", "/items"},
+		{"/api", "", "/api"},
+		{"/api", "/items", "/api/items"},
+		{"/api/", "/items", "/api/items"},
+		{"/api", "items", "/api/items"},
+		{"/api", "/", "/api/"},
+		{"api", "/items", "/api/items"},
+	}
+	for _, tc := range cases {
+		if got := joinPath(tc.prefix, tc.path); got != tc.want {
+			t.Errorf("joinPath(%q, %q) = %q, want %q", tc.prefix, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestSplitMethod(t *testing.T) {
+	if method, path, ok := splitMethod("GET /items"); !ok || method != "GET" || path != "/items" {
+		t.Fatalf("splitMethod(\"GET /items\") = %q, %q, %v", method, path, ok)
+	}
+	if _, path, ok := splitMethod("/items"); ok || path != "/items" {
+		t.Fatalf("splitMethod(\"/items\") = %q, %v, want the plain path", path, ok)
+	}
+}
+
+// TestGroupAppliesPrefixAndMiddleware proves a group prefixes every route it
+// registers and runs its middleware before the handler.
+func TestGroupAppliesPrefixAndMiddleware(t *testing.T) {
+	mux := http.NewServeMux()
+	rejected := false
+	guard := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("X-Test") != "ok" {
+				rejected = true
+				Error(w, http.StatusForbidden, "denied")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	router := NewRouter(mux).Group("/api", guard)
+	NoInput(router, http.MethodGet, "/ping", func(_ context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/ping", nil))
+	if recorder.Code != http.StatusForbidden || !rejected {
+		t.Fatalf("unguarded request = %d, want 403 from the group middleware", recorder.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
+	request.Header.Set("X-Test", "ok")
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("guarded request = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+}
+
+// TestNestedGroupKeepsParentMiddleware proves a sub-group inherits the parent's
+// prefix and middleware and adds its own around the route handler.
+func TestNestedGroupKeepsParentMiddleware(t *testing.T) {
+	mux := http.NewServeMux()
+	trail := []string{}
+	mark := func(name string) Middleware {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				trail = append(trail, name)
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+	outer := NewRouter(mux).Group("/api", mark("outer"))
+	inner := outer.Group("/admin", mark("inner"))
+	NoInput(inner, http.MethodGet, "/ping", func(_ context.Context) (string, error) { return "ok", nil })
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/ping", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body)
+	}
+	if len(trail) != 2 || trail[0] != "outer" || trail[1] != "inner" {
+		t.Fatalf("middleware order = %v, want [outer inner]", trail)
+	}
+}
+
+// TestHandleFuncRegistersRawRoute proves the raw escape hatch registers under
+// the group prefix and still runs the group middleware, so a file or stream
+// response composes with the same guard as a typed route.
+func TestHandleFuncRegistersRawRoute(t *testing.T) {
+	mux := http.NewServeMux()
+	trail := []string{}
+	mark := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			trail = append(trail, "mw")
+			next.ServeHTTP(w, r)
+		})
+	}
+	router := NewRouter(mux).Group("/api", mark)
+	router.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		RawText(w, http.StatusOK, "ok")
+	})
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "ok" {
+		t.Fatalf("raw route = %d %q, want 200 ok", recorder.Code, recorder.Body)
+	}
+	if len(trail) != 1 {
+		t.Fatalf("raw route did not run the group middleware: %v", trail)
+	}
+}
+
+// marker returns a middleware that records its name and continues.
+func marker(trail *[]string, name string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			*trail = append(*trail, name)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// TestPolicyRunsBaselineThenRouteInOrder proves a route runs the mount baseline
+// first and its own policies after, in the order declared, and that a route
+// which repeats a baseline policy does not run it twice.
+func TestPolicyRunsBaselineThenRouteInOrder(t *testing.T) {
+	mux := http.NewServeMux()
+	trail := []string{}
+	router := NewRouter(mux).
+		WithPolicy("base", marker(&trail, "base")).
+		WithPolicy("one", marker(&trail, "one")).
+		WithPolicy("two", marker(&trail, "two")).
+		Require("base")
+	NoInput(router, http.MethodGet, "/x", func(_ context.Context) (string, error) { return "ok", nil }, Policy("one", "two"))
+	NoInput(router, http.MethodGet, "/y", func(_ context.Context) (string, error) { return "ok", nil }, Policy("base"))
+
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	if got := strings.Join(trail, ","); got != "base,one,two" {
+		t.Fatalf("policy order = %q, want base,one,two", got)
+	}
+	trail = nil
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/y", nil))
+	if got := strings.Join(trail, ","); got != "base" {
+		t.Fatalf("repeated baseline = %q, want base once", got)
+	}
+}
+
+// TestRequireIsFailClosedAndOpenOptsOut proves the baseline guards a route that
+// declares no policy, and that Open is the explicit way to skip it.
+func TestRequireIsFailClosedAndOpenOptsOut(t *testing.T) {
+	mux := http.NewServeMux()
+	trail := []string{}
+	router := NewRouter(mux).
+		WithPolicy("base", marker(&trail, "base")).
+		Require("base")
+	NoInput(router, http.MethodGet, "/guarded", func(_ context.Context) (string, error) { return "ok", nil })
+	NoInput(router, http.MethodGet, "/open", func(_ context.Context) (string, error) { return "ok", nil }, Open())
+
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/guarded", nil))
+	if got := strings.Join(trail, ","); got != "base" {
+		t.Fatalf("a route without a policy did not run the baseline: %q", got)
+	}
+	trail = nil
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/open", nil))
+	if len(trail) != 0 {
+		t.Fatalf("Open did not skip the baseline: %v", trail)
+	}
+}
+
+// TestUndefinedPolicyPanics proves a route that references a policy the
+// composition never defined fails at registration rather than serving unguarded.
+func TestUndefinedPolicyPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("an undefined policy did not panic")
+		}
+	}()
+	router := NewRouter(http.NewServeMux())
+	NoInput(router, http.MethodGet, "/x", func(_ context.Context) (string, error) { return "ok", nil }, Policy("missing"))
+}
+
+// TestPoliciesPropagateThroughGroup proves a mount built from a policy-aware
+// base keeps both the definitions and the baseline in a derived group.
+func TestPoliciesPropagateThroughGroup(t *testing.T) {
+	mux := http.NewServeMux()
+	trail := []string{}
+	base := NewRouter(mux).
+		WithPolicy("base", marker(&trail, "base")).
+		WithPolicy("extra", marker(&trail, "extra")).
+		Require("base")
+	group := base.Group("/mount")
+	NoInput(group, http.MethodGet, "/x", func(_ context.Context) (string, error) { return "ok", nil }, Policy("extra"))
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/mount/x", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body)
+	}
+	if got := strings.Join(trail, ","); got != "base,extra" {
+		t.Fatalf("derived group policies = %q, want base,extra", got)
+	}
+}

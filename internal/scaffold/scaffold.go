@@ -199,30 +199,6 @@ func (p *planner) planNewFile(path, capability string, content []byte) error {
 	return nil
 }
 
-// planSharedFile plans a file several capabilities contribute identically, such
-// as the neutral openapi contract package both api and module depend on. The
-// first capability installed writes it; a later one, and a later one in the same
-// plan, leave it untouched rather than conflicting, so either install order
-// works. A file that already exists without weld owning it is still a conflict,
-// so a user file is never overwritten.
-func (p *planner) planSharedFile(path, capability string, content []byte) error {
-	if _, planned := p.planned[path]; planned {
-		return nil
-	}
-	if _, err := os.Stat(filepath.Join(p.req.Dir, path)); err == nil {
-		if p.manifest.Owns(path) {
-			return nil
-		}
-		return &project.ConflictError{Path: path, Reason: "unmanaged file already exists"}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	p.planned[path] = content
-	p.upsert(project.Operation{Path: path, Content: content})
-	p.manifest.SetFile(path, capability, content)
-	return nil
-}
-
 // installCapability plans one capability's files and patches, then records it.
 func (p *planner) installCapability(capability *template.Capability) error {
 	p.present[capability.Name] = true
@@ -236,12 +212,6 @@ func (p *planner) installCapability(capability *template.Capability) error {
 			return err
 		}
 		rendered := template.Render(content, vars)
-		if file.Shared {
-			if err := p.planSharedFile(file.Path, capability.Name, rendered); err != nil {
-				return err
-			}
-			continue
-		}
 		if err := p.planNewFile(file.Path, capability.Name, rendered); err != nil {
 			return err
 		}

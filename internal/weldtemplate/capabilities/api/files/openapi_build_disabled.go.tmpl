@@ -1,9 +1,0 @@
-//go:build !openapi
-
-package api
-
-// OpenAPIBuildEnabled records whether this build opted into documentation.
-// A normal build cannot serve /api/openapi.json, even if a caller passes true
-// to Register or a development configuration accidentally enables the switch.
-// Opt in explicitly with -tags openapi for a development build.
-const OpenAPIBuildEnabled = false

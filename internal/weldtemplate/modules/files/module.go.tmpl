@@ -1,10 +1,10 @@
 // Package __modname__ is a generated HTTP business module for __name__.
 //
 // weld generated this package once, when `weld add module __modname__` ran, and
-// recorded every file in weld.json. It is a small, replaceable example: a typed
-// request and response, a Service seam, a route table, and the OpenAPI contract
-// for those routes. Editing it is expected; weld never regenerates it, so your
-// changes survive later `weld add` commands.
+// recorded every file in weld.json. It is a small, replaceable example: typed
+// requests and responses, a Service seam, and the routes declared in one place.
+// Editing it is expected; weld never regenerates it, so your changes survive
+// later `weld add` commands.
 //
 // The default Service is an in-memory demo. It keeps no state across restarts
 // and is not persistence; replace the body of NewService in service.go with your
@@ -13,84 +13,77 @@
 // NewDemoService is the built-in demo constructor, used by this package's own
 // tests so they keep compiling after NewService changes.
 //
-// The handler writes responses through internal/httpx, the shared toolkit the
-// built-in API also uses: httpx.JSON wraps a value in the {code,msg,data}
-// envelope and httpx.Error writes an error envelope with data null. Use
-// httpx.RawText, httpx.Bytes or httpx.NoContent for a response that must stay
+// Every route goes through internal/httpx. A typed handler receives the bound
+// request and returns the response or an error, and httpx writes the shared
+// {code,msg,data} envelope: httpx.JSON for a success and httpx.Error, or a
+// returned *httpx.HTTPError, for a failure. A request type that implements
+// Validate runs its rules after binding. Use router.HandleFunc with
+// httpx.RawText, httpx.Bytes or httpx.RawJSON for a response that must stay
 // unwrapped.
 //
-// operations() is the single route table: Register installs each entry on the
-// composed mux and contract.go documents the same entry, so the route and its
-// OpenAPI contract cannot drift. The contract is registered with the shared
-// internal/openapi registry at package initialization, so `weld add api` includes
-// these routes in GET /api/openapi.json without this package being imported by
-// the api package. When you add or change an endpoint, add its operation here
-// and its contract in contract.go together.
+// The module declares only relative paths; the composition root owns the mount
+// prefix, so the same module can serve /api/v1/__modname__ and /api/v2/__modname__
+// without an edit here. Administrator routes carry httpx.Policy, a named policy
+// the composition root defines once; this package never implements a guard, so
+// authorization policy lives in one place.
 //
 // Wiring is entirely through the generated internal/di graph: the server graph
-// provides __modname__.NewService and registers this module on the composed mux
-// (di.newMux). A module added after Loom appears in the graph without weld
-// editing any file here.
+// provides __modname__.NewService, mounts this module under the versioned prefix
+// and defines its policies. A module added after Loom appears in the graph
+// without weld editing any file here.
 //
 // Keep the Service interface and the NewService and NewDemoService symbols
 // stable when you replace the demo.
 package __modname__
 
 import (
+	"context"
 	nethttp "net/http"
 
 	"__module__/internal/httpx"
-	"__module__/internal/openapi"
 )
 
-// RoutePrefix is the URL path this module serves. It owns one segment under the
-// reserved /api namespace.
-const RoutePrefix = "/api/__modname__"
+// Name is the module's package name and URL segment. The composition root mounts
+// the module under its own prefix (see internal/httpserver.APIPrefix), so this
+// package declares only relative paths.
+const Name = "__modname__"
 
-// operation is one HTTP operation this module serves. It is the single source
-// for the route Register installs and the contract the OpenAPI document states:
-// the same method and path drive both, so a route cannot exist undocumented and
-// a documented operation cannot exist unrouted.
-type operation struct {
-	method   string
-	path     string
-	handle   func(Service) nethttp.HandlerFunc
-	contract func() openapi.Operation
-}
+// adminPolicy is the named policy the module's administrator routes require. The
+// composition root defines what the policy does (see the generated server graph
+// and internal/httpserver); this package only references the name. Referencing
+// an undefined policy fails at startup rather than serving the route unguarded.
+const adminPolicy = "admin"
 
-// operations is the module's explicit route table. Register installs every entry
-// on the mux and contract.go documents it, so add an endpoint in one place and
-// its handler and contract follow together.
-func operations() []operation {
-	return []operation{
-		{
-			method:   nethttp.MethodGet,
-			path:     RoutePrefix,
-			handle:   handle,
-			contract: greetingContract,
-		},
-	}
-}
-
-// Register installs the module's routes on mux.
+// Register installs the module's routes on router.
+//
+// Each route is declared once: the method, the relative path, the request
+// binding, the handler and any policy are together, so there is no separate
+// route table to keep in sync.
 //
 // It takes the Service rather than constructing one, so the caller owns the
 // module's dependencies and a test can inject a fake. The Loom server graph
-// calls it with the Service it provides.
-func Register(mux *nethttp.ServeMux, service Service) {
-	for _, op := range operations() {
-		mux.HandleFunc(op.method+" "+op.path, op.handle(service))
-	}
-}
+// calls it with the Service it provides and a router mounted at the API prefix.
+func Register(router *httpx.Router, service Service) {
+	// GET {prefix}/ — public, no input.
+	httpx.NoInput(router, nethttp.MethodGet, "", func(ctx context.Context) (Response, error) {
+		return service.Greet(ctx, Request{})
+	})
 
-// handle adapts the Service to net/http.
-func handle(service Service) nethttp.HandlerFunc {
-	return func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		response, err := service.Greet(r.Context(), Request{Name: r.URL.Query().Get("name")})
-		if err != nil {
-			httpx.Error(w, nethttp.StatusInternalServerError, "greeting failed")
-			return
-		}
-		httpx.JSON(w, nethttp.StatusOK, response)
-	}
+	// GET {prefix}/greet?name=Ada — public, query binding.
+	httpx.Get(router, "/greet", func(ctx context.Context, request Request) (Response, error) {
+		return service.Greet(ctx, request)
+	})
+
+	// POST {prefix}/admin/items — administrator. The named policy rejects an
+	// unauthenticated caller before the handler runs; the JSON body is bound and
+	// validated, then the handler creates the item.
+	httpx.Post(router, "/admin/items", func(ctx context.Context, request CreateRequest) (Item, error) {
+		return service.Create(ctx, request)
+	}, httpx.Policy(adminPolicy), httpx.WithStatus(nethttp.StatusCreated))
+
+	// GET {prefix}/health — the raw escape hatch: a response that must not be
+	// wrapped in the JSON envelope.
+	router.HandleFunc("GET /health", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		httpx.RawText(w, nethttp.StatusOK, "ok")
+	})
 }

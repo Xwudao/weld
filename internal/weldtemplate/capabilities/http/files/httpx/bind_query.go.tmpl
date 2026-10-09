@@ -1,0 +1,163 @@
+package httpx
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"reflect"
+	"strconv"
+	"strings"
+)
+
+// BindQuery binds T from the request's path parameters and URL query.
+//
+// A field is bound only when it carries a `path:"name"` or `query:"name"` tag,
+// so binding is explicit and never guesses a name from a field. A field without
+// either tag keeps its zero value, which makes an empty request type a valid
+// "no parameters" contract.
+//
+// The supported field kinds are string, bool, the sized integer kinds, the
+// unsigned kinds, float64, a []string for a repeated query parameter, and a
+// pointer to any of those for an optional value. A value that cannot be parsed
+// is a 400 *DecodeError, so a malformed query is rejected exactly the way a
+// malformed JSON body is.
+func BindQuery[T any](request *http.Request) (T, error) {
+	var value T
+	if err := bindPath(&value, request); err != nil {
+		return value, err
+	}
+	if err := bindQuery(&value, request); err != nil {
+		return value, err
+	}
+	return value, nil
+}
+
+// bindPath binds the fields tagged path from the request's path values.
+func bindPath(dst any, request *http.Request) error {
+	return bindTagged(dst, "path", func(name string) ([]string, bool) {
+		value := request.PathValue(name)
+		if value == "" {
+			return nil, false
+		}
+		return []string{value}, true
+	})
+}
+
+// bindQuery binds the fields tagged query from the request's URL query.
+func bindQuery(dst any, request *http.Request) error {
+	values := request.URL.Query()
+	return bindTagged(dst, "query", func(name string) ([]string, bool) {
+		list, ok := values[name]
+		if !ok || len(list) == 0 {
+			return nil, false
+		}
+		return list, true
+	})
+}
+
+// bindTagged walks dst's exported fields and assigns every field whose tag is
+// set from lookup.
+func bindTagged(dst any, tag string, lookup func(name string) ([]string, bool)) error {
+	pointer := reflect.ValueOf(dst)
+	if pointer.Kind() != reflect.Pointer || pointer.IsNil() {
+		return errors.New("httpx: bind target must be a non-nil pointer to a struct")
+	}
+	value := pointer.Elem()
+	if value.Kind() != reflect.Struct {
+		return nil
+	}
+	typ := value.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name, ok := fieldTagName(field, tag)
+		if !ok {
+			continue
+		}
+		raw, present := lookup(name)
+		if !present {
+			continue
+		}
+		if err := assignField(value.Field(i), name, raw); err != nil {
+			return &DecodeError{Status: http.StatusBadRequest, Message: err.Error()}
+		}
+	}
+	return nil
+}
+
+// fieldTagName returns the binding name a field declares for tag.
+func fieldTagName(field reflect.StructField, tag string) (string, bool) {
+	raw, ok := field.Tag.Lookup(tag)
+	if !ok {
+		return "", false
+	}
+	name := strings.Split(raw, ",")[0]
+	if name == "" || name == "-" {
+		return "", false
+	}
+	return name, true
+}
+
+// assignField assigns raw to field. A pointer field stays nil when the value is
+// absent and points at the parsed value otherwise.
+func assignField(field reflect.Value, name string, raw []string) error {
+	if field.Kind() == reflect.Pointer {
+		if len(raw) == 0 || (raw[0] == "" && field.Type().Elem().Kind() != reflect.String) {
+			return nil
+		}
+		element := reflect.New(field.Type().Elem())
+		if err := setScalar(element.Elem(), name, raw[0]); err != nil {
+			return err
+		}
+		field.Set(element)
+		return nil
+	}
+	if field.Kind() == reflect.Slice && field.Type().Elem().Kind() == reflect.String {
+		field.Set(reflect.ValueOf(append([]string(nil), raw...)))
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	if raw[0] == "" && field.Kind() != reflect.String {
+		return nil
+	}
+	return setScalar(field, name, raw[0])
+}
+
+// setScalar parses one string into a supported scalar field.
+func setScalar(field reflect.Value, name, raw string) error {
+	switch field.Kind() {
+	case reflect.String:
+		field.SetString(raw)
+	case reflect.Bool:
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return fmt.Errorf("%s must be a boolean", name)
+		}
+		field.SetBool(parsed)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		parsed, err := strconv.ParseInt(raw, 10, field.Type().Bits())
+		if err != nil {
+			return fmt.Errorf("%s must be an integer", name)
+		}
+		field.SetInt(parsed)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		parsed, err := strconv.ParseUint(raw, 10, field.Type().Bits())
+		if err != nil {
+			return fmt.Errorf("%s must be a non-negative integer", name)
+		}
+		field.SetUint(parsed)
+	case reflect.Float32, reflect.Float64:
+		parsed, err := strconv.ParseFloat(raw, field.Type().Bits())
+		if err != nil {
+			return fmt.Errorf("%s must be a number", name)
+		}
+		field.SetFloat(parsed)
+	default:
+		return fmt.Errorf("%s has an unsupported type %s", name, field.Type())
+	}
+	return nil
+}

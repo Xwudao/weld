@@ -19,19 +19,14 @@ type ModuleFile struct {
 	// It lets a payload add a file only for a capability-aware project, such as
 	// the command-specific Loom graph a Loom project gains.
 	When []string `json:"when,omitempty"`
-	// Shared marks a file several capabilities contribute identically, such as
-	// the neutral openapi contract package both api and module depend on. The
-	// first capability installed writes it and a later one leaves it untouched,
-	// so either install order works.
-	Shared bool `json:"shared,omitempty"`
 }
 
 // ModuleTemplate is the payload `weld add module <name>` writes.
 //
 // Unlike a capability it declares no fixed file set: the same template is
-// rendered once per module name, so it carries the shared package files. Every
-// module is served through the generated Loom graph, which registers it on the
-// composed mux, so the template carries no separate route seam.
+// rendered once per module name, so the module payload is per-name. Every
+// module is mounted on the composed router by the generated Loom graph, so the
+// template carries no separate route seam.
 type ModuleTemplate struct {
 	Version string       `json:"version"`
 	Files   []ModuleFile `json:"files"`

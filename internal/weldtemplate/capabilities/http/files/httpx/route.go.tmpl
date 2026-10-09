@@ -1,0 +1,196 @@
+package httpx
+
+import (
+	"context"
+	"net/http"
+)
+
+// Handler is a typed endpoint: it receives the request context and the bound
+// request value and returns the response value or an error.
+//
+// Go has no generic methods, so registration is a package-level generic
+// function that takes the *Router as its first argument rather than a method on
+// Router. The request and response stay ordinary Go types; no zero value is
+// boxed into an any field to work around the language.
+type Handler[Req, Resp any] func(ctx context.Context, req Req) (Resp, error)
+
+// Validator is implemented by a request value that validates itself after it is
+// bound. The typed helpers call it automatically, so a DTO owns its rules and a
+// handler never repeats a manual check.
+//
+// A validation failure is a 400 whose msg is the error's message. The interface
+// deliberately names no validation library: a DTO may build a go-validate Spec,
+// check its fields by hand or delegate to anything else.
+type Validator interface {
+	Validate() error
+}
+
+// endpoint holds the resolved per-route options.
+type endpoint struct {
+	status    int
+	noContent bool
+	maxBytes  int64
+	// policy lists the named policies the route adds on top of the mount
+	// baseline, in order.
+	policy []string
+	// open opts the route out of the mount baseline, making it explicitly public.
+	open bool
+}
+
+// Option configures one typed endpoint registration.
+type Option func(*endpoint)
+
+// WithStatus sets the transport status of a successful response. It defaults to
+// 200.
+func WithStatus(status int) Option {
+	return func(e *endpoint) { e.status = status }
+}
+
+// WithNoContent marks a successful response as having no body: it writes the
+// status (204 unless WithStatus set another) and no envelope, for a 204 or 304.
+func WithNoContent() Option {
+	return func(e *endpoint) { e.noContent = true }
+}
+
+// WithMaxBytes bounds a JSON request body. A non-positive value keeps the
+// default, DefaultMaxBytes.
+func WithMaxBytes(maxBytes int64) Option {
+	return func(e *endpoint) {
+		if maxBytes > 0 {
+			e.maxBytes = maxBytes
+		}
+	}
+}
+
+// Policy adds one or more named policies to the route, on top of the mount's
+// baseline (see Router.Require). Policies run in the order given, outermost
+// first, after any baseline policies and inside the router's middleware.
+//
+// A name the composition never defined is a startup error: a route never serves
+// unguarded because of a typo. A module references a name only; the composition
+// root decides what it means.
+func Policy(names ...string) Option {
+	return func(e *endpoint) { e.policy = append(e.policy, names...) }
+}
+
+// Open opts the route out of the mount's baseline policies, so it is reachable
+// without them. It is the explicit public marker under a fail-closed mount: a
+// route that must skip the baseline says so, rather than depending on the
+// absence of a policy declaration.
+func Open() Option {
+	return func(e *endpoint) { e.open = true }
+}
+
+func resolveEndpoint(opts []Option) *endpoint {
+	resolved := &endpoint{status: http.StatusOK, maxBytes: DefaultMaxBytes}
+	for _, opt := range opts {
+		opt(resolved)
+	}
+	return resolved
+}
+
+// NoInput registers an endpoint whose request is bound from nothing. It is the
+// helper for a GET, DELETE or health route with no parameters, so the handler
+// needs no unused request argument.
+func NoInput[Resp any](r *Router, method, pattern string, handler func(ctx context.Context) (Resp, error), opts ...Option) {
+	register(r, method, pattern,
+		func(*http.Request, *endpoint) (struct{}, error) { return struct{}{}, nil },
+		func(ctx context.Context, _ struct{}) (Resp, error) { return handler(ctx) },
+		opts,
+	)
+}
+
+// Get registers a typed GET endpoint. Req is bound from the path parameters and
+// the URL query through the path and query struct tags; see BindQuery.
+func Get[Req, Resp any](r *Router, pattern string, handler Handler[Req, Resp], opts ...Option) {
+	register(r, http.MethodGet, pattern, bindQueryRequest[Req], handler, opts)
+}
+
+// Delete registers a typed DELETE endpoint, bound from the path parameters and
+// the URL query like Get.
+func Delete[Req, Resp any](r *Router, pattern string, handler Handler[Req, Resp], opts ...Option) {
+	register(r, http.MethodDelete, pattern, bindQueryRequest[Req], handler, opts)
+}
+
+// Post registers a typed POST endpoint. Req is bound from the JSON request body
+// and the path parameters.
+func Post[Req, Resp any](r *Router, pattern string, handler Handler[Req, Resp], opts ...Option) {
+	register(r, http.MethodPost, pattern, bindJSONRequest[Req], handler, opts)
+}
+
+// Put registers a typed PUT endpoint, bound like Post.
+func Put[Req, Resp any](r *Router, pattern string, handler Handler[Req, Resp], opts ...Option) {
+	register(r, http.MethodPut, pattern, bindJSONRequest[Req], handler, opts)
+}
+
+// Patch registers a typed PATCH endpoint, bound like Post.
+func Patch[Req, Resp any](r *Router, pattern string, handler Handler[Req, Resp], opts ...Option) {
+	register(r, http.MethodPatch, pattern, bindJSONRequest[Req], handler, opts)
+}
+
+// register adapts one typed endpoint to net/http and installs it on the mux.
+func register[Req, Resp any](
+	r *Router,
+	method, pattern string,
+	bind func(*http.Request, *endpoint) (Req, error),
+	handler Handler[Req, Resp],
+	opts []Option,
+) {
+	cfg := resolveEndpoint(opts)
+	policyNames := make([]string, 0, len(r.required)+len(cfg.policy))
+	if !cfg.open {
+		policyNames = append(policyNames, r.required...)
+	}
+	policyNames = append(policyNames, cfg.policy...)
+	policies := r.resolvePolicies(policyNames)
+	r.mux.Handle(method+" "+r.fullPattern(pattern), r.wrap(Chain(policies...)(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		req, err := bind(request, cfg)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		if validator, ok := any(req).(Validator); ok {
+			if err := validator.Validate(); err != nil {
+				Error(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		resp, err := handler(request.Context(), req)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		if cfg.noContent {
+			NoContent(w, cfg.noContentStatus())
+			return
+		}
+		JSON(w, cfg.status, resp)
+	}))))
+}
+
+// noContentStatus is the status a no-content response writes: the configured
+// status, or 204 when the caller left the 200 default in place.
+func (e *endpoint) noContentStatus() int {
+	if e.status == http.StatusOK {
+		return http.StatusNoContent
+	}
+	return e.status
+}
+
+// bindQueryRequest binds Req from the path parameters and the URL query.
+func bindQueryRequest[Req any](request *http.Request, _ *endpoint) (Req, error) {
+	return BindQuery[Req](request)
+}
+
+// bindJSONRequest binds Req from the JSON request body, then overlays the path
+// parameters so a field tagged `path:"id"` carries the URL identifier.
+func bindJSONRequest[Req any](request *http.Request, cfg *endpoint) (Req, error) {
+	req, err := DecodeJSON[Req](request, cfg.maxBytes, nil)
+	if err != nil {
+		return req, err
+	}
+	if err := bindPath(&req, request); err != nil {
+		return req, err
+	}
+	return req, nil
+}

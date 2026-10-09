@@ -1,29 +1,28 @@
 // Package api is the JSON HTTP contract of __name__.
 //
-// It owns the typed request and response DTOs, the go-validate Spec that
-// validates them, the explicit route table, and the OpenAPI 3.1 document
-// derived from the very same declarations. The HTTP surface is a plain
-// http.Handler, so it is exercised with net/http/httptest and an injected
-// Service; it opens no socket and needs no database.
+// It owns the typed request and response DTOs, the validation each request
+// performs before it reaches the Service, and the routes that expose them. The
+// HTTP surface is a plain http.Handler, so it is exercised with
+// net/http/httptest and an injected Service; it opens no socket and needs no
+// database.
 //
-// The DTOs carry JSON serialization tags only. Validation rules live in one
-// place, the Spec method, which feeds both runtime validation and the OpenAPI
-// constraints. Responses are wrapped in the shared {code,msg,data} envelope by
-// internal/httpx; request bodies are the DTOs themselves, unwrapped.
+// Routes are registered with internal/httpx. A typed handler receives the bound
+// request and returns the response or an error, and httpx writes the shared
+// {code,msg,data} envelope; a DTO that implements Validate runs its rules
+// automatically after binding, so the handler never repeats them.
 package api
 
 import (
+	"fmt"
+
 	"github.com/Xwudao/go-validate"
 )
 
 // ItemStatus is the closed set of item states.
 //
 // Go has no native enum, so the convention is a defined string type plus named
-// constants. The OpenAPI enum is exported from the very same Spec that
-// validates the field, so the allowed values are declared once. If this
-// boilerplate repeats across many resources, a future `weld add enum` step (or
-// go-enum code generation) could produce the alias, constants and values
-// function; this capability deliberately does not grow its own enum framework.
+// constants. The allowed values are declared once here and reused by the
+// request validation.
 type ItemStatus string
 
 const (
@@ -32,8 +31,7 @@ const (
 	ItemStatusArchived ItemStatus = "archived"
 )
 
-// itemStatuses lists every valid status. Append here and both runtime
-// validation and the OpenAPI enum follow.
+// itemStatuses lists every valid status. Append here and validation follows.
 var itemStatuses = []ItemStatus{ItemStatusDraft, ItemStatusActive, ItemStatusArchived}
 
 // itemStatusValues returns the status values as the plain strings go-validate
@@ -53,20 +51,17 @@ type CreateItemRequest struct {
 	Status   ItemStatus `json:"status"`
 }
 
-// Spec declares the request rules once. Validate enforces them and Schema
-// exports the same constraints to the OpenAPI document.
-func (r CreateItemRequest) Spec() validate.Spec {
+// Validate enforces the request rules with go-validate. internal/httpx calls it
+// after binding, so a failure becomes a 400 envelope without a manual check and
+// the rules live next to the fields they describe.
+func (r CreateItemRequest) Validate() error {
+	// go-validate's Spec constructors are typed to the built-in string kind, so
+	// the defined type is cast at the DTO boundary.
 	return validate.Spec{
 		validate.String("name", r.Name, validate.NonEmpty(), validate.MaxRunes(100)),
 		validate.Int("quantity", r.Quantity, validate.MinValue(1), validate.MaxValue(1000)),
-		// The enum is sourced from the named constants, so an invalid status is
-		// rejected and the same values are documented. go-validate's Spec
-		// constructors are typed to the built-in string kind, so the defined
-		// type is cast here, at the DTO boundary; a generic
-		// validate.StringField[T ~string] would remove the cast, which is a
-		// future go-validate improvement rather than something to fork here.
 		validate.String("status", string(r.Status), validate.Enum(itemStatusValues()...)),
-	}
+	}.Validate()
 }
 
 // ItemResponse is the representation returned for an item.
@@ -77,17 +72,6 @@ type ItemResponse struct {
 	Status   ItemStatus `json:"status"`
 }
 
-// Spec is the response field contract. It is the same metadata that describes
-// the success response body in the OpenAPI document.
-func (r ItemResponse) Spec() validate.Spec {
-	return validate.Spec{
-		validate.String("id", r.ID, validate.NonEmpty()),
-		validate.String("name", r.Name, validate.NonEmpty()),
-		validate.Int("quantity", r.Quantity, validate.MinValue(1)),
-		validate.String("status", string(r.Status), validate.Enum(itemStatusValues()...)),
-	}
-}
-
 // List limits for GET /api/items.
 const (
 	minLimit     = 1
@@ -95,16 +79,28 @@ const (
 	defaultLimit = 20
 )
 
-// listItemsQuery is the query contract for GET /api/items. It has no JSON body;
-// the tag keeps the field name identical to the query and Spec name.
-type listItemsQuery struct {
-	Limit *int `json:"limit"`
+// ListItemsQuery is the query contract for GET /api/items.
+//
+// The query tag is what internal/httpx binds: a field is bound only when it
+// declares a query tag, so the wire contract is explicit. Limit is a pointer, so
+// an absent parameter is distinguishable from an explicit zero.
+type ListItemsQuery struct {
+	Limit *int `query:"limit"`
 }
 
-// Spec validates the optional limit with the same metadata that documents the
-// limit query parameter. A nil limit means the parameter was absent.
-func (q listItemsQuery) Spec() validate.Spec {
-	return validate.Spec{
-		validate.OptionalInt("limit", q.Limit, validate.MinValue(minLimit), validate.MaxValue(maxLimit)),
+// Validate checks the optional limit. A nil limit means the parameter was
+// absent, so it is valid and the handler applies the default.
+func (q ListItemsQuery) Validate() error {
+	if q.Limit == nil {
+		return nil
 	}
+	if *q.Limit < minLimit || *q.Limit > maxLimit {
+		return fmt.Errorf("limit must be between %d and %d", minLimit, maxLimit)
+	}
+	return nil
+}
+
+// GetItemRequest is the path contract for GET /api/items/{id}.
+type GetItemRequest struct {
+	ID string `path:"id"`
 }

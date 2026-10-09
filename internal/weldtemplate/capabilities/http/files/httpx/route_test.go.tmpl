@@ -1,0 +1,263 @@
+package httpx
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// testEnvelope is the decoded {code,msg,data} response body.
+type testEnvelope struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data json.RawMessage `json:"data"`
+}
+
+func decodeTestEnvelope(t *testing.T, recorder *httptest.ResponseRecorder) testEnvelope {
+	t.Helper()
+	var body testEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v (%s)", err, recorder.Body)
+	}
+	return body
+}
+
+func serveTest(t *testing.T, handler http.Handler, request *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+// TestNoInputWritesEnvelope proves a no-parameter endpoint writes the default
+// success envelope.
+func TestNoInputWritesEnvelope(t *testing.T) {
+	mux := http.NewServeMux()
+	NoInput(NewRouter(mux), http.MethodGet, "/health", func(_ context.Context) (string, error) {
+		return "ok", nil
+	})
+	recorder := serveTest(t, mux, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	body := decodeTestEnvelope(t, recorder)
+	if body.Code != http.StatusOK || body.Msg != SuccessMsg || string(body.Data) != `"ok"` {
+		t.Fatalf("envelope = %+v, want the success envelope around %q", body, "ok")
+	}
+}
+
+// queryInput exercises every supported query kind: a string, an integer, a
+// bool, a float, a repeated string and an optional pointer.
+type queryInput struct {
+	Name   string   `query:"name"`
+	Limit  int      `query:"limit"`
+	Active bool     `query:"active"`
+	Score  float64  `query:"score"`
+	Tags   []string `query:"tag"`
+	Page   *int     `query:"page"`
+}
+
+// TestGetBindsQuery proves Get binds the query tags, keeps an absent pointer nil
+// and collects a repeated parameter.
+func TestGetBindsQuery(t *testing.T) {
+	mux := http.NewServeMux()
+	Get(NewRouter(mux), "/search", func(_ context.Context, in queryInput) (queryInput, error) {
+		return in, nil
+	})
+
+	recorder := serveTest(t, mux, httptest.NewRequest(http.MethodGet, "/search?name=Ada&limit=5&active=true&score=1.5&tag=a&tag=b&page=2", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	var got queryInput
+	if err := json.Unmarshal(decodeTestEnvelope(t, recorder).Data, &got); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if got.Name != "Ada" || got.Limit != 5 || !got.Active || got.Score != 1.5 {
+		t.Fatalf("bound = %+v", got)
+	}
+	if len(got.Tags) != 2 || got.Tags[0] != "a" || got.Tags[1] != "b" {
+		t.Fatalf("tags = %v, want [a b]", got.Tags)
+	}
+	if got.Page == nil || *got.Page != 2 {
+		t.Fatalf("page = %v, want 2", got.Page)
+	}
+
+	recorder = serveTest(t, mux, httptest.NewRequest(http.MethodGet, "/search?name=Bob", nil))
+	if err := json.Unmarshal(decodeTestEnvelope(t, recorder).Data, &got); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if got.Page != nil {
+		t.Fatalf("an absent optional page = %v, want nil", got.Page)
+	}
+}
+
+// TestGetRejectsMalformedQuery proves a query value that cannot be parsed is a
+// 400 envelope, the same shape a malformed JSON body produces.
+func TestGetRejectsMalformedQuery(t *testing.T) {
+	mux := http.NewServeMux()
+	Get(NewRouter(mux), "/search", func(_ context.Context, in queryInput) (queryInput, error) {
+		return in, nil
+	})
+	recorder := serveTest(t, mux, httptest.NewRequest(http.MethodGet, "/search?limit=abc", nil))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body)
+	}
+	body := decodeTestEnvelope(t, recorder)
+	if body.Code != http.StatusBadRequest || !strings.Contains(body.Msg, "limit") {
+		t.Fatalf("envelope = %+v, want a 400 naming limit", body)
+	}
+}
+
+// createInput is a JSON request that validates itself, so the endpoint helper
+// runs its rules after binding without the handler repeating them.
+type createInput struct {
+	Name string `json:"name"`
+}
+
+func (c createInput) Validate() error {
+	if strings.TrimSpace(c.Name) == "" {
+		return errors.New("name is required")
+	}
+	return nil
+}
+
+// TestPostBindsAndValidatesJSON proves Post decodes the body, runs Validate and
+// writes the status configured with WithStatus.
+func TestPostBindsAndValidatesJSON(t *testing.T) {
+	mux := http.NewServeMux()
+	Post(NewRouter(mux), "/items", func(_ context.Context, in createInput) (createInput, error) {
+		return in, nil
+	}, WithStatus(http.StatusCreated))
+
+	request := httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(`{"name":"widget"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := serveTest(t, mux, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", recorder.Code, recorder.Body)
+	}
+	body := decodeTestEnvelope(t, recorder)
+	if body.Code != http.StatusCreated {
+		t.Fatalf("code = %d, want the configured 201", body.Code)
+	}
+}
+
+// TestPostRejectsInvalidInput proves a Validate failure is a 400 envelope whose
+// msg is the validation message.
+func TestPostRejectsInvalidInput(t *testing.T) {
+	mux := http.NewServeMux()
+	Post(NewRouter(mux), "/items", func(_ context.Context, in createInput) (createInput, error) {
+		return in, nil
+	})
+	request := httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(`{"name":"  "}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := serveTest(t, mux, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body)
+	}
+	body := decodeTestEnvelope(t, recorder)
+	if body.Msg != "name is required" || string(body.Data) != "null" {
+		t.Fatalf("envelope = %+v, want the validation message and null data", body)
+	}
+}
+
+// TestPostRejectsWrongContentType proves the shared binder's transport checks
+// reach a typed endpoint unchanged.
+func TestPostRejectsWrongContentType(t *testing.T) {
+	mux := http.NewServeMux()
+	Post(NewRouter(mux), "/items", func(_ context.Context, in createInput) (createInput, error) {
+		return in, nil
+	})
+	request := httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(`{"name":"widget"}`))
+	request.Header.Set("Content-Type", "text/plain")
+	recorder := serveTest(t, mux, request)
+	if recorder.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415", recorder.Code)
+	}
+}
+
+// TestHandlerErrorMapsToEnvelope proves an HTTPError returned by the handler
+// controls the status and message, and an unexpected error stays a generic 500.
+func TestHandlerErrorMapsToEnvelope(t *testing.T) {
+	mux := http.NewServeMux()
+	router := NewRouter(mux)
+	NoInput(router, http.MethodGet, "/missing", func(_ context.Context) (string, error) {
+		return "", NotFound("no such thing")
+	})
+	NoInput(router, http.MethodGet, "/broken", func(_ context.Context) (string, error) {
+		return "", errors.New("storage exploded")
+	})
+
+	recorder := serveTest(t, mux, httptest.NewRequest(http.MethodGet, "/missing", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("mapped status = %d, want 404", recorder.Code)
+	}
+	if body := decodeTestEnvelope(t, recorder); body.Msg != "no such thing" || body.Code != http.StatusNotFound {
+		t.Fatalf("mapped envelope = %+v", body)
+	}
+
+	recorder = serveTest(t, mux, httptest.NewRequest(http.MethodGet, "/broken", nil))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("unexpected-error status = %d, want 500", recorder.Code)
+	}
+	body := decodeTestEnvelope(t, recorder)
+	if body.Msg != ErrorMsg || strings.Contains(recorder.Body.String(), "storage exploded") {
+		t.Fatalf("internal error leaked: %+v", body)
+	}
+}
+
+// pathInput reads a path parameter through the path tag, so the typed handler
+// never touches the raw request for the URL identifier.
+type pathInput struct {
+	ID string `path:"id"`
+}
+
+// TestPathParameterBinding proves Get binds a path tag from the matched route.
+func TestPathParameterBinding(t *testing.T) {
+	mux := http.NewServeMux()
+	Get(NewRouter(mux), "/items/{id}", func(_ context.Context, in pathInput) (pathInput, error) {
+		return in, nil
+	})
+	recorder := serveTest(t, mux, httptest.NewRequest(http.MethodGet, "/items/item-7", nil))
+	var got pathInput
+	if err := json.Unmarshal(decodeTestEnvelope(t, recorder).Data, &got); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if got.ID != "item-7" {
+		t.Fatalf("id = %q, want item-7", got.ID)
+	}
+}
+
+// TestWithNoContentWritesNoBody proves a no-content endpoint writes the status
+// and no envelope.
+func TestWithNoContentWritesNoBody(t *testing.T) {
+	mux := http.NewServeMux()
+	Delete(NewRouter(mux), "/items/{id}", func(_ context.Context, _ pathInput) (struct{}, error) {
+		return struct{}{}, nil
+	}, WithNoContent())
+	recorder := serveTest(t, mux, httptest.NewRequest(http.MethodDelete, "/items/item-1", nil))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", recorder.Code, recorder.Body)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("204 body = %q, want empty", recorder.Body)
+	}
+}
+
+// TestMaxBytesOptionBoundsBody proves WithMaxBytes overrides the shared default.
+func TestMaxBytesOptionBoundsBody(t *testing.T) {
+	mux := http.NewServeMux()
+	Post(NewRouter(mux), "/items", func(_ context.Context, in createInput) (createInput, error) {
+		return in, nil
+	}, WithMaxBytes(8))
+	request := httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(`{"name":"a very long name"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := serveTest(t, mux, request)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", recorder.Code)
+	}
+}

@@ -17,7 +17,7 @@ go install github.com/Xwudao/weld/cmd/weld@v0.1.1
 weld new demo          # minimal Go CLI: Cobra command tree, version + help
 cd demo
 weld add web           # installs http, then the React + TS + Vite frontend
-weld add api           # JSON API + OpenAPI 3.1 (installs http too; no web needed)
+weld add api           # JSON API: typed handlers, DTO validation, {code,msg,data}
 weld add db            # PostgreSQL: SQL migrations + sqlc, pool and repository
 make build             # builds the frontend, embeds it, builds the app
 make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
@@ -53,20 +53,22 @@ Capabilities:
   the working directory, environment and flag overrides, and a redacting
   `Secret` type. Installed automatically with `loom`, which every added
   capability requires.
-- `http` (add) — HTTP server lifecycle, a shared JSON/middleware toolkit, a
+- `http` (add) — HTTP server lifecycle, the shared `internal/httpx` toolkit, a
   composable handler builder, and the single `serve` command. Requires `loom`.
-  The toolkit in `internal/httpx` owns the `{code,msg,data}` response envelope,
-  typed JSON
-  binding and the composable middleware chain; the stack is declared in the
-  stable, project-owned `internal/httpserver/middleware.go`. Its `Serve` takes
-  the injected `*slog.Logger`, and `serve` reads the listen address through the
-  shared `config` loader. No authentication, CORS or rate limiting is enabled by
+  The toolkit owns the `{code,msg,data}` response envelope, the `Router` with
+  grouping and named route policies, typed endpoint helpers, query/path and JSON
+  binding, and the composable middleware chain; the global stack is declared in
+  the stable, project-owned `internal/httpserver/middleware.go` and the route
+  policies in `internal/httpserver/policy.go`. Its `Serve` takes the injected
+  `*slog.Logger`, and `serve` reads the listen address through the shared
+  `config` loader. No authentication, CORS or rate limiting is enabled by
   default.
 - `web` (add) — React + TypeScript + Vite frontend, served by `http`.
-- `api` (add) — JSON HTTP API: typed DTOs, `go-validate` rules and an OpenAPI
-  3.1 document built from the same contract, served by `http`. Responses are
-  wrapped in the shared `{code,msg,data}` envelope and the document describes
-  the same envelope; `GET /api/openapi.json` stays a raw OpenAPI document.
+- `api` (add) — JSON HTTP API: typed, self-validating DTOs and routes declared
+  once with the `internal/httpx` typed helpers, served by `http`. Responses are
+  wrapped in the shared `{code,msg,data}` envelope; the mount prefix comes from
+  the server graph, so the surface can be versioned without changing the API
+  package.
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository. Requires `loom` but not
   `http`: it adds a pruned binding and no server.
@@ -253,15 +255,17 @@ for a given manifest and catalog and contains no timestamps.
 
 ## `weld add api` (stage 2)
 
-`weld add api` is implemented as a stage-2 capability: HTTP contract,
-`go-validate` rule metadata, and an OpenAPI 3.1 document built from the same
-DTO `Spec`s. It requires `http`, owns the `/api/` namespace, and does not
-require `web`. Its routes are registered by the Loom server graph's `newMux`;
-no separate route file is written.
+`weld add api` is a stage-2 capability: an HTTP contract of typed, self-validating
+DTOs and routes declared once with the `internal/httpx` typed helpers. It
+requires `http` and does not require `web`. Its routes are registered by the
+Loom server graph's `newMux`, which mounts them under `httpserver.APIPrefix`; no
+separate route file is written, and a version change is a one-line edit to that
+stable constant.
 
 The generated `go.mod` pins the published `github.com/Xwudao/go-validate
-v0.2.0`, which provides the `Spec`/`Constraint` API. A generated API project
-builds without a sibling checkout or a local module replacement.
+v0.2.0`, which provides the `Spec`/`Constraint` API the DTO `Validate` methods
+use. A generated API project builds without a sibling checkout or a local module
+replacement.
 
 ## `weld add db` (stage 3)
 
@@ -380,8 +384,8 @@ small, replaceable example, not persistence: the generated service holds state
 only in memory.
 
 - **Name validation.** `<name>` must be a canonical lower-case Go package name
-  and URL segment. A Go keyword and the reserved built-in API paths `api`,
-  `items` and `openapi` are rejected, as is a module already installed.
+  and URL segment. A Go keyword and the reserved built-in API paths `api` and
+  `items` are rejected, as is a module already installed.
 - **Dependency install.** It installs `http` (and the `loom` and `config` it
   requires) automatically when absent, so it works on a fresh CLI project.
 - **Ownership.** Every module file is recorded in `weld.json` under
@@ -565,8 +569,9 @@ Test conventions:
   and the generated `go test ./...`, so the composed files are compiled rather
   than only string-matched.
 - The generated API tests use `net/http/httptest` with an injected fake
-  `Service`, so the handler is exercised with no socket and no database, and the
-  OpenAPI 3.1 document is validated with a standards parser (`kin-openapi`).
+  `Service`, so the handler is exercised with no socket and no database; the
+  module tests additionally exercise the no-input route, query binding,
+  validation failure, the administrator policy rejection and a raw response.
 - The generated `db` unit tests run with no PostgreSQL: they cover the
   row-to-domain conversion and dsn validation, and the gated integration test
   skips when `PG_TEST_DSN` is unset. `PG_TEST_DSN` must name a dedicated,

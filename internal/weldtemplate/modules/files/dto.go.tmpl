@@ -1,15 +1,41 @@
 package __modname__
 
-// Request is the input to the module's Service. Its fields are populated from
-// the request (here the ?name= query parameter). Add validation in the handler
-// or the service when a real endpoint needs it.
+import (
+	"errors"
+	"strings"
+)
+
+// Request is the query input to the greeting. internal/httpx binds a field only
+// when it declares a query tag, so an absent ?name= leaves Name empty and the
+// greeting falls back to "world".
 type Request struct {
-	Name string
+	Name string `query:"name"`
 }
 
-// Response is the module's typed output. The handler wraps it in the shared
+// Response is the greeting output. The handler wraps it in the shared
 // {code,msg,data} envelope from internal/httpx before it is written.
 type Response struct {
 	Module  string `json:"module"`
 	Message string `json:"message"`
+}
+
+// CreateRequest is the JSON body of the administrator create route.
+type CreateRequest struct {
+	Name string `json:"name"`
+}
+
+// Validate runs automatically after binding, because internal/httpx calls it on
+// any request value that implements it; a failure is a 400 envelope and the
+// handler never runs.
+func (r CreateRequest) Validate() error {
+	if strings.TrimSpace(r.Name) == "" {
+		return errors.New("name must not be empty")
+	}
+	return nil
+}
+
+// Item is the record the create route returns.
+type Item struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }

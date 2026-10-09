@@ -29,8 +29,9 @@ func TestValidateModuleName(t *testing.T) {
 		}
 	}
 	// Not a canonical Go package / URL segment, a Go keyword, or a reserved
-	// built-in API path.
-	for _, name := range []string{"", "Widget", "widget-1", "1widget", "_widget", "widget_1", "range", "func", "items", "openapi", "api"} {
+	// built-in API path. 'openapi' is not reserved: the document endpoint it once
+	// guarded was removed.
+	for _, name := range []string{"", "Widget", "widget-1", "1widget", "_widget", "widget_1", "range", "func", "items", "api"} {
 		if err := ValidateModuleName(name); err == nil {
 			t.Errorf("ValidateModuleName(%q) = nil, want an error", name)
 		}
@@ -64,7 +65,7 @@ func TestAddModuleInstallsHTTPAndConfig(t *testing.T) {
 		t.Error("the module wrote the retired non-Loom route seam")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{"loom.Provide(widget.NewService)", "widget.Register(mux, widgetService)"} {
+	for _, want := range []string{"loom.Provide(widget.NewService)", `widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`} {
 		if !strings.Contains(di, want) {
 			t.Errorf("di.go is missing %q:\n%s", want, di)
 		}
@@ -209,7 +210,7 @@ func TestAddModuleFilesSurviveLaterAdd(t *testing.T) {
 		t.Fatalf("a later add rewrote the user's module file:\n%s", got)
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{"widget.Register(mux, widgetService)", "web.Handler()"} {
+	for _, want := range []string{`widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`, "web.Handler()"} {
 		if !strings.Contains(di, want) {
 			t.Errorf("the regenerated graph lost %q after a later add:\n%s", want, di)
 		}
@@ -235,7 +236,7 @@ func TestAddModuleComposesWithDB(t *testing.T) {
 		t.Fatal("installing db rewrote a module file")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	if !strings.Contains(di, "widget.Register(mux, widgetService)") {
+	if !strings.Contains(di, `widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`) {
 		t.Errorf("installing db dropped the module registration:\n%s", di)
 	}
 	if !strings.Contains(di, "loom.Provide(NewPool)") {
@@ -264,7 +265,7 @@ func TestAddModuleWithLoomRendersGraphAndPreservesDBPruning(t *testing.T) {
 		t.Error("a Loom project also wrote the non-Loom route seam")
 	}
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{"loom.Provide(widget.NewService)", "widget.Register(mux, widgetService)", "loom.Provide(NewPool)"} {
+	for _, want := range []string{"loom.Provide(widget.NewService)", `widget.Register(base.Group(httpserver.APIPrefix+"/widget"), widgetService)`, "loom.Provide(NewPool)"} {
 		if !strings.Contains(di, want) {
 			t.Errorf("di.go is missing %q:\n%s", want, di)
 		}

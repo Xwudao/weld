@@ -4,14 +4,15 @@ import (
 	"encoding/json"
 	nethttp "net/http"
 	"net/http/httptest"
-	"reflect"
-	"sort"
 	"strings"
 	"testing"
 
 	"__module__/internal/httpx"
-	"__module__/internal/openapi"
 )
+
+// testPrefix is the prefix the tests mount the module under. The module itself
+// declares only relative paths, so the test owns the prefix.
+const testPrefix = "/api/" + Name
 
 // envelope is the decoded {code,msg,data} response body.
 type envelope struct {
@@ -20,24 +21,61 @@ type envelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// TestRegisterServesGreeting exercises the module handler in process with
-// net/http/httptest: no socket and no database. It builds the service through
-// NewDemoService, the always zero-argument demo constructor, so it keeps
-// compiling after NewService gains a dependency for the Loom graph. It also
-// pins the shared response envelope.
-func TestRegisterServesGreeting(t *testing.T) {
+// newTestMux mounts the module and defines its admin policy with a test guard,
+// so the routes are exercised in process with no socket and no database.
+func newTestMux() *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
-	Register(mux, NewDemoService())
+	router := httpx.NewRouter(mux).
+		WithPolicy(adminPolicy, testAdminGuard).
+		Group(testPrefix)
+	Register(router, NewDemoService())
+	return mux
+}
 
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, RoutePrefix+"?name=Ada", nil))
-	if recorder.Code != nethttp.StatusOK {
-		t.Fatalf("GET %s = %d: %s", RoutePrefix, recorder.Code, recorder.Body)
+// testAdminGuard mirrors the shipped placeholder policy: a non-empty bearer
+// token is accepted and anything else is rejected before the handler runs.
+func testAdminGuard(next nethttp.Handler) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		authorization := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authorization, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")) == "" {
+			httpx.Error(w, nethttp.StatusUnauthorized, "authentication required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func serve(t *testing.T, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var request *nethttp.Request
+	if body == "" {
+		request = httptest.NewRequest(method, target, nil)
+	} else {
+		request = httptest.NewRequest(method, target, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
 	}
+	recorder := httptest.NewRecorder()
+	newTestMux().ServeHTTP(recorder, request)
+	return recorder
+}
+
+func decode(t *testing.T, recorder *httptest.ResponseRecorder) envelope {
+	t.Helper()
 	var body envelope
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode envelope: %v", err)
+		t.Fatalf("decode envelope: %v (%s)", err, recorder.Body)
 	}
+	return body
+}
+
+// TestPublicGetGreetsWorldByDefault proves the no-input route answers without a
+// query parameter and writes the shared success envelope.
+func TestPublicGetGreetsWorldByDefault(t *testing.T) {
+	recorder := serve(t, nethttp.MethodGet, testPrefix, "")
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d: %s", testPrefix, recorder.Code, recorder.Body)
+	}
+	body := decode(t, recorder)
 	if body.Code != nethttp.StatusOK || body.Msg != httpx.SuccessMsg {
 		t.Fatalf("envelope = %+v", body)
 	}
@@ -45,85 +83,90 @@ func TestRegisterServesGreeting(t *testing.T) {
 	if err := json.Unmarshal(body.Data, &response); err != nil {
 		t.Fatalf("decode data: %v", err)
 	}
-	if response.Module != "__modname__" || response.Message != "Hello, Ada!" {
-		t.Fatalf("response = %+v, want the module greeting", response)
+	if response.Module != "__modname__" || response.Message != "Hello, world!" {
+		t.Fatalf("response = %+v, want the default greeting", response)
 	}
 }
 
-// TestRegisterGreetsWorldByDefault checks the endpoint works without the
-// optional query parameter, so an unconfigured deployment still answers.
-func TestRegisterGreetsWorldByDefault(t *testing.T) {
-	mux := nethttp.NewServeMux()
-	Register(mux, NewDemoService())
-
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, RoutePrefix, nil))
+// TestPublicGetBindsQuery proves the query-oriented route binds ?name= into the
+// typed request before the handler runs.
+func TestPublicGetBindsQuery(t *testing.T) {
+	recorder := serve(t, nethttp.MethodGet, testPrefix+"/greet?name=Ada", "")
 	if recorder.Code != nethttp.StatusOK {
-		t.Fatalf("GET %s = %d", RoutePrefix, recorder.Code)
+		t.Fatalf("GET greet = %d: %s", recorder.Code, recorder.Body)
+	}
+	var response Response
+	if err := json.Unmarshal(decode(t, recorder).Data, &response); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if response.Message != "Hello, Ada!" {
+		t.Fatalf("message = %q, want it to greet Ada", response.Message)
 	}
 }
 
-// TestContractMatchesRoute proves the route table and the OpenAPI contract
-// agree: every operation Register installs on the mux is registered with the
-// shared internal/openapi contract under the same method and path, so the
-// document cannot claim an endpoint the module does not serve.
-func TestContractMatchesRoute(t *testing.T) {
-	registered := map[string]openapi.Operation{}
-	for _, operation := range openapi.Operations() {
-		registered[operation.Method+" "+operation.Path] = operation
+// TestAdminPolicyRejectsUnauthenticated proves the named policy refuses the
+// request with 401 before the handler or the body binder runs.
+func TestAdminPolicyRejectsUnauthenticated(t *testing.T) {
+	recorder := serve(t, nethttp.MethodPost, testPrefix+"/admin/items", `{"name":"widget"}`)
+	if recorder.Code != nethttp.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %s", recorder.Code, recorder.Body)
 	}
-	for _, op := range operations() {
-		contract, ok := registered[op.method+" "+op.path]
-		if !ok {
-			t.Errorf("%s %s is served but not registered in the shared openapi contract", op.method, op.path)
-			continue
-		}
-		if contract.OperationID == "" || contract.SuccessStatus == 0 || contract.Success == nil {
-			t.Errorf("%s %s contract is incomplete: %+v", op.method, op.path, contract)
-		}
+	body := decode(t, recorder)
+	if body.Code != nethttp.StatusUnauthorized || body.Msg == "" {
+		t.Fatalf("envelope = %+v, want the policy's message", body)
 	}
 }
 
-// TestContractDocumentsTheResponseDTO guards against drift between the module's
-// Response DTO and the documented success schema: the schema must name exactly
-// the DTO's JSON fields, so changing one without the other turns this red.
-func TestContractDocumentsTheResponseDTO(t *testing.T) {
-	contract := greetingContract()
-	if contract.Success == nil {
-		t.Fatal("the greeting contract documents no success response")
+// TestAdminValidatesBody proves the request's Validate runs after binding: an
+// empty name is a 400 envelope.
+func TestAdminValidatesBody(t *testing.T) {
+	request := httptest.NewRequest(nethttp.MethodPost, testPrefix+"/admin/items", strings.NewReader(`{"name":"  "}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder := httptest.NewRecorder()
+	newTestMux().ServeHTTP(recorder, request)
+	if recorder.Code != nethttp.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body)
 	}
-	schema, err := contract.Success()
-	if err != nil {
-		t.Fatalf("success schema: %v", err)
-	}
-	got := schemaFieldNames(schema)
-	want := jsonFieldNames(Response{})
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("documented success fields = %v, Response JSON fields = %v", got, want)
+	if body := decode(t, recorder); body.Msg != "name must not be empty" {
+		t.Fatalf("envelope = %+v, want the validation message", body)
 	}
 }
 
-// jsonFieldNames returns the JSON names of a struct's fields, sorted.
-func jsonFieldNames(value any) []string {
-	typ := reflect.TypeOf(value)
-	names := make([]string, 0, typ.NumField())
-	for i := 0; i < typ.NumField(); i++ {
-		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
-		if name == "" || name == "-" {
-			continue
-		}
-		names = append(names, name)
+// TestAdminCreatesItem proves a valid authenticated request binds the JSON body,
+// passes validation and writes the 201 the route configured.
+func TestAdminCreatesItem(t *testing.T) {
+	request := httptest.NewRequest(nethttp.MethodPost, testPrefix+"/admin/items", strings.NewReader(`{"name":"widget"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder := httptest.NewRecorder()
+	newTestMux().ServeHTTP(recorder, request)
+	if recorder.Code != nethttp.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", recorder.Code, recorder.Body)
 	}
-	sort.Strings(names)
-	return names
+	body := decode(t, recorder)
+	if body.Code != nethttp.StatusCreated {
+		t.Fatalf("code = %d, want 201", body.Code)
+	}
+	var item Item
+	if err := json.Unmarshal(body.Data, &item); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if item.ID == "" || item.Name != "widget" {
+		t.Fatalf("item = %+v", item)
+	}
 }
 
-// schemaFieldNames returns an object schema's property names, sorted.
-func schemaFieldNames(schema *openapi.Schema) []string {
-	names := make([]string, 0, len(schema.Properties))
-	for name := range schema.Properties {
-		names = append(names, name)
+// TestHealthStaysRaw proves the raw escape hatch writes an unwrapped response.
+func TestHealthStaysRaw(t *testing.T) {
+	recorder := serve(t, nethttp.MethodGet, testPrefix+"/health", "")
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
-	sort.Strings(names)
-	return names
+	if recorder.Body.String() != "ok" {
+		t.Fatalf("body = %q, want the raw text", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "code") {
+		t.Fatalf("the raw response was wrapped: %s", recorder.Body)
+	}
 }
