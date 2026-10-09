@@ -32,6 +32,7 @@ type Schema struct {
 	Properties           map[string]*Schema `json:"properties,omitempty"`
 	AdditionalProperties any                `json:"additionalProperties,omitempty"`
 	Nullable             bool               `json:"nullable,omitempty"`
+	OneOf                []*Schema          `json:"oneOf,omitempty"`
 	Items                *Schema            `json:"items,omitempty"`
 	Required             []string           `json:"required,omitempty"`
 	MinLength            *int               `json:"minLength,omitempty"`
@@ -61,6 +62,17 @@ type Operation struct {
 	SuccessStatus       int
 	Success             func() (*Schema, error)
 	Errors              []Error
+	// RawResponses describe non-standard envelopes (such as the migrated
+	// HTTP-200 legacy business codes) without a second transport wrapper.
+	RawResponses map[int]Response
+	// BearerAuth declares the real JWT administrator guard on this operation.
+	BearerAuth bool
+}
+
+// Response is an explicitly shaped HTTP response for an existing module.
+type Response struct {
+	Description string
+	Schema      *Schema
 }
 
 // QueryParameter is one documented query parameter.

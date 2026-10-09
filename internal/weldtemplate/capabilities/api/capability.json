@@ -6,6 +6,7 @@
   "requires": ["http"],
   "files": [
     { "path": "internal/openapi/openapi.go", "source": "files/openapi_contract.go.tmpl", "shared": true },
+    { "path": "internal/openapi/legacy.go", "source": "files/openapi_legacy.go.tmpl", "shared": true },
     { "path": "internal/api/dto.go", "source": "files/dto.go.tmpl" },
     { "path": "internal/api/service.go", "source": "files/service.go.tmpl" },
     { "path": "internal/api/handler.go", "source": "files/handler.go.tmpl" },

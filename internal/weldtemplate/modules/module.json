@@ -2,6 +2,7 @@
   "version": "0.2.0",
   "files": [
     { "path": "internal/openapi/openapi.go", "source": "files/openapi_contract.go.tmpl", "shared": true },
+    { "path": "internal/openapi/legacy.go", "source": "files/openapi_legacy.go.tmpl", "shared": true },
     { "path": "internal/modules/__modname__/dto.go", "source": "files/dto.go.tmpl" },
     { "path": "internal/modules/__modname__/service.go", "source": "files/service.go.tmpl" },
     { "path": "internal/modules/__modname__/module.go", "source": "files/module.go.tmpl" },

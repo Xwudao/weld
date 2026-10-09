@@ -45,6 +45,7 @@ type Operation struct {
 	Path          string
 	OperationID   string
 	Summary       string
+	Description   string
 	PathParams    []string
 	Query         []QueryParameter
 	Body          schemaFunc
@@ -57,7 +58,9 @@ type Operation struct {
 	// documented marks an operation the document states but this package does
 	// not serve: its route is owned by a business module that registered it
 	// through internal/openapi. A documented operation carries no handler.
-	documented bool
+	documented   bool
+	rawResponses map[int]openapi.Response
+	bearerAuth   bool
 }
 
 // QueryParameter is one documented query parameter. A built-in operation
@@ -246,6 +249,7 @@ func documentedOperation(operation openapi.Operation) Operation {
 		Path:          operation.Path,
 		OperationID:   operation.OperationID,
 		Summary:       operation.Summary,
+		Description:   operation.Description,
 		PathParams:    operation.PathParams,
 		Query:         query,
 		Body:          operation.RequestBody,
@@ -254,6 +258,8 @@ func documentedOperation(operation openapi.Operation) Operation {
 		Success:       operation.Success,
 		Errors:        errors,
 		documented:    true,
+		rawResponses:  operation.RawResponses,
+		bearerAuth:    operation.BearerAuth,
 	}
 }
 
@@ -269,10 +275,25 @@ func OpenAPIJSON() ([]byte, error) {
 
 // OpenAPIDocument is the OpenAPI 3.1 root object.
 type OpenAPIDocument struct {
-	OpenAPI string              `json:"openapi"`
-	Info    Info                `json:"info"`
-	Paths   map[string]PathItem `json:"paths"`
+	OpenAPI    string              `json:"openapi"`
+	Info       Info                `json:"info"`
+	Paths      map[string]PathItem `json:"paths"`
+	Components *Components         `json:"components,omitempty"`
 }
+
+// Components holds security schemes declared by linked modules.
+type Components struct {
+	SecuritySchemes map[string]SecurityScheme `json:"securitySchemes,omitempty"`
+}
+
+type SecurityScheme struct {
+	Type         string `json:"type"`
+	Scheme       string `json:"scheme,omitempty"`
+	BearerFormat string `json:"bearerFormat,omitempty"`
+	Description  string `json:"description,omitempty"`
+}
+
+type SecurityRequirement map[string][]string
 
 // Info is the OpenAPI info object.
 type Info struct {
@@ -287,9 +308,11 @@ type PathItem map[string]*OperationDocument
 type OperationDocument struct {
 	OperationID string                      `json:"operationId"`
 	Summary     string                      `json:"summary,omitempty"`
+	Description string                      `json:"description,omitempty"`
 	Parameters  []ParameterDocument         `json:"parameters,omitempty"`
 	RequestBody *RequestBodyDocument        `json:"requestBody,omitempty"`
 	Responses   map[string]ResponseDocument `json:"responses"`
+	Security    []SecurityRequirement       `json:"security,omitempty"`
 }
 
 // ParameterDocument is one path or query parameter.
@@ -342,6 +365,12 @@ func buildDocument(ops []Operation) (*OpenAPIDocument, error) {
 			document.Paths[operation.Path] = path
 		}
 		path[strings.ToLower(operation.Method)] = built
+		if operation.bearerAuth {
+			if document.Components == nil {
+				document.Components = &Components{SecuritySchemes: map[string]SecurityScheme{}}
+			}
+			document.Components.SecuritySchemes["bearerAuth"] = SecurityScheme{Type: "http", Scheme: "bearer", BearerFormat: "JWT", Description: "Administrator access token; the guard checks the user row and administrator role."}
+		}
 	}
 	return document, nil
 }
@@ -370,7 +399,7 @@ func validateOperation(operation Operation, seen, routes map[string]bool) error 
 	if operation.handle == nil && !operation.documented {
 		return fmt.Errorf("operation %q: no handler", operation.OperationID)
 	}
-	if operation.SuccessStatus == 0 || operation.Success == nil {
+	if len(operation.rawResponses) == 0 && (operation.SuccessStatus == 0 || operation.Success == nil) {
 		return fmt.Errorf("operation %q: a success response is required", operation.OperationID)
 	}
 	for _, response := range operation.Errors {
@@ -385,7 +414,20 @@ func buildOperation(operation Operation) (*OperationDocument, error) {
 	document := &OperationDocument{
 		OperationID: operation.OperationID,
 		Summary:     operation.Summary,
-		Responses:   make(map[string]ResponseDocument, len(operation.Errors)+1),
+		Description: operation.Description,
+		Responses:   make(map[string]ResponseDocument, len(operation.Errors)+len(operation.rawResponses)+1),
+	}
+	if operation.bearerAuth {
+		document.Security = []SecurityRequirement{{"bearerAuth": {}}}
+	}
+	for status, response := range operation.rawResponses {
+		if status == 0 || response.Schema == nil {
+			return nil, fmt.Errorf("raw response needs status and schema")
+		}
+		document.Responses[strconv.Itoa(status)] = ResponseDocument{
+			Description: response.Description,
+			Content:     map[string]MediaType{"application/json": {Schema: response.Schema}},
+		}
 	}
 	for _, name := range operation.PathParams {
 		document.Parameters = append(document.Parameters, ParameterDocument{
