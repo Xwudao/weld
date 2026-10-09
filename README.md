@@ -5,7 +5,13 @@ capabilities to the *same* project over time — `weld add web` modifies your
 existing project to gain a web frontend instead of generating a second
 template.
 
+Install the first release with Go 1.23 or newer:
+
+```bash
+go install github.com/Xwudao/weld/cmd/weld@v0.1.0
 ```
+
+```bash
 weld new demo          # minimal Go CLI: Cobra command tree, version + help
 cd demo
 weld add web           # installs http, then the React + TS + Vite frontend
