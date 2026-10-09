@@ -36,6 +36,28 @@ an edit. `adminPolicy` is only a name: the composition root defines what the
 `"admin"` policy does (`httpserver.AdminGuard` by default), so authorization
 lives in exactly one place and every module shares it.
 
+## Authentication and authorization
+
+`adminPolicy` is a name, not a check. At startup the composition root resolves
+every referenced name into middleware through `httpx.Router.WithPolicy`, so the
+`"admin"` policy is defined once, in `internal/httpserver/policy.go`
+(`AdminGuard`), and shared by every module; the server graph mounts it in
+`internal/di/di.go`.
+
+The default `AdminGuard` is a placeholder: it only requires a non-empty bearer
+token and authenticates nobody. Replace its body with the project's real check.
+A guard is an ordinary `httpx.Middleware`, so it runs before the handler and
+before the JSON body is bound, and it may close over an injected dependency:
+after `weld add db`, pass the repository at the `WithPolicy` call site
+(`WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard(repository))`) and
+look the caller's role up there. On success it puts the caller's identity on
+`r.Context()`, which the handler reads from its `ctx`; on failure it writes
+`httpx.Error(w, http.StatusForbidden, ...)` and returns.
+
+A name the composition root never defined panics at startup, so a route is never
+served unguarded because of a typo. Under a mount that declares a baseline with
+`httpx.Router.Require`, a route opts out explicitly with `httpx.Open()`.
+
 ## Responses
 
 Handlers write through `internal/httpx`, the shared toolkit:

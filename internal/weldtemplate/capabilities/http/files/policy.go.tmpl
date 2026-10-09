@@ -18,20 +18,34 @@ import (
 const APIPrefix = "/api"
 
 // PolicyAdmin is the name of the administrator route policy. A module marks its
-// administrator routes with httpx.Policy(PolicyAdmin); the generated server
-// graph defines the policy once with AdminGuard, so every module shares one
-// guard.
+// administrator routes with httpx.Policy(PolicyAdmin) and implements no check
+// itself; the generated server graph resolves the name once with WithPolicy, so
+// every module shares one guard.
 const PolicyAdmin = "admin"
 
-// AdminGuard is the project's placeholder administrator policy: it accepts a
-// non-empty bearer token and otherwise rejects with 401 before the handler or
-// the body binder runs.
+// AdminGuard is the project's placeholder administrator policy.
 //
-// It is a replaceable example, not authentication. Replace its body with the
-// project's real check (a JWT, a session, a role lookup), or define a different
-// policy in the generated server graph and reference that name from the module.
-// A module never implements a guard itself, so the policy lives in exactly one
-// place.
+// A policy name is resolved at startup into the middleware registered for it, so
+// this function is where the real check belongs. It is an ordinary net/http
+// middleware: it runs before the handler and before the request body is bound,
+// and it may do anything a request needs — read a header, verify a JWT or a
+// session, or look a role up in the database. It rejects by writing httpx.Error
+// and returning, and it passes by calling next.ServeHTTP, optionally carrying
+// the caller's identity on the request context for the handler to read.
+//
+// The graph constructs the guard, so it can close over an injected dependency.
+// After `weld add db`, for example, wire it in internal/di/di.go as
+//
+//	WithPolicy(httpserver.PolicyAdmin, httpserver.AdminGuard(repository))
+//
+// and have the guard call the repository to load the caller's role before it
+// decides. Change this signature freely; only this file and the WithPolicy call
+// site move together. A name the graph never defines panics at startup, so a
+// route can never serve unguarded because of a typo.
+//
+// The body below is a placeholder that accepts any non-empty bearer token, so a
+// generated project compiles and its tests exercise the rejection path. It does
+// not authenticate anyone: replace it, do not build on it.
 func AdminGuard() httpx.Middleware {
 	return func(next nethttp.Handler) nethttp.Handler {
 		return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
