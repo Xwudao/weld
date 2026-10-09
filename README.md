@@ -5,12 +5,12 @@ capabilities to the *same* project over time — `weld add web` modifies your
 existing project to gain a web frontend instead of generating a second
 template.
 
-Install the first release with Go 1.23 or newer (the tool itself builds on Go
+Install the latest patch release with Go 1.23 or newer (the tool itself builds on Go
 1.23; a generated project that adds any capability installs Loom and raises its
 Go directive to `go 1.25.0`):
 
 ```bash
-go install github.com/Xwudao/weld/cmd/weld@v0.1.0
+go install github.com/Xwudao/weld/cmd/weld@v0.1.1
 ```
 
 ```bash
@@ -30,7 +30,7 @@ make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
 | [`../weld-template`](../weld-template) | declarative capability payloads, exposed as an embedded `io/fs.FS` |
 | `weld` (this repo) | CLI: catalog loading, rendering, manifest, planning, safe apply |
 
-`weld` imports the released `github.com/Xwudao/weld-template v0.1.0` and reads
+`weld` imports the released `github.com/Xwudao/weld-template v0.1.1` and reads
 payloads through `weldtemplate.FS()`. The embedded FS means a built `weld`
 binary carries its whole scaffold — no template checkout, network access or
 environment variable is needed at runtime. During local template development,

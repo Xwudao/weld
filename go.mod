@@ -3,7 +3,7 @@ module github.com/Xwudao/weld
 go 1.23
 
 require (
-	github.com/Xwudao/weld-template v0.1.0
+	github.com/Xwudao/weld-template v0.1.1
 	github.com/spf13/cobra v1.9.1
 )
 
