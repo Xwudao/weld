@@ -29,16 +29,6 @@ func TestLoadModulesIsWellFormed(t *testing.T) {
 			t.Errorf("module file path %q does not carry __modname__", file.Path)
 		}
 	}
-	if _, err := module.ReadRoute(); err != nil {
-		t.Errorf("ReadRoute: %v", err)
-	}
-	snippet, err := module.ReadRouteSnippet()
-	if err != nil {
-		t.Fatalf("ReadRouteSnippet: %v", err)
-	}
-	if !strings.Contains(string(snippet), "weld:module:__modname__:installed") {
-		t.Errorf("route snippet is missing the module sentinel:\n%s", snippet)
-	}
 }
 
 func TestRenderSubstitutesModuleTokens(t *testing.T) {

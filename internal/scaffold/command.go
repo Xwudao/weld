@@ -44,6 +44,11 @@ func ValidateCommandName(name string) error {
 // in the manifest under command:<name>, so a later `weld add` never rewrites
 // them and a repeated add is a no-op.
 //
+// When Loom is installed the group also gets a stable, editable command graph
+// internal/di/<name>_graph.go and a lazy registration, so a real subcommand can
+// resolve the installed capabilities while help, version and unrelated commands
+// never construct them.
+//
 // A name already used by a business module is a conflict: a module owns its
 // command group through `weld add module <name> --command`, so the two cannot
 // share a name.
@@ -66,20 +71,42 @@ func AddCommand(req Request, name string) (*Result, error) {
 		result.Notes = alreadyInstalledCommandNotes(req.Dir, manifest, name)
 		return result, nil
 	}
-	if err := checkCLICompatibility(req.Dir, nil, true); err != nil {
-		return nil, err
-	}
 	commandTemplate, err := template.LoadCommands()
 	if err != nil {
 		return nil, err
 	}
 
 	p := newPlanner(req, manifest, result)
-	vars := commandVars(manifest, commandTemplate.Version, name)
+	// A command group always resolves through a command-specific Loom graph, so a
+	// command installed on the bare base CLI plans Loom (and the config it
+	// requires) in the same atomic plan. A conflict anywhere fails the plan before
+	// anything is written, so the command and its graph never land half-applied.
+	if !manifest.HasCapability("loom") {
+		loomCapability, err := req.Catalog.Get("loom")
+		if err != nil {
+			return nil, err
+		}
+		order, err := installOrder(req.Catalog, manifest, loomCapability, map[string]bool{})
+		if err != nil {
+			return nil, err
+		}
+		for _, capability := range order {
+			result.Notes = append(result.Notes, fmt.Sprintf("installing required capability %q", capability.Name))
+			if err := p.installCapability(capability); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	vars := commandVars(manifest, template.CapabilitySet(p.present), commandTemplate.Version, name)
 	if err := p.planCommandFacet(commandTemplate, commandTemplate.Generic, vars, "command:"+name); err != nil {
 		return nil, err
 	}
 	manifest.AddCommand(project.CommandRef{Name: name, Version: commandTemplate.Version})
+	// The command graph is a new file, so the initializer must be regenerated even
+	// when di.go itself is unchanged (a second command group).
+	result.GenerateLoom = true
+	result.DIPackage = "internal/di"
 	if err := p.finish(); err != nil {
 		return nil, err
 	}
@@ -88,28 +115,46 @@ func AddCommand(req Request, name string) (*Result, error) {
 
 // commandVars is the substitution context for a per-name command payload. It
 // shares the module tokens (__modname__/__ModName__) with the module payload so
-// one Render call substitutes both.
-func commandVars(manifest *project.Manifest, version, name string) template.Vars {
-	return template.Vars{
+// one Render call substitutes both, and carries the installed capability set so
+// a Loom project gets the command-specific graph.
+func commandVars(manifest *project.Manifest, caps template.CapabilitySet, version, name string) template.CommandTemplateVars {
+	return template.CommandTemplateVars{
 		Name:     manifest.Name,
 		Module:   manifest.Module,
 		Version:  version,
+		Caps:     caps,
 		Mod:      name,
 		ModTitle: template.ExportName(name),
 	}
 }
 
-// planCommandFacet writes one command variant's files, rendering the per-name
-// paths and contents. The variant is either the independent generic group or
-// the module-backed group; both declare the same target paths.
-func (p *planner) planCommandFacet(commandTemplate *template.CommandTemplate, variant template.CommandVariant, vars template.Vars, capability string) error {
+// pathVars turns a command render context into the token-replacement context
+// used for the target path.
+func pathVars(vars template.CommandTemplateVars) template.Vars {
+	return template.Vars{
+		Name:     vars.Name,
+		Module:   vars.Module,
+		Version:  vars.Version,
+		Mod:      vars.Mod,
+		ModTitle: vars.ModTitle,
+	}
+}
+
+// planCommandFacet writes one command variant's files that apply to the
+// installed capability set, rendering the per-name paths and contents. The
+// variant is either the independent generic group or the module-backed group;
+// both declare the same target paths, with the Loom graph guarded on loom.
+func (p *planner) planCommandFacet(commandTemplate *template.CommandTemplate, variant template.CommandVariant, vars template.CommandTemplateVars, capability string) error {
 	for _, file := range variant.Files {
-		content, err := commandTemplate.ReadFile(file)
+		if !commandTemplate.Applies(file.When, vars.Caps) {
+			continue
+		}
+		content, err := commandTemplate.Render(file, vars)
 		if err != nil {
 			return err
 		}
-		path := string(template.Render([]byte(file.Path), vars))
-		if err := p.planNewFile(path, capability, template.Render(content, vars)); err != nil {
+		path := string(template.Render([]byte(file.Path), pathVars(vars)))
+		if err := p.planNewFile(path, capability, content); err != nil {
 			return err
 		}
 	}

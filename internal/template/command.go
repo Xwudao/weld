@@ -1,9 +1,13 @@
 package template
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/format"
 	"io/fs"
+	"strings"
+	"text/template"
 
 	weldtemplate "github.com/Xwudao/weld-template"
 )
@@ -86,4 +90,58 @@ func (m *CommandTemplate) read(source string) ([]byte, error) {
 		return nil, fmt.Errorf("command template: read %s: %w", source, err)
 	}
 	return raw, nil
+}
+
+// CommandTemplateVars is the context used to render a per-name command payload.
+// It shares the module tokens (__modname__/__ModName__) with the module payload
+// so one Render call substitutes both, and carries the installed capability set
+// so a payload can vary with it.
+type CommandTemplateVars struct {
+	Name    string
+	Module  string
+	Version string
+	Caps    CapabilitySet
+	// Mod is the command's package name and root command name.
+	Mod string
+	// ModTitle is Mod with its first letter upper-cased, for exported
+	// identifiers such as Init<ModTitle>.
+	ModTitle string
+}
+
+// Applies reports whether a command payload entry applies to the installed
+// capability set.
+func (m *CommandTemplate) Applies(when []string, caps CapabilitySet) bool {
+	for _, name := range when {
+		if !caps[name] {
+			return false
+		}
+	}
+	return true
+}
+
+// Render expands a command payload as a text/template against vars, substitutes
+// the weld placeholder tokens, and formats a Go target as Go so the generated
+// file is gofmt-clean whatever its conditionals look like.
+func (m *CommandTemplate) Render(file ModuleFile, vars CommandTemplateVars) ([]byte, error) {
+	raw, err := m.read(file.Source)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, err := template.New(file.Source).Option("missingkey=error").Parse(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("command template: parse %s: %w", file.Source, err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, vars); err != nil {
+		return nil, fmt.Errorf("command template: render %s: %w", file.Source, err)
+	}
+	rendered := Render(buf.Bytes(), Vars{Name: vars.Name, Module: vars.Module, Version: vars.Version, Mod: vars.Mod, ModTitle: vars.ModTitle})
+	if !strings.HasSuffix(file.Path, ".go") {
+		return rendered, nil
+	}
+	formatted, err := format.Source(rendered)
+	if err != nil {
+		return nil, fmt.Errorf("command template: rendered %s is not valid Go: %w", file.Path, err)
+	}
+	return formatted, nil
 }

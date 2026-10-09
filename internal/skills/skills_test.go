@@ -132,7 +132,8 @@ func TestRenderLoomSeams(t *testing.T) {
 		"`internal/di/di.go` and `internal/di/loom_gen.go`",
 		"`internal/di/api_provider.go`",
 		"`internal/di/redis_provider.go`",
-		"pruned until a provider depends on it",
+		"Unused DB, Redis, mail and storage providers are pruned",
+		"HTTP server graph exists only",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("loom skill is missing %q:\n%s", want, text)
@@ -404,18 +405,17 @@ func TestRenderCronMailStorageLabelsAndSeams(t *testing.T) {
 	}
 }
 
-// TestRenderCronAloneStillNamesTheRegistrationSeam proves a cron-only project is
-// told where jobs are declared even without Loom.
-func TestRenderCronAloneStillNamesTheRegistrationSeam(t *testing.T) {
-	body, err := Render(manifest("cron"), template.Load())
+// TestRenderCronRequiresLoom names both registration and provider seams in the
+// sole supported cron composition: HTTP serve with Loom.
+func TestRenderCronRequiresLoom(t *testing.T) {
+	body, err := Render(manifest("config", "loom", "http", "cron"), template.Load())
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	text := string(body)
-	if !strings.Contains(text, "`internal/cron/register.go`") {
-		t.Errorf("cron-only skill does not name the registration seam:\n%s", text)
-	}
-	if strings.Contains(text, "`internal/di/cron_provider.go`") {
-		t.Errorf("cron-only skill claims a Loom provider seam that is not installed:\n%s", text)
+	for _, want := range []string{"`internal/cron/register.go`", "`internal/di/cron_provider.go`", "only the Loom `serve` lifecycle"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("cron skill does not describe the supported DI composition %q:\n%s", want, text)
+		}
 	}
 }

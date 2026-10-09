@@ -280,9 +280,9 @@ var curatedNotes = map[string]string{
 	"web":     "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
 	"api":     "JSON HTTP API in `internal/api`: typed DTOs, go-validate rules and an OpenAPI 3.1 document served at `GET /api/openapi.json`. The default `Service` is an in-memory development demo whose items are lost on restart; it is not persistence.",
 	"db":      "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
-	"loom":    "opt-in compile-time dependency-injection graph in `internal/di` that composes the configuration, logger and HTTP server (and the JSON API service when **api** is installed); `serve` runs the graph. Installing it raises the project's Go directive to 1.25, and any installed **db** and **redis** are declared but pruned until a provider depends on them.",
+	"loom":    "compile-time dependency injection in `internal/di`, automatically installed for every capability and command beyond the bare CLI. All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage bindings. Loom raises the project's Go directive to 1.25.",
 	"redis":   "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
-	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs, unique names, overlap skipping, panic recovery and graceful stop. It starts and stops with `serve` (plain and Loom) and never with a short command. `internal/cron/register.go` is the stable file where you declare jobs, so installing the capability schedules nothing.",
+	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs, unique names, overlap skipping, panic recovery and graceful stop. Cron installs HTTP and follows only the Loom `serve` lifecycle, never a short command. `internal/cron/register.go` is the stable job-registration file; installing cron schedules nothing.",
 	"mail":    "opt-in SMTP sender in `internal/mailsender`: one connection per `Send` with an explicit TLS policy and header-injection guards. Nothing generated imports it, so serving sends no mail; `internal/di/mail_provider.go` is the stable Loom seam.",
 	"storage": "opt-in S3-compatible object storage in `internal/objectstore`: a streaming client with bounded presigned URLs. It never creates the bucket, and nothing generated imports it; `internal/di/storage_provider.go` is the stable Loom seam.",
 }
@@ -331,9 +331,10 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 		wrote = true
 	}
 	if set["loom"] {
-		b.WriteString("- **loom** wires the configuration, logger, HTTP server and, when **api** is\n")
-		b.WriteString("  installed, the JSON API service. A **db** or **redis** binding is declared but\n")
-		b.WriteString("  pruned until a provider depends on it, so an unrelated serve needs neither.\n")
+		b.WriteString("- **loom** is installed with every non-base addition. Command graphs share\n")
+		b.WriteString("  available bindings through `commonModule`; the HTTP server graph exists only\n")
+		b.WriteString("  with **http**. Unused DB, Redis, mail and storage providers are pruned, and\n")
+		b.WriteString("  short commands never start HTTP or cron.\n")
 		wrote = true
 	}
 	if wrote {
@@ -372,8 +373,9 @@ func writeCommands(b *strings.Builder, manifest *project.Manifest) {
 	b.WriteString("Added with `weld add command <name>` or `weld add module <name> --command`.\n")
 	b.WriteString("Each lives in `internal/commands/<name>` and is registered through\n")
 	b.WriteString("`app.RegisterCommand` in `internal/app/<name>_command.go`. weld writes them\n")
-	b.WriteString("once and never regenerates them, so they are yours to edit; a command group\n")
-	b.WriteString("starts no server and shows help on a bare invocation.\n\n")
+	b.WriteString("once and never regenerates them, so they are yours to edit. Each group has\n")
+	b.WriteString("an editable `internal/di/<name>_graph.go` and resolves its dependencies only\n")
+	b.WriteString("when a real subcommand runs; help and unrelated commands start no server.\n\n")
 	for _, command := range manifest.Commands {
 		if manifest.HasModule(command.Name) {
 			fmt.Fprintf(b, "- **%s** v%s — `internal/commands/%s`, backed by the `%s` module's Service.\n", command.Name, command.Version, command.Name, command.Name)
@@ -416,9 +418,7 @@ func writeEditing(b *strings.Builder, set map[string]bool) {
 	if set["cron"] {
 		seams = append(seams, "`internal/cron/register.go`")
 	}
-	if set["api"] && !set["loom"] {
-		seams = append(seams, "`internal/httpserver/api_route.go`")
-	}
+
 	if len(seams) > 0 {
 		fmt.Fprintf(b, "- Stable seams, written once and never regenerated, so your edits\n  survive later `weld add`: %s.\n", strings.Join(seams, ", "))
 	}

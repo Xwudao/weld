@@ -51,37 +51,42 @@ func TestValidateCommandName(t *testing.T) {
 }
 
 // TestAddCommandGeneratesIndependentGroup proves `weld add command` writes an
-// independent root command group: no HTTP, no configuration and no database,
-// registered through the base app's RegisterCommand seam.
+// independent root command group: no HTTP and no database, registered through
+// the base app's RegisterCommand seam. Every non-base capability is a Loom
+// project, so the command also installs loom (and the config it requires).
 func TestAddCommandGeneratesIndependentGroup(t *testing.T) {
 	root := t.TempDir()
 	dir := create(t, root)
 	baseApp := readFile(t, filepath.Join(dir, "internal/app/app.go"))
 
 	result := addCommand(t, dir, "orders")
-	if len(result.Installed) != 0 {
-		t.Fatalf("add command installed capabilities %v, want none", result.Installed)
+	if got, want := strings.Join(result.Installed, ","), "config,loom"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
 		"internal/commands/orders/command.go",
 		"internal/commands/orders/command_test.go",
 		"internal/commands/orders/README.md",
 		"internal/app/orders_command.go",
+		"internal/config/config.go",
+		"internal/di/di.go",
+		"internal/di/orders_graph.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
 	}
-	// A command group is independent: it pulls in neither HTTP nor config.
-	for _, path := range []string{"internal/httpserver", "internal/config", "internal/modules"} {
+	// A command group is independent of the HTTP server and the business modules.
+	for _, path := range []string{"internal/httpserver", "internal/modules", "internal/app/serve.go"} {
 		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
 			t.Errorf("add command created %s", path)
 		}
 	}
 
-	// The registration uses the one shared root-command seam, not a new dispatcher.
+	// The registration uses the one shared root-command seam and delegates to the
+	// command-specific graph, not a new dispatcher.
 	registration := readFile(t, filepath.Join(dir, "internal/app/orders_command.go"))
-	for _, want := range []string{"RegisterCommand(newOrdersCommand)", "orders.NewCommand()"} {
+	for _, want := range []string{"RegisterCommand(newOrdersCommand)", "di.InitOrders(ctx)"} {
 		if !strings.Contains(registration, want) {
 			t.Errorf("registration is missing %q:\n%s", want, registration)
 		}
@@ -192,38 +197,44 @@ func TestAddCommandRejectsModuleCollision(t *testing.T) {
 }
 
 // TestAddModuleWithCommandGeneratesBoth proves `weld add module --command`
-// writes the HTTP module and a command group backed by the same Service.
+// writes the HTTP module (installing http and loom) and a command group backed
+// by the same Service.
 func TestAddModuleWithCommandGeneratesBoth(t *testing.T) {
 	root := t.TempDir()
 	dir := create(t, root)
 
 	result := addModuleWithCommand(t, dir, "widget")
-	if got, want := strings.Join(result.Installed, ","), "config,http"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
 		"internal/modules/widget/service.go",
 		"internal/modules/widget/module.go",
-		"internal/httpserver/widget_route.go",
 		"internal/commands/widget/command.go",
 		"internal/commands/widget/command_test.go",
 		"internal/app/widget_command.go",
+		"internal/di/di.go",
+		"internal/di/widget_graph.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
 	}
+	// A module is registered through the graph, never a separate route seam.
+	if _, err := os.Stat(filepath.Join(dir, "internal", "httpserver", "widget_route.go")); !os.IsNotExist(err) {
+		t.Error("the module wrote the retired non-Loom route seam")
+	}
 
 	// The command group is backed by the module's own Service and NewService.
 	command := readFile(t, filepath.Join(dir, "internal/commands/widget/command.go"))
-	for _, want := range []string{"module.Service", "module.Request", "func NewCommand(service module.Service)"} {
+	for _, want := range []string{"module.Service", "func NewDeps(service module.Service)"} {
 		if !strings.Contains(command, want) {
 			t.Errorf("module command is missing %q:\n%s", want, command)
 		}
 	}
 	registration := readFile(t, filepath.Join(dir, "internal/app/widget_command.go"))
-	if !strings.Contains(registration, "command.NewCommand(module.NewService())") {
-		t.Errorf("registration does not share the module's NewService:\n%s", registration)
+	if !strings.Contains(registration, "di.InitWidget(ctx)") {
+		t.Errorf("registration does not delegate to the module's command graph:\n%s", registration)
 	}
 
 	manifest := mustLoad(t, dir)
@@ -289,45 +300,6 @@ func TestAddModuleCommandIsIdempotent(t *testing.T) {
 	}
 	if readFile(t, filepath.Join(dir, "internal/commands/widget/command.go")) != before {
 		t.Fatal("a repeat add rewrote the command file")
-	}
-}
-
-// TestAddCommandOnOldCLIRejectsBeforeWriting proves a command group needs the
-// Cobra command seam: on a project scaffolded with the earlier registry the plan
-// fails during planning, before any file changes.
-func TestAddCommandOnOldCLIRejectsBeforeWriting(t *testing.T) {
-	dir := create(t, t.TempDir())
-	appPath := filepath.Join(dir, "internal", "app", "app.go")
-	if err := os.WriteFile(appPath, []byte("package app\n// earlier CLI\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	before := readFile(t, filepath.Join(dir, project.ManifestName))
-
-	for _, tc := range []struct {
-		name string
-		run  func() error
-	}{
-		{"command", func() error {
-			_, err := AddCommand(Request{Dir: dir, Catalog: newCatalog()}, "orders")
-			return err
-		}},
-		{"module --command", func() error {
-			_, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), Command: true}, "widget")
-			return err
-		}},
-	} {
-		err := tc.run()
-		if err == nil || !strings.Contains(err.Error(), "migrate the generated app to Cobra") {
-			t.Fatalf("add %s on an earlier CLI error = %v", tc.name, err)
-		}
-	}
-	if readFile(t, filepath.Join(dir, project.ManifestName)) != before {
-		t.Fatal("planning changed the manifest")
-	}
-	for _, path := range []string{"internal/commands", "internal/httpserver"} {
-		if _, statErr := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(statErr) {
-			t.Fatalf("planning wrote %s: %v", path, statErr)
-		}
 	}
 }
 

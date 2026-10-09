@@ -42,42 +42,42 @@ func TestAddModuleInstallsHTTPAndConfig(t *testing.T) {
 	dir := create(t, root)
 
 	result := addModule(t, dir, "widget")
-	if got, want := strings.Join(result.Installed, ","), "config,http"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
 		"internal/config/config.go",
 		"internal/httpserver/http.go",
-		"internal/httpserver/widget_route.go",
 		"internal/modules/widget/dto.go",
 		"internal/modules/widget/service.go",
 		"internal/modules/widget/module.go",
 		"internal/modules/widget/module_test.go",
 		"internal/modules/widget/README.md",
+		"internal/di/di.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
 	}
-
-	// The non-Loom route is appended to the httpserver extension point.
-	httpGo := readFile(t, filepath.Join(dir, "internal/httpserver/http.go"))
-	if !strings.Contains(httpGo, "routes = append(routes, installWidgetRoute)") {
-		t.Errorf("routes extension point not patched:\n%s", httpGo)
+	// A module is registered through the Loom server graph, not a route file.
+	if _, err := os.Stat(filepath.Join(dir, "internal", "httpserver", "widget_route.go")); !os.IsNotExist(err) {
+		t.Error("the module wrote the retired non-Loom route seam")
 	}
-	if !strings.Contains(httpGo, "weld:module:widget:installed") {
-		t.Errorf("module sentinel missing:\n%s", httpGo)
-	}
-	if strings.Count(httpGo, "weld:routes:begin") != 1 {
-		t.Errorf("routes region duplicated:\n%s", httpGo)
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	for _, want := range []string{"loom.Provide(widget.NewService)", "widget.Register(mux, widgetService)"} {
+		if !strings.Contains(di, want) {
+			t.Errorf("di.go is missing %q:\n%s", want, di)
+		}
 	}
 
 	manifest := mustLoad(t, dir)
 	if !manifest.HasModule("widget") || manifest.ModuleVersion("widget") == "" {
 		t.Fatalf("module not recorded: %+v", manifest.Modules)
 	}
-	if !manifest.HasCapability("http") || !manifest.HasCapability("config") {
-		t.Fatalf("dependencies not recorded: %+v", manifest.Capabilities)
+	for _, capability := range []string{"http", "config", "loom"} {
+		if !manifest.HasCapability(capability) {
+			t.Fatalf("dependency %s not recorded: %+v", capability, manifest.Capabilities)
+		}
 	}
 	if len(manifest.Drift(dir)) != 0 {
 		t.Fatalf("drift after add module: %+v", manifest.Drift(dir))
@@ -190,8 +190,8 @@ func TestAddModuleRefusesUnmanagedFile(t *testing.T) {
 }
 
 // TestAddModuleFilesSurviveLaterAdd proves a module package is a stable seam: a
-// later capability add leaves a user-edited module file untouched and keeps the
-// module route alongside the new one.
+// later capability add leaves a user-edited module file untouched while the
+// regenerated graph still routes the module and the later capability.
 func TestAddModuleFilesSurviveLaterAdd(t *testing.T) {
 	root := t.TempDir()
 	dir := create(t, root)
@@ -208,18 +208,18 @@ func TestAddModuleFilesSurviveLaterAdd(t *testing.T) {
 	if got := readFile(t, path); got != edited {
 		t.Fatalf("a later add rewrote the user's module file:\n%s", got)
 	}
-	httpGo := readFile(t, filepath.Join(dir, "internal/httpserver/http.go"))
-	for _, want := range []string{"installWidgetRoute", "installWebRoute"} {
-		if !strings.Contains(httpGo, want) {
-			t.Errorf("routes region lost %q after a later add:\n%s", want, httpGo)
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	for _, want := range []string{"widget.Register(mux, widgetService)", "web.Handler()"} {
+		if !strings.Contains(di, want) {
+			t.Errorf("the regenerated graph lost %q after a later add:\n%s", want, di)
 		}
 	}
 }
 
-// TestAddModuleComposesWithDBWithoutLoom proves a module and db compose without
-// Loom, in the module-first order, without touching module files and without
-// wiring a database into the HTTP surface.
-func TestAddModuleComposesWithDBWithoutLoom(t *testing.T) {
+// TestAddModuleComposesWithDB proves a module and db compose, in the
+// module-first order, without touching module files and without wiring a
+// database into the HTTP surface.
+func TestAddModuleComposesWithDB(t *testing.T) {
 	root := t.TempDir()
 	dir := create(t, root)
 	addModule(t, dir, "widget")
@@ -234,8 +234,12 @@ func TestAddModuleComposesWithDBWithoutLoom(t *testing.T) {
 	if readFile(t, filepath.Join(dir, "internal/modules/widget/module.go")) != moduleBefore {
 		t.Fatal("installing db rewrote a module file")
 	}
-	if httpGo := readFile(t, filepath.Join(dir, "internal/httpserver/http.go")); !strings.Contains(httpGo, "installWidgetRoute") {
-		t.Errorf("installing db dropped the module route:\n%s", httpGo)
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	if !strings.Contains(di, "widget.Register(mux, widgetService)") {
+		t.Errorf("installing db dropped the module registration:\n%s", di)
+	}
+	if !strings.Contains(di, "loom.Provide(NewPool)") {
+		t.Errorf("installing db did not declare the pool binding:\n%s", di)
 	}
 	if len(manifest.Drift(dir)) != 0 {
 		t.Fatalf("drift: %+v", manifest.Drift(dir))

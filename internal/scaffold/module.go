@@ -88,17 +88,15 @@ func AddModule(req Request, name string) (*Result, error) {
 		return nil, err
 	}
 
-	// A module is served over HTTP, so http (and its config dependency) is
-	// installed first when absent. An already-present http is not reinstalled.
+	// A module is served over HTTP through the Loom graph, so http (with the loom
+	// and config it requires) is installed first when absent. An already-present
+	// http is not reinstalled.
 	httpCapability, err := req.Catalog.Get("http")
 	if err != nil {
 		return nil, err
 	}
-	order, err := installOrder(req.Catalog, manifest, httpCapability)
+	order, err := installOrder(req.Catalog, manifest, httpCapability, map[string]bool{})
 	if err != nil {
-		return nil, err
-	}
-	if err := checkCLICompatibility(req.Dir, order, req.Command); err != nil {
 		return nil, err
 	}
 	for _, capability := range order {
@@ -131,12 +129,6 @@ func AddModule(req Request, name string) (*Result, error) {
 		}
 	}
 
-	if !p.present["loom"] {
-		if err := p.planModuleRoute(moduleTemplate, vars, capability); err != nil {
-			return nil, err
-		}
-	}
-
 	manifest.AddModule(project.ModuleRef{Name: name, Version: moduleTemplate.Version})
 	if req.Command {
 		if err := p.planModuleCommandFacet(manifest, name); err != nil {
@@ -154,9 +146,6 @@ func AddModule(req Request, name string) (*Result, error) {
 // installed. It writes only the command files and records the command; the
 // module's HTTP files, and any user edits to them, are never touched.
 func upgradeModuleCommand(req Request, manifest *project.Manifest, result *Result, name string) error {
-	if err := checkCLICompatibility(req.Dir, nil, true); err != nil {
-		return err
-	}
 	p := newPlanner(req, manifest, result)
 	if err := p.planModuleCommandFacet(manifest, name); err != nil {
 		return err
@@ -167,54 +156,22 @@ func upgradeModuleCommand(req Request, manifest *project.Manifest, result *Resul
 // planModuleCommandFacet writes the module-backed command group and records the
 // command. It shares the command target paths with the generic group, so a
 // module and an independent command can never be created for the same name.
+// When Loom is installed it also plans the command-specific Loom graph and asks
+// for the generated initializer to be refreshed.
 func (p *planner) planModuleCommandFacet(manifest *project.Manifest, name string) error {
 	commandTemplate, err := template.LoadCommands()
 	if err != nil {
 		return err
 	}
-	vars := commandVars(manifest, commandTemplate.Version, name)
+	vars := commandVars(manifest, template.CapabilitySet(p.present), commandTemplate.Version, name)
 	if err := p.planCommandFacet(commandTemplate, commandTemplate.Module, vars, "command:"+name); err != nil {
 		return err
 	}
 	manifest.AddCommand(project.CommandRef{Name: name, Version: commandTemplate.Version})
-	return nil
-}
-
-// planModuleRoute writes the non-Loom route seam and appends it to the
-// httpserver weld:routes extension point. A project with Loom installed skips
-// this: the regenerated graph registers the module on the composed mux.
-func (p *planner) planModuleRoute(moduleTemplate *template.ModuleTemplate, vars template.Vars, capability string) error {
-	content, err := moduleTemplate.ReadRoute()
-	if err != nil {
-		return err
+	if p.present["loom"] {
+		p.result.GenerateLoom = true
+		p.result.DIPackage = "internal/di"
 	}
-	path := string(template.Render([]byte(moduleTemplate.Route.Path), vars))
-	if err := p.planNewFile(path, capability, template.Render(content, vars)); err != nil {
-		return err
-	}
-
-	const httpPath = "internal/httpserver/http.go"
-	original, managed, err := currentContent(p.req.Dir, httpPath, p.planned, p.manifest)
-	if err != nil {
-		return err
-	}
-	if !managed {
-		return &project.ConflictError{Path: httpPath, Reason: "httpserver composition is not managed by weld"}
-	}
-	snippet, err := moduleTemplate.ReadRouteSnippet()
-	if err != nil {
-		return err
-	}
-	updated, already, err := project.PatchMarker(original, "routes", capability, template.Render(snippet, vars))
-	if err != nil {
-		return &project.ConflictError{Path: httpPath, Reason: err.Error()}
-	}
-	if already {
-		return nil
-	}
-	p.planned[httpPath] = updated
-	p.upsert(project.Operation{Path: httpPath, Content: updated, Overwrite: true})
-	p.manifest.SetFile(httpPath, capability, updated)
 	return nil
 }
 

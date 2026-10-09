@@ -188,11 +188,27 @@ func TestAddRedisInstallsConfigOnly(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "internal", "redisclient", "redisclient.go")); err != nil {
 		t.Fatalf("add redis did not write the client: %v", err)
 	}
-	// redis is independent of the HTTP and database capabilities.
-	for _, path := range []string{"internal/httpserver", "internal/api", "internal/data", "internal/di", "internal/web"} {
+	// redis is independent of the HTTP and database capabilities, but installing
+	// it also installs loom (and config), just without the HTTP surface: the
+	// dependency graph is CLI-only.
+	for _, path := range []string{"internal/httpserver", "internal/api", "internal/data", "internal/web"} {
 		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
 			t.Errorf("add redis created %s", path)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "di", "di.go")); err != nil {
+		t.Fatalf("add redis did not install the CLI-only Loom graph: %v", err)
+	}
+	diRaw, err := os.ReadFile(filepath.Join(dir, "internal", "di", "di.go"))
+	if err != nil {
+		t.Fatalf("read di.go: %v", err)
+	}
+	di := string(diRaw)
+	if !strings.Contains(di, "var commonModule = loom.Module(") {
+		t.Errorf("the CLI-only graph has no commonModule:\n%s", di)
+	}
+	if strings.Contains(di, "internal/httpserver") || strings.Contains(di, "NewServer") {
+		t.Errorf("the CLI-only graph pulls in the HTTP server:\n%s", di)
 	}
 
 	// Repeating add is a no-op that still succeeds.

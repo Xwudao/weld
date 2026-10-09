@@ -293,17 +293,30 @@ func Add(req Request, name string) (*Result, error) {
 		return nil, fmt.Errorf("capability %q is not an additive capability", name)
 	}
 
-	order, err := installOrder(req.Catalog, manifest, requested)
+	order, err := installOrder(req.Catalog, manifest, requested, map[string]bool{})
 	if err != nil {
 		return nil, err
+	}
+	// Every capability except the bare base CLI is developed on Loom: adding
+	// anything plans Loom (and the config it requires) unless it is already
+	// installed, so a project is always either the base CLI or a Loom project.
+	// http and the capabilities that require it pull Loom through the dependency
+	// graph; this covers config, the one leaf Loom itself requires.
+	if !manifest.HasCapability("loom") && !containsCapability(order, "loom") {
+		loomCapability, err := req.Catalog.Get("loom")
+		if err != nil {
+			return nil, err
+		}
+		loomOrder, err := installOrder(req.Catalog, manifest, loomCapability, selected(order))
+		if err != nil {
+			return nil, err
+		}
+		order = append(order, loomOrder...)
 	}
 	result := &Result{Dir: req.Dir, Capability: requested}
 	if len(order) == 0 {
 		result.Notes = alreadyInstalledNotes(req.Dir, manifest, requested)
 		return result, nil
-	}
-	if err := checkCLICompatibility(req.Dir, order, false); err != nil {
-		return nil, err
 	}
 	for _, capability := range order {
 		if capability.Name != requested.Name {
@@ -323,45 +336,38 @@ func Add(req Request, name string) (*Result, error) {
 	return result, nil
 }
 
-// checkCLICompatibility prevents installing a Cobra-based command into a
-// project scaffolded with the former standard-library command registry. A mixed
-// command tree would be written successfully but fail to compile; fail during
-// planning instead, before changing any project files.
-//
-// needsCommand marks a plan that writes a root command group directly, which
-// requires the same Cobra seam even when no capability in order does.
-func checkCLICompatibility(root string, order []*template.Capability, needsCommand bool) error {
-	needsCobra := needsCommand
+// containsCapability reports whether order already includes name.
+func containsCapability(order []*template.Capability, name string) bool {
 	for _, capability := range order {
-		if capability.Name == "http" || capability.Name == "loom" {
-			needsCobra = true
-			break
+		if capability.Name == name {
+			return true
 		}
 	}
-	if !needsCobra {
-		return nil
+	return false
+}
+
+// selected returns the set of capability names in order, so a later installOrder
+// call does not plan one twice.
+func selected(order []*template.Capability) map[string]bool {
+	names := make(map[string]bool, len(order))
+	for _, capability := range order {
+		names[capability.Name] = true
 	}
-	const appPath = "internal/app/app.go"
-	content, err := os.ReadFile(filepath.Join(root, appPath))
-	if err != nil {
-		return err
-	}
-	if !bytes.Contains(content, []byte("func NewRootCommand() *cobra.Command")) {
-		return &project.ConflictError{Path: appPath, Reason: "uses the earlier CLI; migrate the generated app to Cobra before installing http, loom or a command"}
-	}
-	return nil
+	return names
 }
 
 // installOrder returns the capabilities to install for requested, dependencies
-// first. A capability already recorded in the manifest, or reached twice, is
-// skipped. requested is appended last so a dependency install never obscures
-// it.
-func installOrder(catalog *template.Catalog, manifest *project.Manifest, requested *template.Capability) ([]*template.Capability, error) {
+// first. A capability already recorded in the manifest, already selected by an
+// earlier root in this plan, or reached twice is skipped. selected is shared
+// across the roots of one plan so a capability that satisfies two of them is
+// planned once. requested is appended last so a dependency install never
+// obscures it.
+func installOrder(catalog *template.Catalog, manifest *project.Manifest, requested *template.Capability, selected map[string]bool) ([]*template.Capability, error) {
 	var order []*template.Capability
 	visited := map[string]bool{}
 	var visit func(capability *template.Capability) error
 	visit = func(capability *template.Capability) error {
-		if manifest.HasCapability(capability.Name) || visited[capability.Name] {
+		if manifest.HasCapability(capability.Name) || selected[capability.Name] || visited[capability.Name] {
 			return nil
 		}
 		visited[capability.Name] = true
@@ -375,6 +381,7 @@ func installOrder(catalog *template.Catalog, manifest *project.Manifest, request
 			}
 		}
 		order = append(order, capability)
+		selected[capability.Name] = true
 		return nil
 	}
 	if err := visit(requested); err != nil {

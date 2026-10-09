@@ -200,7 +200,7 @@ func TestAddWebInstallsHTTPDependency(t *testing.T) {
 	baseApp := readFile(t, filepath.Join(dir, "internal/app/app.go"))
 	result := add(t, dir, "web")
 
-	if got, want := strings.Join(result.Installed, ","), "config,http,web"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http,web"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
@@ -222,29 +222,26 @@ func TestAddWebInstallsHTTPDependency(t *testing.T) {
 		"internal/web/assets.go",
 		"internal/web/web_test.go",
 		"internal/web/dist/.gitkeep",
-		"internal/httpserver/web_route.go",
-		// http capability, installed as a dependency
+		// http capability, installed as a dependency, and its Loom graph
 		"internal/httpserver/http.go",
 		"internal/httpserver/server.go",
 		"internal/httpserver/http_test.go",
 		"internal/app/serve.go",
 		"internal/app/serve_test.go",
+		"internal/di/di.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
 	}
 
-	// The SPA route is wired through the httpserver extension point.
-	httpGo := readFile(t, filepath.Join(dir, "internal/httpserver/http.go"))
-	if !strings.Contains(httpGo, "routes = append(routes, installWebRoute)") {
-		t.Errorf("routes extension point not patched:\n%s", httpGo)
+	// The SPA is served through the Loom server graph, not a route file.
+	if _, err := os.Stat(filepath.Join(dir, "internal", "httpserver", "web_route.go")); !os.IsNotExist(err) {
+		t.Error("the web capability wrote the retired non-Loom route seam")
 	}
-	if !strings.Contains(httpGo, "weld:web:installed") {
-		t.Errorf("web sentinel missing:\n%s", httpGo)
-	}
-	if strings.Count(httpGo, "weld:routes:begin") != 1 {
-		t.Errorf("routes region duplicated:\n%s", httpGo)
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	if !strings.Contains(di, "web.Handler()") {
+		t.Errorf("the Loom server graph does not mount the SPA:\n%s", di)
 	}
 
 	// The base CLI itself is untouched: the capability adds files, it does not
@@ -277,7 +274,7 @@ func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "http")
-	if got, want := strings.Join(result.Installed, ","), "config,http"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "internal/httpserver/http.go")); err != nil {
@@ -289,9 +286,11 @@ func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "internal/web")); !os.IsNotExist(err) {
 		t.Fatal("add http created the web capability")
 	}
-	// With only http installed the serve command exists but serves nothing.
-	if httpGo := readFile(t, filepath.Join(dir, "internal/httpserver/http.go")); !strings.Contains(httpGo, "weld:routes:begin") {
-		t.Fatalf("routes region missing:\n%s", httpGo)
+	// With only http installed the Loom server graph exists and serves nothing
+	// beyond the middleware chain.
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	if !strings.Contains(di, "loom.Graph[*App](") || !strings.Contains(di, "func newMux(") {
+		t.Fatalf("the Loom server graph is missing:\n%s", di)
 	}
 
 	if !buildAndTestGeneratedProject(t, dir) {
@@ -458,44 +457,32 @@ func TestAddWebDoesNotTouchUnrelatedFiles(t *testing.T) {
 	}
 }
 
-// goValidateDir returns the sibling go-validate working copy, or "" when it is
-// not checked out.
-//
-// Generated API projects depend on go-validate's Spec/Constraint API, which is
-// not published yet (the latest tag is v0.1.1). Local integration tests point a
-// test-only replace at the working copy; a real release must publish and pin
-// the new version first, and the integration tests below skip visibly until
-// then.
+// goValidateDir uses the published v0.2.0 dependency by default. A local
+// checkout is used only when explicitly requested for testing a development
+// version; its replacement is confined to the generated test project.
 func goValidateDir(t *testing.T) string {
 	t.Helper()
-	if dir := os.Getenv("WELD_GO_VALIDATE_DIR"); dir != "" {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		return ""
+	dir := os.Getenv("WELD_GO_VALIDATE_DIR")
+	if dir == "" {
+		return "published:v0.2.0"
 	}
-	dir, err := os.Getwd()
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		t.Fatalf("WELD_GO_VALIDATE_DIR does not contain go.mod: %v", err)
+	}
+	absolute, err := filepath.Abs(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for {
-		candidate := filepath.Join(dir, "go-validate")
-		if _, err := os.Stat(filepath.Join(candidate, "go.mod")); err == nil {
-			return candidate
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
+	return absolute
 }
 
-// useLocalGoValidate appends a test-only replace to a generated go.mod. It is
-// never written by weld into a scaffolded project; it exists so a local test
-// can compile against the unpublished go-validate working copy.
+// useLocalGoValidate adds a test-only replace only for an explicit checkout;
+// the default exercises the published dependency without sibling repositories.
 func useLocalGoValidate(t *testing.T, dir, goValidateDir string) {
 	t.Helper()
+	if goValidateDir == "published:v0.2.0" {
+		return
+	}
 	path := filepath.Join(dir, "go.mod")
 	content := readFile(t, path)
 	content += "\nreplace github.com/Xwudao/go-validate => " + goValidateDir + "\n"
@@ -578,7 +565,7 @@ func TestAddAPIInstallsHTTPDependency(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "api")
-	if got, want := strings.Join(result.Installed, ","), "config,http,api"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http,api"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
@@ -588,32 +575,29 @@ func TestAddAPIInstallsHTTPDependency(t *testing.T) {
 		"internal/api/openapi.go",
 		"internal/api/api_test.go",
 		"internal/api/openapi_test.go",
-		"internal/httpserver/api_route.go",
-		"internal/httpserver/api_test.go",
 		"internal/httpserver/http.go",
+		"internal/di/di.go",
+		"internal/di/api_provider.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
 	}
-	// api requires http but never web, db or loom.
+	// api requires http but never web or db.
 	for _, path := range []string{"internal/web", "web"} {
 		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
 			t.Errorf("add api created %s", path)
 		}
 	}
 
-	// The API route is wired through the httpserver extension point and the
+	// The API is served through the Loom server graph, not a route file, and the
 	// dependency region of go.mod is patched.
-	httpGo := readFile(t, filepath.Join(dir, "internal/httpserver/http.go"))
-	if !strings.Contains(httpGo, "routes = append(routes, installAPIRoute)") {
-		t.Errorf("routes extension point not patched:\n%s", httpGo)
+	if _, err := os.Stat(filepath.Join(dir, "internal", "httpserver", "api_route.go")); !os.IsNotExist(err) {
+		t.Error("the api capability wrote the retired non-Loom route seam")
 	}
-	if !strings.Contains(httpGo, "weld:api:installed") {
-		t.Errorf("api sentinel missing:\n%s", httpGo)
-	}
-	if strings.Count(httpGo, "weld:routes:begin") != 1 {
-		t.Errorf("routes region duplicated:\n%s", httpGo)
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	if !strings.Contains(di, "api.Register(mux, service)") {
+		t.Errorf("the Loom server graph does not mount the API:\n%s", di)
 	}
 	goMod := readFile(t, filepath.Join(dir, "go.mod"))
 	if !strings.Contains(goMod, "require github.com/Xwudao/go-validate") {
@@ -689,13 +673,10 @@ func TestAddAPIRejectsMissingExtensionPoint(t *testing.T) {
 }
 
 // TestAddAPIGeneratedProjectBuildsAndTests compiles and tests a real generated
-// API project with the go-validate working copy and the kin-openapi test
-// dependency. It skips visibly when either is unavailable.
+// API project with the published go-validate dependency and the kin-openapi
+// test dependency. It skips only when dependencies cannot be resolved.
 func TestAddAPIGeneratedProjectBuildsAndTests(t *testing.T) {
 	goValidate := goValidateDir(t)
-	if goValidate == "" {
-		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR). Publishing and pinning go-validate is required before release.")
-	}
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "api")
@@ -711,13 +692,10 @@ func TestAddAPIGeneratedProjectBuildsAndTests(t *testing.T) {
 }
 
 // TestAddAPIAndWebInEitherOrder proves the two capabilities compose on one
-// server in both orders: each requires http, both patch the one routes region,
-// and the generated project compiles and tests either way.
+// server in both orders: each requires http, both are mounted on the one Loom
+// server graph, and the generated project compiles and tests either way.
 func TestAddAPIAndWebInEitherOrder(t *testing.T) {
 	goValidate := goValidateDir(t)
-	if goValidate == "" {
-		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR). Publishing and pinning go-validate is required before release.")
-	}
 	orders := []struct {
 		name          string
 		first, second string
@@ -732,17 +710,14 @@ func TestAddAPIAndWebInEitherOrder(t *testing.T) {
 			add(t, dir, order.first)
 			add(t, dir, order.second)
 
-			httpGo := readFile(t, filepath.Join(dir, "internal/httpserver/http.go"))
+			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
 			for _, want := range []string{
-				"routes = append(routes, installWebRoute)",
-				"routes = append(routes, installAPIRoute)",
+				"web.Handler()",
+				"api.Register(mux, service)",
 			} {
-				if !strings.Contains(httpGo, want) {
-					t.Errorf("%q missing from the routes region:\n%s", want, httpGo)
+				if !strings.Contains(di, want) {
+					t.Errorf("%q missing from the Loom server graph:\n%s", want, di)
 				}
-			}
-			if strings.Count(httpGo, "weld:routes:begin") != 1 || strings.Count(httpGo, "weld:routes:end") != 1 {
-				t.Fatalf("routes region duplicated:\n%s", httpGo)
 			}
 			// One serve command serves both: http owns it and neither web nor api
 			// adds another.
@@ -773,7 +748,7 @@ func TestAddDBInstallsAlone(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "db")
-	if got, want := strings.Join(result.Installed, ","), "config,db"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,db"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
@@ -1132,15 +1107,10 @@ func TestAddDBComposesWithWeb(t *testing.T) {
 }
 
 // TestAddDBComposesWithAPI proves db and api compose in either order and that
-// the JSON API stays independent of the sqlc rows. api needs the unpublished
-// go-validate Spec API, so it uses the same test-only local replace as the
-// other api integration tests and skips visibly when that working copy is
-// absent.
+// the JSON API stays independent of the sqlc rows. It uses the published
+// go-validate version unless a local checkout is explicitly requested.
 func TestAddDBComposesWithAPI(t *testing.T) {
 	goValidate := goValidateDir(t)
-	if goValidate == "" {
-		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR). Publishing and pinning go-validate is required before release.")
-	}
 	orders := []struct {
 		name          string
 		first, second string
@@ -1266,60 +1236,57 @@ func runLoomTool(t *testing.T, dir string, args ...string) (string, bool) {
 	return string(out), err == nil
 }
 
-func TestAddLoomInstallsHTTPAndRendersGraph(t *testing.T) {
+func TestAddLoomInstallsCLIOnlyGraph(t *testing.T) {
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
 
 	result := add(t, dir, "loom")
-	if got, want := strings.Join(result.Installed, ","), "config,http,loom"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
 		"internal/di/di.go",
-		"internal/di/loom_gen.go",
 		"internal/di/di_test.go",
-		"internal/app/serve_loom.go",
+		"internal/di/README.md",
 		"tools/loom/go.mod",
 		"tools/loom/go.sum",
+		"internal/config/config.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
 	}
-	// The initializer is generator output, not hand-written.
-	gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
-	if !strings.Contains(gen, "Code generated by loom. DO NOT EDIT.") {
-		t.Errorf("loom_gen.go is not generator output:\n%s", gen)
-	}
-	if !strings.Contains(gen, "func InitApp(ctx context.Context)") {
-		t.Errorf("loom_gen.go has no InitApp:\n%s", gen)
-	}
-	// Exactly one serve command remains, now driven by the graph, and the bare
-	// root action runs the same graph lifecycle.
-	serve := readFile(t, filepath.Join(dir, "internal/app/serve.go"))
-	if strings.Count(serve, "RegisterCommand(") != 1 || !strings.Contains(serve, "RegisterCommand(newServeLoomCommand)") {
-		t.Errorf("serve command is not replaced by the Loom registration:\n%s", serve)
-	}
-	if strings.Contains(serve, "RegisterCommand(newServeCommand)") {
-		t.Errorf("the plain serve registration survived the Loom replace:\n%s", serve)
-	}
-	if !strings.Contains(serve, "SetDefaultRun(runServeLoom)") {
-		t.Errorf("a bare invocation is not wired to the graph:\n%s", serve)
-	}
-	if !strings.Contains(serve, "ConfigureRoot(registerServeFlags)") {
-		t.Errorf("the Loom serve registration does not share the root flags:\n%s", serve)
-	}
-	// opt-in Go floor is raised and Loom is a direct dependency.
-	goMod := readFile(t, filepath.Join(dir, "go.mod"))
-	if !strings.Contains(goMod, "go 1.25.0") || !strings.Contains(goMod, "require github.com/Xwudao/loom v0.3.1") {
-		t.Errorf("go.mod is missing the Loom floor/dependency:\n%s", goMod)
-	}
-	// Loom pulls http only; it never pulls db, api or web.
-	for _, path := range []string{"internal/data", "internal/api", "internal/web"} {
+	// Loom alone is a CLI-only graph: no HTTP server, no serve command, no
+	// generated initializer (there is no loom.Graph declaration yet).
+	for _, path := range []string{
+		"internal/httpserver",
+		"internal/app/serve.go",
+		"internal/app/serve_loom.go",
+		"internal/di/loom_gen.go",
+		"internal/data",
+		"internal/api",
+		"internal/web",
+	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
 			t.Errorf("add loom created %s", path)
 		}
+	}
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	for _, want := range []string{"var commonModule = loom.Module(", "func NewConfigLoader()", "func NewConfig("} {
+		if !strings.Contains(di, want) {
+			t.Errorf("di.go is missing %q:\n%s", want, di)
+		}
+	}
+	for _, forbidden := range []string{"NewServer", "internal/httpserver", "func InitApp", "type App struct"} {
+		if strings.Contains(di, forbidden) {
+			t.Errorf("the CLI-only graph references %q:\n%s", forbidden, di)
+		}
+	}
+	// The opt-in Go floor is raised and Loom is a direct dependency.
+	goMod := readFile(t, filepath.Join(dir, "go.mod"))
+	if !strings.Contains(goMod, "go 1.25.0") || !strings.Contains(goMod, "require github.com/Xwudao/loom v0.3.1") {
+		t.Errorf("go.mod is missing the Loom floor/dependency:\n%s", goMod)
 	}
 	manifest := mustLoad(t, dir)
 	if len(manifest.Drift(dir)) != 0 {
@@ -1338,7 +1305,7 @@ func TestAddLoomIsIdempotent(t *testing.T) {
 	add(t, dir, "loom")
 
 	before := map[string]string{}
-	for _, path := range []string{"internal/di/di.go", "internal/di/loom_gen.go", "go.mod", project.ManifestName} {
+	for _, path := range []string{"internal/di/di.go", "go.mod", project.ManifestName} {
 		before[path] = readFile(t, filepath.Join(dir, path))
 	}
 	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "loom")
@@ -1361,11 +1328,10 @@ func TestAddLoomIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestAddLoomGraphFollowsInstalledCapabilities proves the graph is regenerated
-// for the installed set in either order, and that installing db only declares
-// the pool and repository as available bindings: the generated initializer must
-// not construct them, because the default composition never depends on
-// data.Repository.
+// TestAddLoomGraphFollowsInstalledCapabilities proves the CLI-only graph is
+// regenerated for the installed set in either order, and that installing db only
+// declares the pool and repository as available bindings: the CLI-only graph has
+// no server root and no generated initializer, so nothing constructs them.
 func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 	loomToolAvailable(t)
 	orders := []struct {
@@ -1388,11 +1354,14 @@ func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 					t.Errorf("di.go does not declare the available binding %q:\n%s", want, di)
 				}
 			}
-			gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
-			for _, forbidden := range []string{"NewPool", "NewRepository", "data.Repository"} {
-				if strings.Contains(gen, forbidden) {
-					t.Errorf("loom_gen.go constructs the unused %s; the default composition must not wire db:\n%s", forbidden, gen)
+			// A CLI-only project has no server graph and so no generated initializer.
+			for _, forbidden := range []string{"func InitApp", "NewServer", "internal/httpserver"} {
+				if strings.Contains(di, forbidden) {
+					t.Errorf("the CLI-only graph references %q:\n%s", forbidden, di)
 				}
+			}
+			if _, err := os.Stat(filepath.Join(dir, "internal", "di", "loom_gen.go")); !os.IsNotExist(err) {
+				t.Errorf("a CLI-only project generated an initializer: %v", err)
 			}
 			manifest := mustLoad(t, dir)
 			if len(manifest.Drift(dir)) != 0 {
@@ -1407,15 +1376,12 @@ func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 }
 
 // TestAPIDBMatrixServesInMemoryWithoutDatabase proves api+db has the same
-// development-demo semantics with and without Loom: serve starts with no
+// development-demo semantics with Loom: serve starts with no
 // database credentials and no reachable database, answers the JSON API over
 // HTTP, keeps items in memory, and loses them on restart. Installing db must not
 // switch the API to PostgreSQL, require a credential, or read the dsn.
 func TestAPIDBMatrixServesInMemoryWithoutDatabase(t *testing.T) {
 	goValidate := goValidateDir(t)
-	if goValidate == "" {
-		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR). Publishing and pinning go-validate is required before release.")
-	}
 	cases := []struct {
 		name      string
 		caps      []string
@@ -1622,14 +1588,11 @@ func getRaw(t *testing.T, url string) (int, []byte) {
 }
 
 // TestGeneratedProjectRaceAndVet runs the generated project's tests under the
-// race detector and vets it for the relevant API/db combinations, with and
-// without Loom, so the in-memory API and its HTTP composition are race-clean
+// race detector and vets it for the relevant API/db combinations, all using
+// Loom, so the in-memory API and its HTTP composition are race-clean
 // without PostgreSQL.
 func TestGeneratedProjectRaceAndVet(t *testing.T) {
 	goValidate := goValidateDir(t)
-	if goValidate == "" {
-		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
-	}
 	cases := []struct {
 		name      string
 		caps      []string
@@ -1666,7 +1629,9 @@ func TestAddLoomGenerationIsReproducible(t *testing.T) {
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
-	add(t, dir, "loom")
+	// http installs loom and its server graph, so there is a graph declaration to
+	// regenerate.
+	add(t, dir, "http")
 
 	out, ok := runLoomTool(t, dir, "generate", "-dry-run", "./internal/di")
 	if !ok {
@@ -1677,19 +1642,55 @@ func TestAddLoomGenerationIsReproducible(t *testing.T) {
 	}
 }
 
-// TestAddLoomIsNotAutoInstalled guards that no other capability pulls Loom in.
-func TestAddLoomIsNotAutoInstalled(t *testing.T) {
+// TestLoomInstalledByEveryAdd guards the architecture: every capability except
+// the bare base CLI requires Loom, directly or through http, and Loom requires
+// config. config is the one leaf Loom itself requires, so weld plans Loom for an
+// explicit `weld add config` too.
+func TestLoomInstalledByEveryAdd(t *testing.T) {
 	catalog := newCatalog()
-	for _, name := range []string{"base", "http", "web", "api", "db", "redis"} {
+	for _, name := range []string{"http", "db", "redis", "mail", "storage"} {
 		capability, err := catalog.Get(name)
 		if err != nil {
 			t.Fatalf("Get %s: %v", name, err)
 		}
+		var requiresLoom bool
 		for _, required := range capability.Requires {
 			if required == "loom" {
-				t.Errorf("capability %s requires loom", name)
+				requiresLoom = true
 			}
 		}
+		if !requiresLoom {
+			t.Errorf("capability %s does not require loom", name)
+		}
+	}
+	for _, name := range []string{"api", "web", "cron"} {
+		capability, err := catalog.Get(name)
+		if err != nil {
+			t.Fatalf("Get %s: %v", name, err)
+		}
+		var requiresHTTP bool
+		for _, required := range capability.Requires {
+			if required == "http" {
+				requiresHTTP = true
+			}
+		}
+		if !requiresHTTP {
+			t.Errorf("capability %s does not require http (which requires loom)", name)
+		}
+	}
+	loom, err := catalog.Get("loom")
+	if err != nil {
+		t.Fatalf("Get loom: %v", err)
+	}
+	if len(loom.Requires) != 1 || loom.Requires[0] != "config" {
+		t.Errorf("loom requires %v, want [config]", loom.Requires)
+	}
+	config, err := catalog.Get("config")
+	if err != nil {
+		t.Fatalf("Get config: %v", err)
+	}
+	if len(config.Requires) != 1 || config.Requires[0] != "base" {
+		t.Errorf("config requires %v, want [base]", config.Requires)
 	}
 }
 
@@ -1705,16 +1706,12 @@ func mustLoad(t *testing.T, dir string) *project.Manifest {
 // TestAddLoomKeepsAPIInMemory proves installing api+db+loom leaves the API on
 // the in-memory development service, in either install order: the graph declares
 // the pool and repository as available bindings but does not bind them to
-// api.Service, so the generated initializer constructs neither. api needs the
-// unpublished go-validate Spec API, so it uses the same test-only local replace
-// as the other api integration tests and skips visibly when that working copy is
-// absent. The generated di_test.go serves the API over a real socket with no
+// api.Service, so the generated initializer constructs neither. The API uses
+// the published go-validate Spec API by default. The generated di_test.go
+// serves the API over a real socket with no
 // PostgreSQL.
 func TestAddLoomKeepsAPIInMemory(t *testing.T) {
 	goValidate := goValidateDir(t)
-	if goValidate == "" {
-		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR). Publishing and pinning go-validate is required before release.")
-	}
 	loomToolAvailable(t)
 	orders := []struct {
 		name string
@@ -1767,50 +1764,45 @@ func TestAddLoomKeepsAPIInMemory(t *testing.T) {
 	}
 }
 
-// TestAPIProviderSeamGuardsInstallOnce proves the conditional install that makes
-// api_provider.go durable: each declaration requires the other capability, so it
-// fires only for the capability installed second (api then loom, or loom then
-// api) and never for a project that has only one of them. It exercises the guard
-// directly, so it needs no generator or network.
+// TestAPIProviderSeamGuardsInstallOnce proves the api capability owns the stable
+// api_provider.go seam, guarded on loom. Because api requires http (which
+// requires loom), loom is always present when api installs, so the guard always
+// applies and loom itself no longer declares the file.
 func TestAPIProviderSeamGuardsInstallOnce(t *testing.T) {
 	const path = "internal/di/api_provider.go"
-	fileEntry := func(capability string) template.File {
-		t.Helper()
-		got, err := newCatalog().Get(capability)
-		if err != nil {
-			t.Fatalf("Get %s: %v", capability, err)
-		}
-		for _, file := range got.Files {
-			if file.Path == path {
-				return file
-			}
-		}
-		t.Fatalf("%s does not declare %s", capability, path)
-		return template.File{}
-	}
-	apiFile := fileEntry("api")
-	loomFile := fileEntry("loom")
+	catalog := newCatalog()
 
-	// The capability installed second writes the file: api's guard needs loom
-	// present, loom's needs api present.
+	api, err := catalog.Get("api")
+	if err != nil {
+		t.Fatalf("Get api: %v", err)
+	}
+	var apiFile *template.File
+	for i := range api.Files {
+		if api.Files[i].Path == path {
+			apiFile = &api.Files[i]
+		}
+	}
+	if apiFile == nil {
+		t.Fatalf("api does not declare %s", path)
+	}
+	if len(apiFile.When) != 1 || apiFile.When[0] != "loom" {
+		t.Errorf("api %s is not guarded by when: [loom]: %+v", path, apiFile)
+	}
 	if !entryApplies(map[string]bool{"base": true, "loom": true}, apiFile.When, apiFile.WhenAbsent) {
-		t.Error("api does not write api_provider.go when loom is already installed")
+		t.Error("api does not write api_provider.go when loom is installed")
 	}
-	if !entryApplies(map[string]bool{"base": true, "api": true}, loomFile.When, loomFile.WhenAbsent) {
-		t.Error("loom does not write api_provider.go when api is already installed")
-	}
-	// The capability installed first stays quiet because the other is absent, so
-	// a project with only one of api/loom never gets the file.
 	if entryApplies(map[string]bool{"base": true}, apiFile.When, apiFile.WhenAbsent) {
 		t.Error("api writes api_provider.go without loom")
 	}
-	if entryApplies(map[string]bool{"base": true}, loomFile.When, loomFile.WhenAbsent) {
-		t.Error("loom writes api_provider.go without api")
+
+	loom, err := catalog.Get("loom")
+	if err != nil {
+		t.Fatalf("Get loom: %v", err)
 	}
-	// A single plan installing both processes api before loom is marked present,
-	// so only the later declaration fires and the engine never plans it twice.
-	if entryApplies(map[string]bool{"base": true, "api": true}, apiFile.When, apiFile.WhenAbsent) {
-		t.Error("api writes api_provider.go before loom is present in a combined plan")
+	for _, file := range loom.Files {
+		if file.Path == path {
+			t.Errorf("loom still declares %s; the provider seam belongs to the api capability", path)
+		}
 	}
 }
 
@@ -1821,9 +1813,6 @@ func TestAPIProviderSeamGuardsInstallOnce(t *testing.T) {
 // project still builds, vets and tests without PostgreSQL.
 func TestAPIProviderSeamSurvivesLaterAdd(t *testing.T) {
 	goValidate := goValidateDir(t)
-	if goValidate == "" {
-		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
-	}
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -1892,7 +1881,7 @@ func TestAddHTTPInstallsSharedConfig(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "http")
-	if got, want := strings.Join(result.Installed, ","), "config,http"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{"internal/config/config.go", "internal/config/config_test.go", "config.yml", "config.example.yml"} {
@@ -2182,38 +2171,6 @@ func TestAddDoesNotBootstrapUnmanagedConfig(t *testing.T) {
 
 // TestOldCLIRejectsNewServeBeforeWriting prevents an existing stdlib-CLI
 // project from receiving a Cobra serve file that cannot compile against it.
-func TestOldCLIRejectsNewServeBeforeWriting(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		add  func(string) error
-	}{
-		{"http", func(dir string) error { _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "http"); return err }},
-		{"module", func(dir string) error {
-			_, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "orders")
-			return err
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := create(t, t.TempDir())
-			appPath := filepath.Join(dir, "internal", "app", "app.go")
-			if err := os.WriteFile(appPath, []byte("package app\n// earlier CLI\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			before := readFile(t, filepath.Join(dir, project.ManifestName))
-			err := tc.add(dir)
-			if err == nil || !strings.Contains(err.Error(), "migrate the generated app to Cobra") {
-				t.Fatalf("add with earlier CLI error = %v", err)
-			}
-			if after := readFile(t, filepath.Join(dir, project.ManifestName)); before != after {
-				t.Fatal("planning changed the manifest")
-			}
-			if _, statErr := os.Stat(filepath.Join(dir, "internal", "httpserver")); !os.IsNotExist(statErr) {
-				t.Fatalf("planning wrote HTTP files: %v", statErr)
-			}
-		})
-	}
-}
-
 // --- logging milestone -----------------------------------------------------
 
 // assertInjectedLogger fails when a generated project does not ship the base
@@ -2411,9 +2368,6 @@ func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.needsAPI && goValidate == "" {
-				t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
-			}
 			if tc.needsLoom {
 				loomToolAvailable(t)
 			}
@@ -2444,7 +2398,7 @@ func TestAddRedisInstallsAlone(t *testing.T) {
 	dir := create(t, root)
 
 	result := add(t, dir, "redis")
-	if got, want := strings.Join(result.Installed, ","), "config,redis"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,redis"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
@@ -2454,6 +2408,8 @@ func TestAddRedisInstallsAlone(t *testing.T) {
 		"internal/redisclient/redisclient.go",
 		"internal/redisclient/redisclient_test.go",
 		"internal/redisclient/README.md",
+		"internal/di/di.go",
+		"internal/di/redis_provider.go",
 		"config.yml",
 		"config.example.yml",
 	} {
@@ -2461,8 +2417,8 @@ func TestAddRedisInstallsAlone(t *testing.T) {
 			t.Errorf("expected %s: %v", path, err)
 		}
 	}
-	// redis requires config only: it never pulls http, db, api or loom.
-	for _, path := range []string{"internal/httpserver", "internal/data", "internal/api", "internal/di", "internal/web"} {
+	// redis never pulls http, db, api or web; loom is a CLI-only graph here.
+	for _, path := range []string{"internal/httpserver", "internal/data", "internal/api", "internal/web"} {
 		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
 			t.Errorf("add redis created %s", path)
 		}
@@ -2718,8 +2674,8 @@ func TestAddRedisRejectsConfigWithoutExtensionPoints(t *testing.T) {
 }
 
 // TestRedisGeneratedProjectRaceAndVet runs the generated project's tests under
-// the race detector and vets it for redis with and without Loom, proving the
-// idle client and the composed graph are race-clean with no Redis server.
+// the race detector and vets the Redis combinations, all using Loom, proving
+// the idle client and the composed graph are race-clean with no Redis server.
 func TestRedisGeneratedProjectRaceAndVet(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -2760,8 +2716,8 @@ func TestAddRedisLoomPrunesUnconsumedClient(t *testing.T) {
 		name string
 		caps []string
 	}{
-		{"redis then loom", []string{"redis", "loom"}},
-		{"loom then redis", []string{"loom", "redis"}},
+		{"redis then http", []string{"redis", "http"}},
+		{"http then redis", []string{"http", "redis"}},
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
@@ -2828,14 +2784,10 @@ func TestAddRedisLoomProviderSeamIsStable(t *testing.T) {
 // end: after api+redis+loom a user edits the stable api_provider.go to consume
 // *redis.Client; a later `weld add web` regenerates the graph and loom_gen.go so
 // the initializer constructs NewRedisClient, while redis_provider.go and the
-// edited api_provider.go stay byte for byte intact. api needs the unpublished
-// go-validate Spec API, so it uses the same test-only local replace as the other
-// api integration tests and skips visibly when that working copy is absent.
+// edited api_provider.go stay byte for byte intact. The API uses the published
+// go-validate Spec API by default.
 func TestAddRedisLoomConsumesWhenProviderAsks(t *testing.T) {
 	goValidate := goValidateDir(t)
-	if goValidate == "" {
-		t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
-	}
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -2887,44 +2839,45 @@ func NewAPIService(client *redis.Client) api.Service {
 	}
 }
 
-// TestRedisProviderSeamGuardsInstallOnce proves the conditional install that
-// makes redis_provider.go durable: each declaration requires the other
-// capability, so it fires only for the capability installed second (redis then
-// loom, or loom then redis) and never for a project that has only one of them.
-// It exercises the guard directly, so it needs no generator or network.
+// TestRedisProviderSeamGuardsInstallOnce proves the redis capability owns the
+// stable redis_provider.go seam, guarded on loom. Because redis requires loom,
+// loom is always present when redis installs, so the guard always applies and
+// loom itself no longer declares the file.
 func TestRedisProviderSeamGuardsInstallOnce(t *testing.T) {
 	const path = "internal/di/redis_provider.go"
-	fileEntry := func(capability string) template.File {
-		t.Helper()
-		got, err := newCatalog().Get(capability)
-		if err != nil {
-			t.Fatalf("Get %s: %v", capability, err)
-		}
-		for _, file := range got.Files {
-			if file.Path == path {
-				return file
-			}
-		}
-		t.Fatalf("%s does not declare %s", capability, path)
-		return template.File{}
-	}
-	redisFile := fileEntry("redis")
-	loomFile := fileEntry("loom")
+	catalog := newCatalog()
 
-	if !entryApplies(map[string]bool{"base": true, "loom": true}, redisFile.When, redisFile.WhenAbsent) {
-		t.Error("redis does not write redis_provider.go when loom is already installed")
+	redis, err := catalog.Get("redis")
+	if err != nil {
+		t.Fatalf("Get redis: %v", err)
 	}
-	if !entryApplies(map[string]bool{"base": true, "redis": true}, loomFile.When, loomFile.WhenAbsent) {
-		t.Error("loom does not write redis_provider.go when redis is already installed")
+	var redisFile *template.File
+	for i := range redis.Files {
+		if redis.Files[i].Path == path {
+			redisFile = &redis.Files[i]
+		}
+	}
+	if redisFile == nil {
+		t.Fatalf("redis does not declare %s", path)
+	}
+	if len(redisFile.When) != 1 || redisFile.When[0] != "loom" {
+		t.Errorf("redis %s is not guarded by when: [loom]: %+v", path, redisFile)
+	}
+	if !entryApplies(map[string]bool{"base": true, "loom": true}, redisFile.When, redisFile.WhenAbsent) {
+		t.Error("redis does not write redis_provider.go when loom is installed")
 	}
 	if entryApplies(map[string]bool{"base": true}, redisFile.When, redisFile.WhenAbsent) {
 		t.Error("redis writes redis_provider.go without loom")
 	}
-	if entryApplies(map[string]bool{"base": true}, loomFile.When, loomFile.WhenAbsent) {
-		t.Error("loom writes redis_provider.go without redis")
+
+	loom, err := catalog.Get("loom")
+	if err != nil {
+		t.Fatalf("Get loom: %v", err)
 	}
-	if entryApplies(map[string]bool{"base": true, "api": true}, redisFile.When, redisFile.WhenAbsent) {
-		t.Error("redis writes redis_provider.go before loom is present in a combined plan")
+	for _, file := range loom.Files {
+		if file.Path == path {
+			t.Errorf("loom still declares %s; the provider seam belongs to the redis capability", path)
+		}
 	}
 }
 
@@ -3027,28 +2980,31 @@ func waitForLog(t *testing.T, stderr *syncBuffer, substr string, timeout time.Du
 // install that needs no server: it writes the scheduler and its stable
 // registration file, attaches a runtime to the shared config seam, and creates
 // no serve command or HTTP package. It schedules nothing by itself.
-func TestAddCronInstallsLibraryWithoutHTTP(t *testing.T) {
+func TestAddCronInstallsHTTPAndLoom(t *testing.T) {
 	root := t.TempDir()
 	dir := create(t, root)
 
 	result := add(t, dir, "cron")
-	if got, want := strings.Join(result.Installed, ","), "config,cron"; got != want {
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http,cron"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
 		"internal/cron/cron.go",
 		"internal/cron/register.go",
 		"internal/config/cron.go",
-		"internal/app/cron.go",
-		"internal/app/cron_test.go",
+		"internal/di/cron_provider.go",
+		"internal/di/di.go",
+		"internal/app/serve.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
 	}
-	for _, absent := range []string{"internal/app/serve.go", "internal/httpserver", "internal/di", "internal/api", "internal/data"} {
+	// The scheduler follows serve through the Loom graph, never the retired
+	// runtime registry.
+	for _, absent := range []string{"internal/config/runtime.go", "internal/app/cron.go"} {
 		if _, err := os.Stat(filepath.Join(dir, absent)); !os.IsNotExist(err) {
-			t.Errorf("add cron created %s", absent)
+			t.Errorf("add cron created the retired %s", absent)
 		}
 	}
 
@@ -3060,12 +3016,18 @@ func TestAddCronInstallsLibraryWithoutHTTP(t *testing.T) {
 	if !strings.Contains(register, "return nil") {
 		t.Errorf("register.go schedules work by default:\n%s", register)
 	}
-	// The runtime follows the shared seam, so it starts with serve when http is
-	// added later and never with a short command.
-	appCron := readFile(t, filepath.Join(dir, "internal/app/cron.go"))
-	for _, want := range []string{"config.RegisterRuntime", "cron.New", "cron.Register", "scheduler.Start", "scheduler.Stop"} {
-		if !strings.Contains(appCron, want) {
-			t.Errorf("internal/app/cron.go is missing %q:\n%s", want, appCron)
+	// The server graph root consumes the scheduler, so it is constructed and its
+	// start/stop hooks run with the server.
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	for _, want := range []string{"loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
+		if !strings.Contains(di, want) {
+			t.Errorf("di.go is missing %q:\n%s", want, di)
+		}
+	}
+	provider := readFile(t, filepath.Join(dir, "internal/di/cron_provider.go"))
+	for _, want := range []string{"func NewScheduler", "cron.New", "cron.Register", "lc.Append"} {
+		if !strings.Contains(provider, want) {
+			t.Errorf("cron_provider.go is missing %q:\n%s", want, provider)
 		}
 	}
 
@@ -3206,40 +3168,45 @@ func TestAddCronLoomSchedulerRunsWithServe(t *testing.T) {
 	}
 }
 
-// TestCronProviderSeamGuardsInstallOnce proves the conditional install that makes
-// cron_provider.go durable: each declaration requires the other capability, so it
-// fires only for the capability installed second and never for a project with
-// only one of them.
+// TestCronProviderSeamGuardsInstallOnce proves the cron capability owns the
+// stable cron_provider.go seam, guarded on loom. Because cron requires http
+// (which requires loom), loom is always present when cron installs, so the guard
+// always applies and loom itself no longer declares the file.
 func TestCronProviderSeamGuardsInstallOnce(t *testing.T) {
 	const path = "internal/di/cron_provider.go"
-	fileEntry := func(capability string) template.File {
-		t.Helper()
-		got, err := newCatalog().Get(capability)
-		if err != nil {
-			t.Fatalf("Get %s: %v", capability, err)
-		}
-		for _, file := range got.Files {
-			if file.Path == path {
-				return file
-			}
-		}
-		t.Fatalf("%s does not declare %s", capability, path)
-		return template.File{}
-	}
-	cronFile := fileEntry("cron")
-	loomFile := fileEntry("loom")
+	catalog := newCatalog()
 
-	if !entryApplies(map[string]bool{"base": true, "loom": true}, cronFile.When, cronFile.WhenAbsent) {
-		t.Error("cron does not write cron_provider.go when loom is already installed")
+	cron, err := catalog.Get("cron")
+	if err != nil {
+		t.Fatalf("Get cron: %v", err)
 	}
-	if !entryApplies(map[string]bool{"base": true, "cron": true}, loomFile.When, loomFile.WhenAbsent) {
-		t.Error("loom does not write cron_provider.go when cron is already installed")
+	var cronFile *template.File
+	for i := range cron.Files {
+		if cron.Files[i].Path == path {
+			cronFile = &cron.Files[i]
+		}
+	}
+	if cronFile == nil {
+		t.Fatalf("cron does not declare %s", path)
+	}
+	if len(cronFile.When) != 1 || cronFile.When[0] != "loom" {
+		t.Errorf("cron %s is not guarded by when: [loom]: %+v", path, cronFile)
+	}
+	if !entryApplies(map[string]bool{"base": true, "loom": true}, cronFile.When, cronFile.WhenAbsent) {
+		t.Error("cron does not write cron_provider.go when loom is installed")
 	}
 	if entryApplies(map[string]bool{"base": true}, cronFile.When, cronFile.WhenAbsent) {
 		t.Error("cron writes cron_provider.go without loom")
 	}
-	if entryApplies(map[string]bool{"base": true}, loomFile.When, loomFile.WhenAbsent) {
-		t.Error("loom writes cron_provider.go without cron")
+
+	loom, err := catalog.Get("loom")
+	if err != nil {
+		t.Fatalf("Get loom: %v", err)
+	}
+	for _, file := range loom.Files {
+		if file.Path == path {
+			t.Errorf("loom still declares %s; the provider seam belongs to the cron capability", path)
+		}
 	}
 }
 
@@ -3311,8 +3278,8 @@ func TestAddMailStorageWithLoomBothOrders(t *testing.T) {
 			name string
 			caps []string
 		}{
-			{tc.capability + " then loom", []string{tc.capability, "loom"}},
-			{"loom then " + tc.capability, []string{"loom", tc.capability}},
+			{tc.capability + " then http", []string{tc.capability, "http"}},
+			{"http then " + tc.capability, []string{"http", tc.capability}},
 		}
 		for _, order := range orders {
 			t.Run(order.name, func(t *testing.T) {
@@ -3342,9 +3309,15 @@ func TestAddMailStorageWithLoomBothOrders(t *testing.T) {
 }
 
 // TestMailStorageProviderSeamsGuardInstallOnce proves the mail and storage
-// provider seams follow the same conditional-install contract as redis: each
-// declaration fires only for the capability installed second.
+// provider seams are owned by their capability and guarded on loom. Because both
+// require loom, the guard always applies and loom itself no longer declares the
+// files.
 func TestMailStorageProviderSeamsGuardInstallOnce(t *testing.T) {
+	catalog := newCatalog()
+	loom, err := catalog.Get("loom")
+	if err != nil {
+		t.Fatalf("Get loom: %v", err)
+	}
 	cases := []struct {
 		capability string
 		path       string
@@ -3354,34 +3327,32 @@ func TestMailStorageProviderSeamsGuardInstallOnce(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.capability, func(t *testing.T) {
-			fileEntry := func(capability string) template.File {
-				t.Helper()
-				got, err := newCatalog().Get(capability)
-				if err != nil {
-					t.Fatalf("Get %s: %v", capability, err)
-				}
-				for _, file := range got.Files {
-					if file.Path == tc.path {
-						return file
-					}
-				}
-				t.Fatalf("%s does not declare %s", capability, tc.path)
-				return template.File{}
+			capability, err := catalog.Get(tc.capability)
+			if err != nil {
+				t.Fatalf("Get %s: %v", tc.capability, err)
 			}
-			capFile := fileEntry(tc.capability)
-			loomFile := fileEntry("loom")
-
+			var capFile *template.File
+			for i := range capability.Files {
+				if capability.Files[i].Path == tc.path {
+					capFile = &capability.Files[i]
+				}
+			}
+			if capFile == nil {
+				t.Fatalf("%s does not declare %s", tc.capability, tc.path)
+			}
+			if len(capFile.When) != 1 || capFile.When[0] != "loom" {
+				t.Errorf("%s %s is not guarded by when: [loom]: %+v", tc.capability, tc.path, capFile)
+			}
 			if !entryApplies(map[string]bool{"base": true, "loom": true}, capFile.When, capFile.WhenAbsent) {
-				t.Errorf("%s does not write %s when loom is already installed", tc.capability, tc.path)
-			}
-			if !entryApplies(map[string]bool{"base": true, tc.capability: true}, loomFile.When, loomFile.WhenAbsent) {
-				t.Errorf("loom does not write %s when %s is already installed", tc.path, tc.capability)
+				t.Errorf("%s does not write %s when loom is installed", tc.capability, tc.path)
 			}
 			if entryApplies(map[string]bool{"base": true}, capFile.When, capFile.WhenAbsent) {
 				t.Errorf("%s writes %s without loom", tc.capability, tc.path)
 			}
-			if entryApplies(map[string]bool{"base": true}, loomFile.When, loomFile.WhenAbsent) {
-				t.Errorf("loom writes %s without %s", tc.path, tc.capability)
+			for _, file := range loom.Files {
+				if file.Path == tc.path {
+					t.Errorf("loom still declares %s; the provider seam belongs to the %s capability", tc.path, tc.capability)
+				}
 			}
 		})
 	}
@@ -3410,9 +3381,6 @@ func TestCronGeneratedProjectRaceAndVet(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.needsLoom {
 				loomToolAvailable(t)
-			}
-			if tc.needsAPI && goValidate == "" {
-				t.Skip("generated API projects require the unpublished go-validate Spec API; sibling go-validate not found (set WELD_GO_VALIDATE_DIR).")
 			}
 			root := t.TempDir()
 			dir := create(t, root)

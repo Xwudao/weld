@@ -9,26 +9,27 @@ import (
 	weldtemplate "github.com/Xwudao/weld-template"
 )
 
-// ModuleFile is one payload of the per-name business-module template.
+// ModuleFile is one payload of the per-name business-module or command template.
 type ModuleFile struct {
 	// Path is the project-relative target; it may contain the __modname__ and
-	// __ModName__ tokens, which the planner substitutes per module.
+	// __ModName__ tokens, which the planner substitutes per module or command.
 	Path   string `json:"path"`
 	Source string `json:"source"`
+	// When lists capabilities that must all be installed for the file to apply.
+	// It lets a payload add a file only for a capability-aware project, such as
+	// the command-specific Loom graph a Loom project gains.
+	When []string `json:"when,omitempty"`
 }
 
 // ModuleTemplate is the payload `weld add module <name>` writes.
 //
 // Unlike a capability it declares no fixed file set: the same template is
-// rendered once per module name, so it carries the shared package files, the
-// non-Loom route seam and the weld:routes snippet. Loom projects wire modules
-// through the generated dependency graph instead, so the route seam is only
-// used when Loom is absent.
+// rendered once per module name, so it carries the shared package files. Every
+// module is served through the generated Loom graph, which registers it on the
+// composed mux, so the template carries no separate route seam.
 type ModuleTemplate struct {
-	Version      string       `json:"version"`
-	Files        []ModuleFile `json:"files"`
-	Route        ModuleFile   `json:"route"`
-	RouteSnippet string       `json:"routeSnippet"`
+	Version string       `json:"version"`
+	Files   []ModuleFile `json:"files"`
 
 	fsys fs.FS
 }
@@ -73,18 +74,6 @@ func LoadModules() (*ModuleTemplate, error) {
 			return nil, err
 		}
 	}
-	if module.Route.Path == "" || module.Route.Source == "" {
-		return nil, fmt.Errorf("module template: route entry needs path and source")
-	}
-	if err := module.requireSource(module.Route.Source); err != nil {
-		return nil, err
-	}
-	if module.RouteSnippet == "" {
-		return nil, fmt.Errorf("module template: missing routeSnippet")
-	}
-	if err := module.requireSource(module.RouteSnippet); err != nil {
-		return nil, err
-	}
 	return module, nil
 }
 
@@ -98,16 +87,6 @@ func (m *ModuleTemplate) requireSource(source string) error {
 // ReadFile returns the raw payload for a module file.
 func (m *ModuleTemplate) ReadFile(file ModuleFile) ([]byte, error) {
 	return m.read(file.Source)
-}
-
-// ReadRoute returns the raw non-Loom route seam.
-func (m *ModuleTemplate) ReadRoute() ([]byte, error) {
-	return m.read(m.Route.Source)
-}
-
-// ReadRouteSnippet returns the raw weld:routes snippet.
-func (m *ModuleTemplate) ReadRouteSnippet() ([]byte, error) {
-	return m.read(m.RouteSnippet)
 }
 
 func (m *ModuleTemplate) read(source string) ([]byte, error) {

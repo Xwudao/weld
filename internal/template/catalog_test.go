@@ -58,8 +58,8 @@ func TestWebCapabilityLoads(t *testing.T) {
 	if len(capability.Requires) != 1 || capability.Requires[0] != "http" {
 		t.Errorf("requires = %v, want [http]", capability.Requires)
 	}
-	if len(capability.Patches) != 3 {
-		t.Errorf("patches = %d, want 3", len(capability.Patches))
+	if len(capability.Patches) != 2 {
+		t.Errorf("patches = %d, want 2 (Makefile web and the git-ignore web region)", len(capability.Patches))
 	}
 }
 
@@ -71,12 +71,9 @@ func TestHTTPCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
-	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+	if got, want := strings.Join(capability.Requires, ","), "loom"; got != want {
 		t.Errorf("requires = %v, want %q", capability.Requires, want)
 	}
-	// http appends its section to the config capability's files rather than the
-	// config capability pre-writing an http section into every project, and it
-	// declares the tracked example to restore the git-ignored local file from.
 	var configLocal, configExample bool
 	for _, patch := range capability.Patches {
 		switch {
@@ -145,13 +142,13 @@ func TestAPICapabilityLoads(t *testing.T) {
 	if len(capability.Requires) != 1 || capability.Requires[0] != "http" {
 		t.Errorf("requires = %v, want [http]", capability.Requires)
 	}
-	if len(capability.Patches) != 2 {
-		t.Errorf("patches = %d, want 2 (go.mod deps and httpserver routes)", len(capability.Patches))
+	if len(capability.Patches) != 1 {
+		t.Errorf("patches = %d, want 1 (go.mod deps)", len(capability.Patches))
 	}
 }
 
 // TestDBCapabilityLoads pins the db capability's shape: it is additive, needs
-// base and config (not http), patches exactly the go.mod dependency region, the
+// loom (which needs config), patches exactly the go.mod dependency region, the
 // Makefile db region and the two config regions, and declares the tracked
 // example to restore the git-ignored local file from.
 func TestDBCapabilityLoads(t *testing.T) {
@@ -162,7 +159,7 @@ func TestDBCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
-	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+	if got, want := strings.Join(capability.Requires, ","), "loom"; got != want {
 		t.Errorf("requires = %v, want %q", capability.Requires, want)
 	}
 	if len(capability.Patches) != 4 {
@@ -178,9 +175,9 @@ func TestDBCapabilityLoads(t *testing.T) {
 	}
 }
 
-// TestRedisCapabilityLoads pins the redis capability's shape: it requires only
-// base and config (never http, db, api or loom), ships the client package and
-// the config extension, and declares its Loom provider seam guarded on loom.
+// TestRedisCapabilityLoads pins the redis capability's shape: it requires loom
+// (which pulls config; never http, db or api), ships the client package and the
+// config extension, and declares its Loom provider seam guarded on loom.
 func TestRedisCapabilityLoads(t *testing.T) {
 	capability, err := Load().Get("redis")
 	if err != nil {
@@ -189,10 +186,10 @@ func TestRedisCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
-	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+	if got, want := strings.Join(capability.Requires, ","), "loom"; got != want {
 		t.Errorf("requires = %v, want %q", capability.Requires, want)
 	}
-	for _, forbidden := range []string{"http", "db", "api", "loom"} {
+	for _, forbidden := range []string{"http", "db", "api"} {
 		for _, required := range capability.Requires {
 			if required == forbidden {
 				t.Errorf("redis requires %q", forbidden)
@@ -239,8 +236,9 @@ func TestRedisCapabilityLoads(t *testing.T) {
 }
 
 // TestCronCapabilityLoads pins the cron capability's shape: it is additive,
-// needs only base and config, ships the scheduler plus a stable registration file
-// and the serve runtime, and declares its Loom provider seam guarded on loom.
+// requires http (so the scheduler has a lifecycle through the Loom server
+// graph), ships the scheduler plus a stable registration file, and declares its
+// Loom provider seam guarded on loom.
 func TestCronCapabilityLoads(t *testing.T) {
 	capability, err := Load().Get("cron")
 	if err != nil {
@@ -249,10 +247,10 @@ func TestCronCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
-	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+	if got, want := strings.Join(capability.Requires, ","), "http"; got != want {
 		t.Errorf("requires = %v, want %q", capability.Requires, want)
 	}
-	for _, forbidden := range []string{"http", "web", "api", "db", "loom"} {
+	for _, forbidden := range []string{"web", "api", "db", "loom"} {
 		for _, required := range capability.Requires {
 			if required == forbidden {
 				t.Errorf("cron requires %q", forbidden)
@@ -267,8 +265,6 @@ func TestCronCapabilityLoads(t *testing.T) {
 		"internal/cron/cron.go",
 		"internal/cron/register.go",
 		"internal/config/cron.go",
-		"internal/app/cron.go",
-		"internal/app/cron_test.go",
 		"internal/di/cron_provider.go",
 	} {
 		if !paths[want] {
@@ -310,7 +306,7 @@ func TestMailCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
-	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+	if got, want := strings.Join(capability.Requires, ","), "loom"; got != want {
 		t.Errorf("requires = %v, want %q", capability.Requires, want)
 	}
 	paths := map[string]bool{}
@@ -348,7 +344,7 @@ func TestStorageCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
-	if got, want := strings.Join(capability.Requires, ","), "base,config"; got != want {
+	if got, want := strings.Join(capability.Requires, ","), "loom"; got != want {
 		t.Errorf("requires = %v, want %q", capability.Requires, want)
 	}
 	paths := map[string]bool{}
@@ -405,8 +401,9 @@ func TestRenderLeavesBracesUntouched(t *testing.T) {
 	}
 }
 
-// TestLoomCapabilityLoads pins the loom capability's shape: it requires http,
-// declares a capability-aware DI graph, and replaces the go directive region.
+// TestLoomCapabilityLoads pins the loom capability's shape: it requires config,
+// declares a capability-aware DI graph, and raises the go directive region. The
+// server graph and the serve wiring belong to the http capability.
 func TestLoomCapabilityLoads(t *testing.T) {
 	capability, err := Load().Get("loom")
 	if err != nil {
@@ -415,8 +412,8 @@ func TestLoomCapabilityLoads(t *testing.T) {
 	if capability.Kind != KindAdd {
 		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
 	}
-	if len(capability.Requires) != 1 || capability.Requires[0] != "http" {
-		t.Errorf("requires = %v, want [http]", capability.Requires)
+	if len(capability.Requires) != 1 || capability.Requires[0] != "config" {
+		t.Errorf("requires = %v, want [config]", capability.Requires)
 	}
 	if capability.DI == nil || capability.DI.Dir != "internal/di" || capability.DI.Source == "" {
 		t.Fatalf("loom DI spec = %+v", capability.DI)
@@ -426,31 +423,29 @@ func TestLoomCapabilityLoads(t *testing.T) {
 		paths[file.Path] = true
 	}
 	for _, want := range []string{
-		"internal/app/serve_loom.go",
 		"tools/loom/go.mod",
 		"tools/loom/go.sum",
-		"internal/di/mail_provider.go",
-		"internal/di/storage_provider.go",
-		"internal/di/cron_provider.go",
 	} {
 		if !paths[want] {
 			t.Errorf("loom capability does not ship %s", want)
 		}
 	}
-	var goversion, serve bool
+	for _, forbidden := range []string{"internal/app/serve_loom.go", "internal/di/api_provider.go", "internal/di/redis_provider.go", "internal/di/mail_provider.go", "internal/di/storage_provider.go", "internal/di/cron_provider.go"} {
+		if paths[forbidden] {
+			t.Errorf("loom capability still ships %s; the provider seam belongs to the capability", forbidden)
+		}
+	}
+	var goversion bool
 	for _, patch := range capability.Patches {
 		switch {
 		case patch.Path == "go.mod" && patch.Marker == "goversion":
 			goversion = patch.Mode == "replace"
-		case patch.Path == "internal/app/serve.go" && patch.Marker == "serve":
-			serve = patch.Mode == "replace"
+		case patch.Path == "internal/app/serve.go":
+			t.Errorf("loom still patches the plain serve registration: %+v", patch)
 		}
 	}
 	if !goversion {
 		t.Error("loom does not replace the go.mod goversion region")
-	}
-	if !serve {
-		t.Error("loom does not replace the serve registration region")
 	}
 }
 
@@ -466,6 +461,28 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 		Module:  "example.com/demo",
 		Version: "0.1.0",
 		Caps:    CapabilitySet{"base": true, "http": true, "loom": true},
+	}
+	// A CLI-only project (no http) declares commonModule but no server graph, no
+	// InitApp and no httpserver import, so a short command never compiles in the
+	// HTTP surface.
+	cliOnly, err := capability.RenderDIGraph(DITemplateVars{
+		Name:    "demo",
+		Module:  "example.com/demo",
+		Version: "0.1.0",
+		Caps:    CapabilitySet{"base": true, "config": true, "loom": true},
+	})
+	if err != nil {
+		t.Fatalf("RenderDIGraph(cli-only): %v", err)
+	}
+	for _, want := range []string{"var commonModule = loom.Module(", "loom.Provide(NewConfigLoader)", "func NewConfigLoader()"} {
+		if !strings.Contains(string(cliOnly), want) {
+			t.Errorf("CLI-only graph is missing %q:\n%s", want, cliOnly)
+		}
+	}
+	for _, forbidden := range []string{"NewServer", "httpserver", "func InitApp", "type App struct"} {
+		if strings.Contains(string(cliOnly), forbidden) {
+			t.Errorf("CLI-only graph references %q; a non-HTTP project must not compile the server surface:\n%s", forbidden, cliOnly)
+		}
 	}
 	httpOnly, err := capability.RenderDIGraph(vars)
 	if err != nil {
