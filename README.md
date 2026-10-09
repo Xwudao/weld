@@ -39,7 +39,8 @@ To release, publish `weld-template` and pin a real version, then drop the
 ```
 weld new <name> [--module path] [--dir dir] [--dry-run]
 weld add <capability> [--dir dir] [--dry-run]
-weld add module <name> [--dir dir] [--dry-run]
+weld add module <name> [--command] [--dir dir] [--dry-run]
+weld add command <name> [--dir dir] [--dry-run]
 weld list [--dir dir]
 weld skills [--dir dir] [--dry-run]
 weld version
@@ -104,7 +105,14 @@ its graph when they are added, in either order.
 `weld add module <name>` is separate from the capability set: it generates one
 HTTP business module under `internal/modules/<name>` and wires it under
 `/api/<name>` (see [`weld add module`](#weld-add-module-stage-5)). It installs
-`http` and the `config` it requires automatically when they are absent.
+`http` and the `config` it requires automatically when they are absent. With
+`--command` it also generates a root command group backed by the module's own
+`Service` (see [`weld add command`](#weld-add-command-stage-2b)).
+
+`weld add command <name>` is likewise separate from the capability set: it
+generates an independent root command group under `internal/commands/<name>`,
+registered through the base app's `RegisterCommand` seam, with no HTTP,
+configuration or database requirement.
 
 ## Staged architecture
 
@@ -400,6 +408,42 @@ the demo service is not persistence. The HTTP surface is a plain
 `http.Handler`, so the generated `module_test.go` exercises it with
 `net/http/httptest`, with no socket and no database.
 
+With `--command`, `weld add module <name> --command` additionally writes
+`internal/commands/<name>` and `internal/app/<name>_command.go`: a root command
+group backed by the same `Service` interface and `NewService` constructor the
+HTTP handler uses, so the command line and `GET /api/<name>` share one business
+layer. On a module that already exists it writes only the command files and the
+manifest facet, never rewriting your module service or handler.
+
+## `weld add command` (stage 2b)
+
+`weld add command <name>` adds an **independent root command group** for
+non-business or multi-business commands:
+
+- **Independent.** It needs no HTTP server, no configuration and no database,
+  so it can be added to a fresh CLI project. It starts no server and never
+  starts the cron scheduler: a bare `__name__ <name>` shows the group's help.
+- **Ownership.** `internal/commands/<name>/command.go` and the registration file
+  `internal/app/<name>_command.go` are written once and recorded in `weld.json`
+  under `command:<name>`, so your edits survive later `weld add` commands; a
+  repeat add is a no-op that still succeeds.
+- **One shared registration mechanism.** The registration file calls the base
+  app's `RegisterCommand(func() *cobra.Command)`, the same seam `http` uses for
+  `serve`. There is no per-project global dispatcher: `internal/app/app.go`
+  stays the one command tree, and weld never rewrites it.
+- **A stable seam for business services.** `internal/commands/<name>/command.go`
+  exposes `NewCommand`, and the registration file is the editable seam: change
+  `NewCommand()` to take the `Service` of one or more modules added with
+  `weld add module`, then inject them in the registration, so a command can span
+  several business services without weld ever wiring the database or Redis.
+- **Name rules.** `<name>` must be a canonical lower-case Go package name. The
+  reserved root commands `serve`, `help` and `version` are rejected, and a name
+  is either a command or a module, never both: adding a command for an installed
+  module's name is a conflict (and the reverse too).
+- **Cobra seam.** The base is a Cobra command tree; on a project scaffolded with
+  the earlier hand-rolled dispatcher the plan fails during planning, before any
+  file changes, with the same migration message `http` and `loom` use.
+
 ## Configuration (`weld add http` / `weld add db`)
 
 `config` is a first-class, shared capability, not a base dependency: the base
@@ -534,6 +578,14 @@ Test conventions:
   capability add; and that the Loom graph includes the module whether Loom is
   installed before or after it — while a `db`+Loom graph still declares but never
   constructs the pool and repository.
+- The scaffold tests for `weld add command` and `weld add module --command`
+  prove the generated command group is independent (base + command installs no
+  HTTP or config), that a generated command factory test builds and rejects an
+  unknown subcommand, that a module command shares the module's `Service`, that
+  the `--command` upgrade of an existing module writes only the command files
+  and never rewrites a user-edited service, that a Loom module + command builds
+  and tests, that reserved names and command/module collisions are rejected
+  before any write, and that a custom command never starts the server.
 - The API integration tests are **skipped with a reason** when the sibling
   `go-validate` working copy (or the test dependencies) is unavailable, because
   the `Spec`/`Constraint` API is not published yet (newest tag v0.1.1). The
@@ -550,8 +602,8 @@ Test conventions:
 ```
 cmd/weld/            CLI entry point
 internal/cli/        argument parsing and output
-internal/template/   capability catalog, module template, placeholder rendering
+internal/template/   capability catalog, module and command templates, placeholder rendering
 internal/project/    manifest, marker patching, best-effort rollback apply
-internal/scaffold/   create/add/add-module plans and dependency resolution
+internal/scaffold/   create/add/add-module/add-command plans and dependency resolution
 internal/skills/     project agent skill generation and safe write
 ```

@@ -35,8 +35,14 @@ type Manifest struct {
 	// graph can be re-rendered from the record without a runtime registry. The
 	// field is omitted for projects that have none, so the manifest of a
 	// capabilities-only project is byte-for-byte unchanged.
-	Modules []ModuleRef   `json:"modules,omitempty"`
-	Files   []ManagedFile `json:"files"`
+	Modules []ModuleRef `json:"modules,omitempty"`
+	// Commands records the root command groups installed with `weld add command
+	// <name>` or `weld add module <name> --command`. A command shares its name
+	// with the business module it exposes, so the two lists together distinguish
+	// an independent command from a module-backed one. The field is omitted for
+	// projects that have none.
+	Commands []CommandRef  `json:"commands,omitempty"`
+	Files    []ManagedFile `json:"files"`
 }
 
 // ModuleRef pins an installed business module to the template version that
@@ -151,6 +157,42 @@ func (m *Manifest) AddModule(ref ModuleRef) {
 		ref.AppliedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	m.Modules = append(m.Modules, ref)
+}
+
+// CommandRef pins an installed root command group to the template version that
+// produced it.
+type CommandRef struct {
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	AppliedAt string `json:"appliedAt,omitempty"`
+}
+
+// HasCommand reports whether a command group is recorded.
+func (m *Manifest) HasCommand(name string) bool {
+	for _, command := range m.Commands {
+		if command.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// CommandVersion returns the recorded version for a command group.
+func (m *Manifest) CommandVersion(name string) string {
+	for _, command := range m.Commands {
+		if command.Name == name {
+			return command.Version
+		}
+	}
+	return ""
+}
+
+// AddCommand records an applied command group with a timestamp.
+func (m *Manifest) AddCommand(ref CommandRef) {
+	if ref.AppliedAt == "" {
+		ref.AppliedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	m.Commands = append(m.Commands, ref)
 }
 
 // SetFile records or updates a managed file and its content hash.

@@ -48,6 +48,11 @@ func ValidateModuleName(name string) error {
 // dependency graph; without Loom, through a httpserver route and the weld:routes
 // extension point. The module files are written once and recorded in the
 // manifest under module:<name>, so a later `weld add` never rewrites them.
+//
+// With req.Command it additionally generates a root command group backed by the
+// same Service interface and NewService constructor, recorded under
+// command:<name>. On a module that is already installed it writes only that
+// command facet and never rewrites the user's module service or handler.
 func AddModule(req Request, name string) (*Result, error) {
 	if err := ValidateModuleName(name); err != nil {
 		return nil, err
@@ -56,15 +61,31 @@ func AddModule(req Request, name string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	result := &Result{Dir: req.Dir}
+	// An installed module owns its name: its files are written once and a repeat
+	// add is a no-op. With --command on an existing module only the command facet
+	// may still be missing, and that is the one upgrade this command performs.
+	if manifest.HasModule(name) {
+		if !req.Command || manifest.HasCommand(name) {
+			result.Notes = alreadyInstalledModuleNotes(req.Dir, manifest, name)
+			return result, nil
+		}
+		if err := upgradeModuleCommand(req, manifest, result, name); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	if manifest.HasCommand(name) {
+		return nil, &project.ConflictError{
+			Path:   "internal/modules/" + name,
+			Reason: fmt.Sprintf("command %q is installed; rename the command or add a module command with `weld add module %s --command`", name, name),
+		}
+	}
+
 	moduleTemplate, err := template.LoadModules()
 	if err != nil {
 		return nil, err
-	}
-
-	result := &Result{Dir: req.Dir}
-	if manifest.HasModule(name) {
-		result.Notes = alreadyInstalledModuleNotes(req.Dir, manifest, name)
-		return result, nil
 	}
 
 	// A module is served over HTTP, so http (and its config dependency) is
@@ -77,7 +98,7 @@ func AddModule(req Request, name string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkCLICompatibility(req.Dir, order); err != nil {
+	if err := checkCLICompatibility(req.Dir, order, req.Command); err != nil {
 		return nil, err
 	}
 	for _, capability := range order {
@@ -117,10 +138,46 @@ func AddModule(req Request, name string) (*Result, error) {
 	}
 
 	manifest.AddModule(project.ModuleRef{Name: name, Version: moduleTemplate.Version})
+	if req.Command {
+		if err := p.planModuleCommandFacet(manifest, name); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := p.finish(); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+// upgradeModuleCommand plans the command facet for a module that is already
+// installed. It writes only the command files and records the command; the
+// module's HTTP files, and any user edits to them, are never touched.
+func upgradeModuleCommand(req Request, manifest *project.Manifest, result *Result, name string) error {
+	if err := checkCLICompatibility(req.Dir, nil, true); err != nil {
+		return err
+	}
+	p := newPlanner(req, manifest, result)
+	if err := p.planModuleCommandFacet(manifest, name); err != nil {
+		return err
+	}
+	return p.finish()
+}
+
+// planModuleCommandFacet writes the module-backed command group and records the
+// command. It shares the command target paths with the generic group, so a
+// module and an independent command can never be created for the same name.
+func (p *planner) planModuleCommandFacet(manifest *project.Manifest, name string) error {
+	commandTemplate, err := template.LoadCommands()
+	if err != nil {
+		return err
+	}
+	vars := commandVars(manifest, commandTemplate.Version, name)
+	if err := p.planCommandFacet(commandTemplate, commandTemplate.Module, vars, "command:"+name); err != nil {
+		return err
+	}
+	manifest.AddCommand(project.CommandRef{Name: name, Version: commandTemplate.Version})
+	return nil
 }
 
 // planModuleRoute writes the non-Loom route seam and appends it to the

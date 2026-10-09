@@ -612,3 +612,104 @@ func TestUsageErrorsNameTheCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestAddCommandSubcommand(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err := run(t, "add", "command", "orders", "--dir", dir)
+	if err != nil {
+		t.Fatalf("add command: %v", err)
+	}
+	if !strings.Contains(out, "internal/commands/orders/command.go") {
+		t.Fatalf("add command output = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "commands", "orders", "command.go")); err != nil {
+		t.Fatalf("add command did not write the command group: %v", err)
+	}
+	// A command group is independent: it installs no HTTP server.
+	if _, err := os.Stat(filepath.Join(dir, "internal", "httpserver")); !os.IsNotExist(err) {
+		t.Fatal("add command created the HTTP server")
+	}
+
+	// Repeating add is a no-op that still succeeds.
+	out, err = run(t, "add", "command", "orders", "--dir", dir)
+	if err != nil {
+		t.Fatalf("repeat add command: %v", err)
+	}
+	if !strings.Contains(out, "already installed") {
+		t.Fatalf("repeat add command output = %q", out)
+	}
+
+	// list reports the installed command.
+	listOut, err := run(t, "list", "--dir", dir)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(listOut, "Commands in demo") || !strings.Contains(listOut, "orders") {
+		t.Fatalf("list does not report the command: %q", listOut)
+	}
+
+	// A reserved name and a missing name are rejected.
+	if _, err := run(t, "add", "command", "serve", "--dir", dir); err == nil {
+		t.Fatal("expected add command serve to fail")
+	}
+	if _, err := run(t, "add", "command", "--dir", dir); err == nil {
+		t.Fatal("expected add command without a name to fail")
+	}
+}
+
+func TestAddModuleWithCommandFlag(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err := run(t, "add", "module", "widget", "--command", "--dir", dir)
+	if err != nil {
+		t.Fatalf("add module --command: %v", err)
+	}
+	for _, want := range []string{"internal/modules/widget/module.go", "internal/commands/widget/command.go"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("add module --command output is missing %q: %q", want, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "commands", "widget", "command.go")); err != nil {
+		t.Fatalf("add module --command did not write the command group: %v", err)
+	}
+
+	// Repeating is a no-op.
+	out, err = run(t, "add", "module", "widget", "--command", "--dir", dir)
+	if err != nil {
+		t.Fatalf("repeat add module --command: %v", err)
+	}
+	if !strings.Contains(out, "already installed") {
+		t.Fatalf("repeat add module --command output = %q", out)
+	}
+}
+
+func TestAddModuleCommandDryRunWritesNothing(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err := run(t, "add", "module", "widget", "--command", "--dir", dir, "--dry-run")
+	if err != nil {
+		t.Fatalf("add module --command --dry-run: %v", err)
+	}
+	if !strings.Contains(out, "dry run") {
+		t.Fatalf("dry-run output = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "commands")); !os.IsNotExist(err) {
+		t.Fatal("dry run wrote the command group")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "modules")); !os.IsNotExist(err) {
+		t.Fatal("dry run wrote the module")
+	}
+}

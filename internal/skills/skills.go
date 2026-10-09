@@ -215,6 +215,7 @@ func Render(manifest *project.Manifest, catalog Catalog) ([]byte, error) {
 	writeCapabilities(&b, caps, catalog)
 	writeWiring(&b, set)
 	writeModules(&b, manifest)
+	writeCommands(&b, manifest)
 	writeEditing(&b, set)
 	writeFileIndex(&b, manifest)
 	writeRegenerate(&b)
@@ -356,6 +357,29 @@ func writeModules(b *strings.Builder, manifest *project.Manifest) {
 	b.WriteString("packages untouched.\n\n")
 	for _, module := range manifest.Modules {
 		fmt.Fprintf(b, "- **%s** v%s — `internal/modules/%s` served under `/api/%s`.\n", module.Name, module.Version, module.Name, module.Name)
+	}
+	b.WriteString("\n")
+}
+
+// writeCommands describes the root command groups installed with `weld add
+// command` and `weld add module --command`. Like modules they are written once
+// and never regenerated, so the generated guide says so.
+func writeCommands(b *strings.Builder, manifest *project.Manifest) {
+	if len(manifest.Commands) == 0 {
+		return
+	}
+	b.WriteString("## Root command groups\n\n")
+	b.WriteString("Added with `weld add command <name>` or `weld add module <name> --command`.\n")
+	b.WriteString("Each lives in `internal/commands/<name>` and is registered through\n")
+	b.WriteString("`app.RegisterCommand` in `internal/app/<name>_command.go`. weld writes them\n")
+	b.WriteString("once and never regenerates them, so they are yours to edit; a command group\n")
+	b.WriteString("starts no server and shows help on a bare invocation.\n\n")
+	for _, command := range manifest.Commands {
+		if manifest.HasModule(command.Name) {
+			fmt.Fprintf(b, "- **%s** v%s — `internal/commands/%s`, backed by the `%s` module's Service.\n", command.Name, command.Version, command.Name, command.Name)
+		} else {
+			fmt.Fprintf(b, "- **%s** v%s — `internal/commands/%s`, an independent command group.\n", command.Name, command.Version, command.Name)
+		}
 	}
 	b.WriteString("\n")
 }

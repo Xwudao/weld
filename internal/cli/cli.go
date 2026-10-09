@@ -94,36 +94,55 @@ func newNewCommand() *cobra.Command {
 	return cmd
 }
 
-// newAddCommand builds `weld add`, whose `module` subcommand is separate from
-// the additive capability set.
+// newAddCommand builds `weld add`, whose `module` and `command` subcommands are
+// separate from the additive capability set.
 func newAddCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <capability>",
 		Short: "additively extend an existing project in place",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("usage: %s add <capability> [--dir dir] [--dry-run]\n       %s add module <name> [--dir dir] [--dry-run]", progName, progName)
+				return fmt.Errorf("usage: %s add <capability> [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--dir dir] [--dry-run]\n       %s add command <name> [--dir dir] [--dry-run]", progName, progName, progName)
 			}
 			return nil
 		},
 		RunE: runAdd,
 	}
-	cmd.AddCommand(newAddModuleCommand())
+	cmd.AddCommand(newAddModuleCommand(), newAddCommandSubcommand())
 	return cmd
 }
 
 // newAddModuleCommand builds `weld add module <name>`.
 func newAddModuleCommand() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "module <name>",
 		Short: "add an HTTP business module under internal/modules/<name>",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("usage: %s add module <name> [--dir dir] [--dry-run]", progName)
+				return fmt.Errorf("usage: %s add module <name> [--command] [--dir dir] [--dry-run]", progName)
 			}
 			return nil
 		},
 		RunE: runAddModule,
+	}
+	cmd.Flags().Bool("command", false, "also add a root command group backed by the module's Service")
+	return cmd
+}
+
+// newAddCommandSubcommand builds `weld add command <name>`, which installs an
+// independent root command group with no HTTP, configuration or database
+// requirement.
+func newAddCommandSubcommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "command <name>",
+		Short: "add an independent root command group under internal/commands/<name>",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("usage: %s add command <name> [--dir dir] [--dry-run]", progName)
+			}
+			return nil
+		},
+		RunE: runAddCommand,
 	}
 }
 
@@ -198,6 +217,21 @@ Modules:
   Loom it registers through the weld:routes extension point; with Loom the
   generated graph picks it up, whichever is installed first. Its files are
   written once and never regenerated, so your edits survive later adds.
+  add module <name> --command additionally generates a root command group in
+  internal/commands/<name> backed by the module's own Service interface and
+  NewService constructor, registered through internal/app/<name>_command.go.
+  Adding it to a module that already exists writes only the command files and
+  never rewrites your module service or handler.
+
+Commands:
+  add command <name> generates an independent root command group in
+  internal/commands/<name> plus its registration in
+  internal/app/<name>_command.go, for non-business or multi-business commands.
+  It needs no HTTP, configuration or database, starts no server and shows help
+  on a bare invocation. Its files are written once and never regenerated; edit
+  the registration to inject business services, or the command itself, freely.
+  A name may be a command or a module, never both: serve, help and version are
+  reserved, and a name already used by a module is rejected.
 
 http and db each install the config capability, so the first of them adds the
 shared typed configuration loader and generates a local, git-ignored config.yml
@@ -272,7 +306,8 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	return applyAddResult(stdout, result, dryRun)
 }
 
-// runAddModule plans and applies `weld add module <name>`.
+// runAddModule plans and applies `weld add module <name>` with an optional
+// `--command` root command group.
 func runAddModule(cmd *cobra.Command, args []string) error {
 	stdout := cmd.OutOrStdout()
 	dir, err := cmd.Flags().GetString("dir")
@@ -283,8 +318,31 @@ func runAddModule(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	withCommand, err := cmd.Flags().GetBool("command")
+	if err != nil {
+		return err
+	}
 
-	result, err := scaffold.AddModule(scaffold.Request{Dir: dir, Catalog: template.Load()}, args[0])
+	result, err := scaffold.AddModule(scaffold.Request{Dir: dir, Catalog: template.Load(), Command: withCommand}, args[0])
+	if err != nil {
+		return err
+	}
+	return applyAddResult(stdout, result, dryRun)
+}
+
+// runAddCommand plans and applies `weld add command <name>`.
+func runAddCommand(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+
+	result, err := scaffold.AddCommand(scaffold.Request{Dir: dir, Catalog: template.Load()}, args[0])
 	if err != nil {
 		return err
 	}
@@ -347,6 +405,16 @@ func runList(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(stdout, "\nModules in %s:\n", manifest.Name)
 		for _, module := range manifest.Modules {
 			fmt.Fprintf(stdout, "  * %-8s v%s (applied %s)\n", module.Name, module.Version, module.AppliedAt)
+		}
+	}
+	if len(manifest.Commands) > 0 {
+		fmt.Fprintf(stdout, "\nCommands in %s:\n", manifest.Name)
+		for _, command := range manifest.Commands {
+			kind := "independent"
+			if manifest.HasModule(command.Name) {
+				kind = "module-backed"
+			}
+			fmt.Fprintf(stdout, "  * %-8s v%s (%s, applied %s)\n", command.Name, command.Version, kind, command.AppliedAt)
 		}
 	}
 	if drift := manifest.Drift(dir); len(drift) > 0 {
