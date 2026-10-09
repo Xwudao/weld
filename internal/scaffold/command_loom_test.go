@@ -419,15 +419,123 @@ func TestAddAPIPreservesCustomizedModuleDITest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	add(t, dir, "api")
+	result := add(t, dir, "api")
 	if got := readFile(t, diTestPath); !strings.Contains(got, userTestMarker) {
 		t.Fatalf("weld add api replaced the customized DI test")
+	}
+	// Keeping a user-owned test is not silent: the add reports it, and with it the
+	// boundary that weld cannot merge later changes into the test for the user.
+	noted := false
+	for _, note := range result.Notes {
+		if strings.Contains(note, "internal/di/di_test.go") && strings.Contains(note, "edited locally") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("weld add api did not report the preserved DI test: %v", result.Notes)
 	}
 	if !strings.Contains(readFile(t, filepath.Join(dir, "internal", "di", "di.go")), "NewServerWithAPI") {
 		t.Fatal("the API graph did not gain its composition entry point")
 	}
 	if !buildAndTestGeneratedProject(t, dir) {
 		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
+
+// TestAddRefreshesUneditedDITest proves an unmodified di_test.go is not frozen by
+// the first add that changes it: whichever order api and a module are installed
+// in, the generated test keeps following the installed capability set. The API
+// composition entry point and the module fake must both be present, and the
+// manifest must not have marked the unedited test preserve.
+func TestAddRefreshesUneditedDITest(t *testing.T) {
+	loomToolAvailable(t)
+	cases := []struct {
+		name string
+		add  func(t *testing.T, dir string)
+	}{
+		{"api then module", func(t *testing.T, dir string) {
+			add(t, dir, "loom")
+			add(t, dir, "http")
+			add(t, dir, "api")
+			addModule(t, dir, "widget")
+		}},
+		{"module then api", func(t *testing.T, dir string) {
+			add(t, dir, "loom")
+			add(t, dir, "http")
+			addModule(t, dir, "widget")
+			add(t, dir, "api")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := create(t, root)
+			tc.add(t, dir)
+
+			manifest := mustLoad(t, dir)
+			for _, file := range manifest.Files {
+				if file.Path == "internal/di/di_test.go" && file.Preserve {
+					t.Fatal("an unedited di_test.go was marked preserve: the first add froze it")
+				}
+			}
+			diTest := readFile(t, filepath.Join(dir, "internal", "di", "di_test.go"))
+			for _, want := range []string{
+				"NewServerWithAPI",
+				"widgetFakeService",
+				"TestComposedMuxServesModulesWithoutSocket",
+			} {
+				if !strings.Contains(diTest, want) {
+					t.Errorf("di_test.go was not refreshed with %q:\n%s", want, diTest)
+				}
+			}
+			if drift := manifest.Drift(dir); len(drift) != 0 {
+				t.Fatalf("drift after add: %+v", drift)
+			}
+			gofmtCheck(t, dir)
+		})
+	}
+}
+
+// TestAddKeepsEditedDITestAndDocumentsTheBoundary proves the other half of the
+// seam: once the user has edited di_test.go it stays preserved across a later
+// module add too, and the add reports it. weld deliberately does not merge or
+// overwrite the user's assertions, so a module whose Service signature changes
+// NewServer remains a manual update; this test pins that boundary instead of
+// letting a later add silently rewrite the file.
+func TestAddKeepsEditedDITestAndDocumentsTheBoundary(t *testing.T) {
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "http")
+	add(t, dir, "api")
+
+	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
+	const userTestMarker = "// user-owned assertion"
+	if err := os.WriteFile(diTestPath, []byte(readFile(t, diTestPath)+"\n"+userTestMarker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := addModule(t, dir, "widget")
+	if got := readFile(t, diTestPath); !strings.Contains(got, userTestMarker) {
+		t.Fatal("adding a module replaced the edited DI test")
+	}
+	noted := false
+	for _, note := range result.Notes {
+		if strings.Contains(note, "internal/di/di_test.go") && strings.Contains(note, "edited locally") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("adding a module did not report the preserved DI test: %v", result.Notes)
+	}
+	preserved := false
+	for _, file := range mustLoad(t, dir).Files {
+		if file.Path == "internal/di/di_test.go" && file.Preserve {
+			preserved = true
+		}
+	}
+	if !preserved {
+		t.Fatal("the edited DI test was not recorded as preserved")
 	}
 }
 

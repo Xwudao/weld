@@ -279,6 +279,33 @@ func (m *Manifest) Owns(path string) bool {
 	return false
 }
 
+// Modified reports whether a managed file has been changed since weld wrote it.
+//
+// A file marked preserve was already accepted as edited, so it stays modified.
+// Otherwise the file is compared with the hash weld recorded, which is what
+// distinguishes a user edit from content that only differs because weld wrote
+// an older template. A missing file, or a path weld does not manage, is not
+// modified.
+func (m *Manifest) Modified(root, path string) (bool, error) {
+	for _, file := range m.Files {
+		if file.Path != path {
+			continue
+		}
+		if file.Preserve {
+			return true, nil
+		}
+		raw, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil
+			}
+			return false, err
+		}
+		return HashContent(raw) != file.SHA256, nil
+	}
+	return false, nil
+}
+
 // Drift describes a managed file that no longer matches the manifest.
 type Drift struct {
 	Path   string

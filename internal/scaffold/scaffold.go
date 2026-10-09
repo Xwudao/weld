@@ -575,12 +575,28 @@ func reconcileDI(req Request, manifest *project.Manifest, present map[string]boo
 			}
 			// The graph test is a project-owned seam. It is generated for a
 			// fresh project, but users commonly add fakes and route assertions
-			// there as their module interfaces evolve. Once edited, retain it
-			// across capability adds rather than silently replacing those tests.
+			// there as their module interfaces evolve. Preserve it only once the
+			// user has actually edited it: an unmodified file still matches the
+			// hash weld recorded, so a later capability keeps refreshing it, and
+			// content that differs only because weld wrote an older template is
+			// regenerated rather than mistaken for an edit.
 			_, statErr := os.Stat(filepath.Join(req.Dir, source.path))
-			if source.path == path.Join(capability.DI.Dir, "di_test.go") && managed && statErr == nil {
-				manifest.PreserveFile(source.path)
-				continue
+			if source.path == path.Join(capability.DI.Dir, "di_test.go") {
+				edited, err := manifest.Modified(req.Dir, source.path)
+				if err != nil {
+					return err
+				}
+				if edited {
+					// A preserved test is never rewritten, but the user is told:
+					// replacing its contents would discard their assertions, and a
+					// later module whose Service signature changes has to be
+					// updated by hand because weld cannot merge it.
+					manifest.PreserveFile(source.path)
+					result.Notes = append(result.Notes, fmt.Sprintf(
+						"%s was edited locally; keeping your version (weld will not regenerate it, and a later module whose Service signature changes may need a manual update)",
+						source.path))
+					continue
+				}
 			}
 			planned[source.path] = source.content
 			upsert(project.Operation{Path: source.path, Content: source.content, Overwrite: statErr == nil})
