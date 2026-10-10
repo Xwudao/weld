@@ -87,25 +87,40 @@ func TestNewLogsErrorAttribute(t *testing.T) {
 }
 
 // TestNewFormatsTextRecordTime pins the text handler's time: time.DateTime, the
-// date and local wall clock to the second, without slog's RFC 3339 "T" separator
-// or zone offset. slog quotes a value containing a space, so the field reads
-// time="2006-01-02 15:04:05".
+// date and local wall clock to the second, written unquoted as
+// time=2006-01-02 15:04:05. slog's default RFC 3339 time carries the "T"
+// separator and the zone offset, which this drops.
 func TestNewFormatsTextRecordTime(t *testing.T) {
 	w := &fakeWriter{}
 	New(w, TextFormat, nil).Info("hello")
-	_, rest, ok := strings.Cut(w.String(), `time="`)
+	out := w.String()
+	rest, ok := strings.CutPrefix(out, "time=")
 	if !ok {
-		t.Fatalf("text record has no quoted time field:\n%s", w.String())
+		t.Fatalf("text record does not start with a time field:\n%s", out)
 	}
-	got, _, ok := strings.Cut(rest, `"`)
+	got, _, ok := strings.Cut(rest, " level=")
 	if !ok {
-		t.Fatalf("text record time is not terminated:\n%s", w.String())
+		t.Fatalf("text record time is not followed by the level:\n%s", out)
+	}
+	if strings.Contains(got, `"`) {
+		t.Fatalf("time %q is still quoted", got)
 	}
 	if _, err := time.Parse(timeLayout, got); err != nil {
 		t.Fatalf("time %q does not match timeLayout: %v", got, err)
 	}
 	if strings.ContainsAny(got, "TZ+") {
 		t.Fatalf("time %q still carries the RFC 3339 separator or zone offset", got)
+	}
+}
+
+// TestNewOnlyRewritesTheLeadingTimeField pins the rewrite to the start of the
+// record: a later attribute that looks like the time field keeps slog's quoting.
+func TestNewOnlyRewritesTheLeadingTimeField(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).Info("hello", "note", `time="x"`)
+	out := w.String()
+	if !strings.Contains(out, `note="time=\"x\""`) {
+		t.Fatalf("a non-time field was rewritten:\n%s", out)
 	}
 }
 

@@ -624,7 +624,7 @@ func TestBaseCapabilityShipsInjectedLogger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read logging.go: %v", err)
 	}
-	for _, want := range []string{"\"log/slog\"", "NewTextHandler", "NewJSONHandler", "ReplaceAttr", "time.DateTime"} {
+	for _, want := range []string{"\"log/slog\"", "NewTextHandler", "NewJSONHandler", "ReplaceAttr", "time.DateTime", "unquotedTime"} {
 		if !strings.Contains(string(loggingGo), want) {
 			t.Errorf("logging.go is missing %q", want)
 		}

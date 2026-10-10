@@ -7,6 +7,7 @@
 package logging
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"time"
@@ -23,9 +24,8 @@ const (
 )
 
 // timeLayout is how the text handler renders a record's time: time.DateTime, the
-// date and local wall clock to the second, without slog's RFC 3339 "T" separator
-// and zone offset. The JSON handler keeps slog's RFC 3339 timestamp, which a log
-// pipeline parses.
+// date and local wall clock to the second. The JSON handler keeps slog's RFC 3339
+// timestamp, which a log pipeline parses.
 const timeLayout = time.DateTime
 
 // New returns a *slog.Logger that writes records to w.
@@ -33,8 +33,8 @@ const timeLayout = time.DateTime
 // format selects the handler encoding; any value other than JSONFormat selects
 // the text handler, so the zero Format is a working default. options configures
 // the handler — for example its Level — and a nil options uses slog's defaults.
-// The text handler renders the time with timeLayout; a caller's own ReplaceAttr,
-// if any, still runs first.
+// The text handler renders the time with timeLayout and unquoted; a caller's own
+// ReplaceAttr, if any, still runs first.
 func New(w io.Writer, format Format, options *slog.HandlerOptions) *slog.Logger {
 	if options == nil {
 		options = &slog.HandlerOptions{}
@@ -44,7 +44,7 @@ func New(w io.Writer, format Format, options *slog.HandlerOptions) *slog.Logger 
 	}
 	textOptions := *options
 	textOptions.ReplaceAttr = textTime(textOptions.ReplaceAttr)
-	return slog.New(slog.NewTextHandler(w, &textOptions))
+	return slog.New(slog.NewTextHandler(unquotedTime{w}, &textOptions))
 }
 
 // textTime returns a ReplaceAttr for the text handler that renders a record's
@@ -63,4 +63,42 @@ func textTime(next func([]string, slog.Attr) slog.Attr) func([]string, slog.Attr
 		}
 		return a
 	}
+}
+
+// unquotedTime writes the text handler's records with an unquoted time field.
+//
+// timeLayout contains a space, and the text handler quotes any value that needs
+// quoting, so textTime on its own would write time="2026-10-10 07:42:19" where
+// slog's default was the unquoted time=2026-10-10T07:42:19.731+08:00. The handler
+// gives no way to emit a bare string value, so the quotes are dropped at the sink
+// instead; every other field keeps slog's formatting and quoting.
+//
+// The text handler emits the time first, writes a whole record in one Write, and
+// holds its mutex across that Write, so the leading field is always the time and
+// two records can never interleave here.
+type unquotedTime struct{ w io.Writer }
+
+// Write rewrites a leading time="<value>" field to time=<value>, and forwards the
+// record unchanged when it has no such field.
+func (u unquotedTime) Write(p []byte) (int, error) {
+	const open = `time="`
+	if !bytes.HasPrefix(p, []byte(open)) {
+		_, err := u.w.Write(p)
+		return len(p), err
+	}
+	body := p[len(open):]
+	quote := bytes.IndexByte(body, '"')
+	if quote < 0 {
+		_, err := u.w.Write(p)
+		return len(p), err
+	}
+	// Drop the two quotes in place: time="<value>"<tail> becomes time=<value><tail>.
+	// The value moves left one byte and the tail two; copy shifts bytes, so the
+	// overlapping slices are safe.
+	value, tail := body[:quote], body[quote+1:]
+	key := len("time=")
+	n := copy(p[key:], value)
+	copy(p[key+n:], tail)
+	_, err := u.w.Write(p[:key+n+len(tail)])
+	return len(p), err
 }
