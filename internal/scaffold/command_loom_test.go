@@ -390,12 +390,13 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	}
 }
 
-// TestAddAPIPreservesCustomizedModuleDITest proves the cross-capability seam:
-// after a module's constructor and DI test have been customized, adding api
-// regenerates the production graph without replacing the project's test.
-// The generated project still runs the API tests and the pre-existing module
-// route tests together, so both route families remain buildable.
-func TestAddAPIPreservesCustomizedModuleDITest(t *testing.T) {
+// TestAddAPIRefreshesGeneratedDITest proves the DI test is a generated file with
+// no user-owned state: after a module's constructor changes and the user appends
+// an assertion to di_test.go, adding api regenerates the test instead of
+// preserving the edit. The regenerated test never names a module, so the changed
+// NewService signature cannot break it, and the production graph still gains its
+// API composition entry point.
+func TestAddAPIRefreshesGeneratedDITest(t *testing.T) {
 	goValidate := goValidateDir(t)
 	loomToolAvailable(t)
 	root := t.TempDir()
@@ -414,25 +415,19 @@ func TestAddAPIPreservesCustomizedModuleDITest(t *testing.T) {
 
 	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
 	const userTestMarker = "// user-owned module route assertion"
-	diTest := readFile(t, diTestPath) + "\n" + userTestMarker + "\n"
-	if err := os.WriteFile(diTestPath, []byte(diTest), 0o644); err != nil {
+	if err := os.WriteFile(diTestPath, []byte(readFile(t, diTestPath)+"\n"+userTestMarker+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	result := add(t, dir, "api")
-	if got := readFile(t, diTestPath); !strings.Contains(got, userTestMarker) {
-		t.Fatalf("weld add api replaced the customized DI test")
+	add(t, dir, "api")
+	generated := readFile(t, diTestPath)
+	if strings.Contains(generated, userTestMarker) {
+		t.Fatal("weld add api preserved an edit to the generated DI test")
 	}
-	// Keeping a user-owned test is not silent: the add reports it, and with it the
-	// boundary that weld cannot merge later changes into the test for the user.
-	noted := false
-	for _, note := range result.Notes {
-		if strings.Contains(note, "internal/di/di_test.go") && strings.Contains(note, "edited locally") {
-			noted = true
+	for _, forbidden := range []string{"internal/modules/widget", "FakeService"} {
+		if strings.Contains(generated, forbidden) {
+			t.Errorf("the regenerated di_test.go still names %q:\n%s", forbidden, generated)
 		}
-	}
-	if !noted {
-		t.Fatalf("weld add api did not report the preserved DI test: %v", result.Notes)
 	}
 	if !strings.Contains(readFile(t, filepath.Join(dir, "internal", "di", "di.go")), "NewServerWithAPI") {
 		t.Fatal("the API graph did not gain its composition entry point")
@@ -442,68 +437,39 @@ func TestAddAPIPreservesCustomizedModuleDITest(t *testing.T) {
 	}
 }
 
-// TestAddRefreshesUneditedDITest proves an unmodified di_test.go is not frozen by
-// the first add that changes it: whichever order api and a module are installed
-// in, the generated test keeps following the installed capability set. The API
-// composition entry point and the module fake must both be present, and the
-// manifest must not have marked the unedited test preserve.
-func TestAddRefreshesUneditedDITest(t *testing.T) {
+// TestAddModuleKeepsDITestModuleIndependent proves installing a module leaves the
+// generated DI test byte-for-byte unchanged: the test is regenerated with the
+// capability set, never with the module list, so adding a module cannot churn or
+// break it. The production graph still lists the module.
+func TestAddModuleKeepsDITestModuleIndependent(t *testing.T) {
 	loomToolAvailable(t)
-	cases := []struct {
-		name string
-		add  func(t *testing.T, dir string)
-	}{
-		{"api then module", func(t *testing.T, dir string) {
-			add(t, dir, "loom")
-			add(t, dir, "http")
-			add(t, dir, "api")
-			addModule(t, dir, "widget")
-		}},
-		{"module then api", func(t *testing.T, dir string) {
-			add(t, dir, "loom")
-			add(t, dir, "http")
-			addModule(t, dir, "widget")
-			add(t, dir, "api")
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			dir := create(t, root)
-			tc.add(t, dir)
+	dir := create(t, t.TempDir())
+	add(t, dir, "api")
 
-			manifest := mustLoad(t, dir)
-			for _, file := range manifest.Files {
-				if file.Path == "internal/di/di_test.go" && file.Preserve {
-					t.Fatal("an unedited di_test.go was marked preserve: the first add froze it")
-				}
-			}
-			diTest := readFile(t, filepath.Join(dir, "internal", "di", "di_test.go"))
-			for _, want := range []string{
-				"NewServerWithAPI",
-				"widgetFakeService",
-				"TestComposedMuxServesModulesWithoutSocket",
-			} {
-				if !strings.Contains(diTest, want) {
-					t.Errorf("di_test.go was not refreshed with %q:\n%s", want, diTest)
-				}
-			}
-			if drift := manifest.Drift(dir); len(drift) != 0 {
-				t.Fatalf("drift after add: %+v", drift)
-			}
-			gofmtCheck(t, dir)
-			// This executes the generated DI mux test as well as the module and API
-			// tests, so the composed graph is exercised, not merely compiled.
-			if !buildAndTestGeneratedProject(t, dir) {
-				t.Skip("cannot resolve generated project's dependencies (network/module cache unavailable)")
-			}
-		})
+	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
+	before := readFile(t, diTestPath)
+
+	addModule(t, dir, "widget")
+	if after := readFile(t, diTestPath); after != before {
+		t.Fatalf("adding a module changed the generated DI test:\n--- before ---\n%s\n--- after ---\n%s", before, after)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dir, "internal", "di", "di.go")), "widget") {
+		t.Fatal("the production graph did not gain the module")
+	}
+	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after add: %+v", drift)
+	}
+	gofmtCheck(t, dir)
+	// This executes the generated DI test as well as the module and API tests, so
+	// the composed graph is exercised, not merely compiled.
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve generated project's dependencies (network/module cache unavailable)")
 	}
 }
 
 // TestTwoModulesKeepGeneratedDITestValid catches template argument delimiters
-// that a single-module project cannot expose. The generated DI test builds a
-// mux with both module fakes, and the composed server routes both modules.
+// that a single-module project cannot expose. The composed graph routes both
+// modules while the generated DI test stays module-independent.
 func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
 	loomToolAvailable(t)
 	dir := create(t, t.TempDir())
@@ -515,16 +481,14 @@ func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
 	}
 }
 
-// TestAddKeepsEditedDITestAndDocumentsTheBoundary proves the other half of the
-// seam: once the user has edited di_test.go it stays preserved across a later
-// module add too, and the add reports it. weld deliberately does not merge or
-// overwrite the user's assertions, so a module whose Service signature changes
-// NewServer remains a manual update; this test pins that boundary instead of
-// letting a later add silently rewrite the file.
-func TestAddKeepsEditedDITestAndDocumentsTheBoundary(t *testing.T) {
+// TestAddOverwritesEditedDITest pins the ownership boundary: di_test.go is a
+// generated file, so an edit to it does not survive a later add. Module-specific
+// assertions belong in the module's own package test, which weld writes once and
+// never regenerates. The regenerated test matches the manifest hash, so weld
+// still owns it.
+func TestAddOverwritesEditedDITest(t *testing.T) {
 	loomToolAvailable(t)
-	root := t.TempDir()
-	dir := create(t, root)
+	dir := create(t, t.TempDir())
 	add(t, dir, "http")
 	add(t, dir, "api")
 
@@ -534,36 +498,20 @@ func TestAddKeepsEditedDITestAndDocumentsTheBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := addModule(t, dir, "widget")
-	if got := readFile(t, diTestPath); !strings.Contains(got, userTestMarker) {
-		t.Fatal("adding a module replaced the edited DI test")
+	addModule(t, dir, "widget")
+	if got := readFile(t, diTestPath); strings.Contains(got, userTestMarker) {
+		t.Fatal("adding a module kept an edit to the generated DI test")
 	}
-	noted := false
-	for _, note := range result.Notes {
-		if strings.Contains(note, "internal/di/di_test.go") && strings.Contains(note, "edited locally") {
-			noted = true
-		}
-	}
-	if !noted {
-		t.Fatalf("adding a module did not report the preserved DI test: %v", result.Notes)
-	}
-	preserved := false
-	for _, file := range mustLoad(t, dir).Files {
-		if file.Path == "internal/di/di_test.go" && file.Preserve {
-			preserved = true
-		}
-	}
-	if !preserved {
-		t.Fatal("the edited DI test was not recorded as preserved")
+	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after add: %+v", drift)
 	}
 }
 
 // TestLoomModuleServiceSignatureChangeCompiles proves the Loom seam is
 // editable: after `weld add db`, changing the module's constructor to
 // NewService(repo data.Repository) still compiles and tests, in both install
-// orderings. The regenerated di_test.go serves the module through a fake, the
-// non-Loom route written before Loom calls the stable NewDemoService, and the
-// module's own tests use NewDemoService, so none of them depend on NewService's
+// orderings. The generated di_test.go never names a module, and the module's own
+// tests build the demo through NewDemoService, so neither depends on NewService's
 // signature.
 func TestLoomModuleServiceSignatureChangeCompiles(t *testing.T) {
 	loomToolAvailable(t)

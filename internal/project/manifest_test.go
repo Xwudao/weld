@@ -6,14 +6,13 @@ import (
 	"testing"
 )
 
-// TestManifestModifiedDistinguishesEdits proves Modified reports a user edit but
-// not generated content: a file weld wrote from an older template still matches
-// its recorded hash and must keep being regenerated, while a locally changed
-// file, an already-preserved file and a missing or unmanaged path are handled
-// distinctly.
-func TestManifestModifiedDistinguishesEdits(t *testing.T) {
+// TestManifestDriftDistinguishesEdits proves Drift separates generated content
+// from a local edit: a file whose content still matches the recorded hash is
+// clean, a changed file and a missing file are both reported, and a path weld
+// does not manage is ignored.
+func TestManifestDriftDistinguishesEdits(t *testing.T) {
 	dir := t.TempDir()
-	const path = "internal/di/di_test.go"
+	const path = "internal/di/di.go"
 	if err := os.MkdirAll(filepath.Join(dir, "internal", "di"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -28,36 +27,26 @@ func TestManifestModifiedDistinguishesEdits(t *testing.T) {
 	older := []byte("package di\n")
 	manifest.SetFile(path, "loom", older)
 
-	// The content weld wrote from an older template is not an edit, even though
-	// the current template would render differently.
+	// The content weld wrote is not drift, even though the current template
+	// would render differently.
 	write(string(older))
-	if modified, err := manifest.Modified(dir, path); err != nil || modified {
-		t.Fatalf("Modified = %v, %v; want false, nil for content weld wrote", modified, err)
-	}
-
-	// A missing managed file is regenerated, not preserved.
-	if err := os.Remove(filepath.Join(dir, path)); err != nil {
-		t.Fatal(err)
-	}
-	if modified, err := manifest.Modified(dir, path); err != nil || modified {
-		t.Fatalf("Modified = %v, %v; want false, nil for a missing file", modified, err)
+	if drift := manifest.Drift(dir); len(drift) != 0 {
+		t.Fatalf("Drift = %+v, want none for content weld wrote", drift)
 	}
 
 	// A user edit no longer matches the recorded hash.
-	write(string(older) + "// user assertion\n")
-	if modified, err := manifest.Modified(dir, path); err != nil || !modified {
-		t.Fatalf("Modified = %v, %v; want true, nil after a user edit", modified, err)
+	write(string(older) + "// user edit\n")
+	drift := manifest.Drift(dir)
+	if len(drift) != 1 || drift[0].Path != path || drift[0].Reason != "modified" {
+		t.Fatalf("Drift = %+v, want the edited file reported as modified", drift)
 	}
 
-	// Preserve records that the edit was accepted, so the file stays modified
-	// even once it matches the recorded hash again.
-	manifest.PreserveFile(path)
-	write(string(older))
-	if modified, err := manifest.Modified(dir, path); err != nil || !modified {
-		t.Fatalf("Modified = %v, %v; want true, nil for a preserved file", modified, err)
+	// A missing managed file is reported as missing.
+	if err := os.Remove(filepath.Join(dir, path)); err != nil {
+		t.Fatal(err)
 	}
-
-	if modified, err := manifest.Modified(dir, "internal/other.go"); err != nil || modified {
-		t.Fatalf("Modified = %v, %v; want false, nil for an unmanaged path", modified, err)
+	drift = manifest.Drift(dir)
+	if len(drift) != 1 || drift[0].Path != path || drift[0].Reason != "missing" {
+		t.Fatalf("Drift = %+v, want the missing file reported", drift)
 	}
 }

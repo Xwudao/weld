@@ -333,20 +333,6 @@ func logRoutes(cfg *config.Config, logger *slog.Logger, router *httpx.Router) {
 	router.LogRoutes(logger)
 }
 
-// newMux composes the module-only handler. It keeps the signature a project's
-// edited di_test.go was written against, so adding configuration to the
-// composition never breaks that preserved test; the graph itself calls
-// composeMux with the config and logger so a development environment logs the
-// routes.
-func newMux(
-	policies []httpserver.NamedPolicy,{{range .Modules}}
-	{{.Name}}Service {{.Name}}.Service,{{end}}
-) *nethttp.ServeMux {
-	return composeMux(nil, nil, policies,{{range .Modules}}
-		{{.Name}}Service,{{end}}
-	)
-}
-
 // composeMux composes the application handler from the installed modules.
 //
 // Route composition is explicit here rather than through a global registry, so
@@ -393,13 +379,21 @@ func applyPolicies(router *httpx.Router, policies []httpserver.NamedPolicy) *htt
 }
 {{- if .Caps.Has "api"}}
 
-// newMuxWithAPI composes the API and module routes. The API-specific wrapper
-// keeps newMux's module-only test seam source-compatible when api is added, and
-// it keeps the signature a project's edited di_test.go was written against; the
-// graph calls composeMuxWithAPI with the config and logger so a development
-// environment logs the routes.
-func newMuxWithAPI(policies []httpserver.NamedPolicy, service api.Service{{range .Modules}}, {{.Name}}Service {{.Name}}.Service{{end}}) *nethttp.ServeMux {
-	return composeMuxWithAPI(nil, nil, policies, service{{range .Modules}}, {{.Name}}Service{{end}})
+// apiOnlyMux composes the module-independent API surface: the web fallback
+// (when installed) and the API mounted at httpserver.APIPrefix behind the
+// project's named policies. It exists for the generated composition test, which
+// is regenerated with the capability set and must not depend on the installed
+// business modules: the graph mounts the same API in composeMuxWithAPI and then
+// adds the module routes, so this seam exercises the API wiring without naming a
+// module. Keep a module's own route assertions in that module's package test.
+func apiOnlyMux(policies []httpserver.NamedPolicy, service api.Service) *nethttp.ServeMux {
+	mux := nethttp.NewServeMux()
+{{- if .Caps.Has "web"}}
+	mux.Handle("/", web.Handler(httpserver.APIPrefix))
+{{- end}}
+	base := applyPolicies(httpx.NewRouter(mux), policies)
+	api.Register(base.Group(httpserver.APIPrefix), service)
+	return mux
 }
 
 // composeMuxWithAPI composes the API and module routes onto one policy-aware

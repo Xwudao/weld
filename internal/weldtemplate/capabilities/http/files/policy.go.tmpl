@@ -60,10 +60,11 @@ type NamedPolicy struct {
 // A module references a name with httpx.Policy(name) and a name no route uses yet
 // is harmless, so the set can grow ahead of the routes that need it.
 //
-// Two edits go with a new policy: a module that requires it, and the composition
-// test's own list in internal/di/di_test.go. That test applies its list instead of
-// this provider, so a name it omits makes the composed test panic — which is the
-// fail-closed behavior working, not a bug to work around.
+// One edit goes with a new policy: the module that requires it. The generated
+// composition test keeps its own short list for the module-independent API
+// surface, but it never mounts a module, so it does not have to track a module's
+// policy; an unguarded route is caught by the module's own test, which applies
+// the name explicitly.
 func Policies() ([]NamedPolicy, error) {
 	return []NamedPolicy{{Name: PolicyAdmin, Middleware: AdminGuard()}}, nil
 }

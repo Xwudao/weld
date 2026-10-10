@@ -115,16 +115,21 @@ parameter to `<name>.NewDeps`; it is already an available binding through
 needs `loom.Provide(...)` in the command graph. The server-only
 `*cron.Scheduler` is never available to a command.
 
-### `di_test.go` uses a fake, not `NewService`
+### `di_test.go` is module-independent
 
-The regenerated `di_test.go` serves each module through a small hand-written
-fake that implements the module's `Service` interface, rather than calling
-`<name>.NewService()`. The consequence is that changing `NewService` to take a
-dependency (for example `NewService(repo data.Repository)` after `weld add db`)
-compiles and passes; the server graph still binds the real
-`loom.Provide(<name>.NewService)` and follows the signature. The API is the
-exception: `di_test.go` calls `api.NewService()` because the API's Loom seam is
-the separate `NewAPIService` provider, which a user edits instead.
+The regenerated `di_test.go` never names a module: it exercises configuration,
+the pool, the server lifecycle, the middleware chain, the route logging and the
+module-independent API surface, and it builds those through the generated seams
+(`newServer`, `apiOnlyMux`) rather than through a module's `Service`. Each module
+package tests its own routes in `internal/modules/<name>/module_test.go`, a file
+written once and never regenerated. The consequence is that installing a module
+refreshes `di.go` and `loom_gen.go` but leaves `di_test.go` byte-for-byte
+unchanged, and changing `NewService` to take a dependency (for example
+`NewService(repo data.Repository)` after `weld add db`) cannot break the graph
+test. The API is reached through `api.NewService()` because the API's Loom seam is
+the separate `NewAPIService` provider, which a user edits instead. Keep
+module-specific assertions in the module's own test, not here: `di_test.go` is
+generated and an edit to it does not survive the next `weld add`.
 
 ## Configuration
 
@@ -158,18 +163,23 @@ so its `x/tools` dependency never enters this module.
 make generate
 ```
 
-`weld add` already regenerates `di.go`, `di_test.go` and `loom_gen.go` for you
-when an installed capability changes the provider set. Do not edit them. The
-stable provider seams — `api_provider.go`, `redis_provider.go`,
+`weld add` regenerates `di.go`, `di_test.go` and `loom_gen.go` for you when an
+installed capability changes the provider set; re-adding an installed capability
+(for example `weld add loom`) reconciles them when only the templates changed, so
+a project scaffolded by an older weld can be refreshed in place. Do not edit
+these files. The stable provider seams — `api_provider.go`, `redis_provider.go`,
 `mail_provider.go`, `storage_provider.go` and `cron_provider.go` — are written
-once and never regenerated, so edit those files to wire dependencies.
+once and never regenerated, so edit those files to wire dependencies, and keep a
+module's own route assertions in that module's `module_test.go`.
 
 ## Tests
 
-`di_test.go` exercises the composed graph with no PostgreSQL: configuration is
-driven through an injected loader, the API service is served in memory over a
-real loopback socket, and the lifecycle's bind, serve-failure and graceful-stop
-behavior is checked on loopback sockets. The lifecycle tests inject a logger
-backed by an `io.Discard` or in-memory writer, so startup and shutdown logging
-is asserted without touching the process streams. A CLI-only project (no `http`)
-gets only the configuration tests.
+`di_test.go` exercises the generated composition with no PostgreSQL:
+configuration is driven through an injected loader, the API service is served in
+memory over a real loopback socket, and the lifecycle's bind, serve-failure and
+graceful-stop behavior is checked on loopback sockets. The lifecycle tests inject
+a logger backed by an `io.Discard` or in-memory writer, so startup and shutdown
+logging is asserted without touching the process streams. The file is
+module-independent, so a new module adds its routes to the module's own test and
+never to this one. A CLI-only project (no `http`) gets only the configuration
+tests.

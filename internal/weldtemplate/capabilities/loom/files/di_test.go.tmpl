@@ -27,31 +27,39 @@ import (
 	"__module__/internal/api"
 {{- end}}
 	"__module__/internal/config"
-{{- if .Caps.Has "http"}}
+{{- if .Caps.Has "api"}}
 	"__module__/internal/httpserver"
+{{- end}}
+{{- if .Caps.Has "http"}}
+	"__module__/internal/httpx"
 {{- end}}
 {{- if or (.Caps.Has "http") (.Caps.Has "db")}}
 	"__module__/internal/logging"
 {{- end}}
-{{- range .Modules}}
-	"__module__/internal/modules/{{.Name}}"
-{{- end}}
 )
 
-// The tests here exercise the composed graph without PostgreSQL: the pool is
-// only parsed (never connected) and only when a consumer asks for it, the API
-// service is served in memory, and the lifecycle's bind, serve-failure and
-// graceful-stop behavior is checked on loopback sockets.
-{{- if .Caps.Has "http"}}
+// The tests here exercise the generated composition without PostgreSQL: the pool
+// is only parsed (never connected) and only when a consumer asks for it, the
+// lifecycle's bind, serve-failure and graceful-stop behavior is checked on
+// loopback sockets, and the API is served in memory.
+//
+// This file is regenerated with the installed capability set and is deliberately
+// independent of the installed business modules: it never names a module, a
+// module Service or a module fake. Each module package tests its own routes
+// (internal/modules/<name>/module_test.go), so installing a module refreshes
+// di.go and loom_gen.go but leaves this file unchanged. Keep module-specific
+// assertions in the module's own test file, not here.
+{{- if .Caps.Has "api"}}
 
 // testPolicies is the composition's policy list for these tests: the "admin"
-// policy with the shipped placeholder guard. The generated graph applies
-// httpserver.Policies, so a test passes the list it needs instead.
-//
-// Keep it in step with the project's policies: a module that requires a name this
-// list does not define makes the composition panic.
+// name mapped to a pass-through guard. The API surface this file mounts does not
+// guard a route, but the router fails closed when a route names an undefined
+// policy, so the name is defined here. The guard is a local pass-through rather
+// than httpserver.AdminGuard, so this generated file never depends on the
+// project's guard signature (the stable policy file may give the real guard
+// dependencies). If a route on the API surface uses another name, add it here.
 var testPolicies = []httpserver.NamedPolicy{
-	{Name: httpserver.PolicyAdmin, Middleware: httpserver.AdminGuard()},
+	{Name: httpserver.PolicyAdmin, Middleware: func(next nethttp.Handler) nethttp.Handler { return next }},
 }
 {{- end}}
 
@@ -224,86 +232,51 @@ func TestNewConfigRejectsBlankAddr(t *testing.T) {
 	}
 }
 
-{{if .Modules}}
-// The fakes below implement each installed module's Service interface without
-// calling its NewService constructor, so a user who changes that constructor's
-// signature (for example to consume data.Repository after `weld add db`) does
-// not break this regenerated test. The HTTP graph binds the real NewService, so
-// production wiring still follows the user's edit.
-{{- range .Modules}}
-
-// {{.Name}}FakeService implements {{.Name}}.Service.
-type {{.Name}}FakeService struct{}
-
-func ({{.Name}}FakeService) Greet(_ context.Context, req {{.Name}}.Request) ({{.Name}}.Response, error) {
-	return {{.Name}}.Response{Module: "{{.Name}}", Message: "Hello, " + strings.TrimSpace(req.Name) + "!"}, nil
-}
-
-func ({{.Name}}FakeService) Create(_ context.Context, req {{.Name}}.CreateRequest) ({{.Name}}.Item, error) {
-	return {{.Name}}.Item{ID: "{{.Name}}-1", Name: req.Name}, nil
-}
-{{- end}}
-{{end}}
-
-// newServerForTest builds a server against the installed graph providers,
-// injecting a logger so the bind/serve lifecycle is exercised without
-// PostgreSQL and without a global logger.{{if .Caps.Has "api"}}
-// The API service is built through api.NewService rather than the graph's
-// NewAPIService provider, so a user who edits that provider (for example to
-// consume data.Repository) does not break this regenerated test.{{end}}{{if .Modules}}
-// Each module is served through a fake built here, not its NewService, for the
-// same reason.{{end}}
+// newServerForTest builds the managed server through the generated seam with an
+// injected logger and an empty handler, so the bind, serve-failure and
+// graceful-stop lifecycle is exercised without a database, without a global
+// logger and without any installed business module.
 func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
 	t.Helper()
-	server, err := NewServer{{if .Caps.Has "api"}}WithAPI{{end}}(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger, testPolicies{{if .Caps.Has "api"}}, api.NewService(){{end}}{{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	server, err := newServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger, nethttp.NewServeMux())
 	if err != nil {
-		t.Fatalf("NewServer: %v", err)
+		t.Fatalf("newServer: %v", err)
 	}
 	return server
 }
-{{- if .Caps.Has "api"}}
 
-// TestComposedMuxHasNoDocumentEndpoint proves the composition no longer serves
-// a documentation endpoint: the reserved path is an ordinary 404.
-func TestComposedMuxHasNoDocumentEndpoint(t *testing.T) {
-	mux := newMuxWithAPI(testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
-	if recorder.Code != nethttp.StatusNotFound {
-		t.Fatalf("GET /api/openapi.json = %d, want 404", recorder.Code)
-	}
-}
-
-// TestDevelopmentLogsTheComposedRoutes proves the composition logs every
-// registered route, with the policy guarding it, in a development environment,
-// and stays silent in production.
+// TestDevelopmentLogsTheComposedRoutes proves logRoutes logs every registered
+// route in a development environment and stays silent in production. It builds
+// the router directly, so it needs no module.
 func TestDevelopmentLogsTheComposedRoutes(t *testing.T) {
 	var buf bytes.Buffer
 	logger := logging.New(&buf, logging.TextFormat, nil)
-	composeMuxWithAPI(&config.Config{Environment: config.EnvironmentLocal}, logger, testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	router := httpx.NewRouter(nethttp.NewServeMux())
+	router.Get("/ping", func(nethttp.ResponseWriter, *nethttp.Request) {})
+
+	logRoutes(&config.Config{Environment: config.EnvironmentLocal}, logger, router)
 	out := buf.String()
-	if !strings.Contains(out, "registered routes") || !strings.Contains(out, httpserver.APIPrefix) {
+	if !strings.Contains(out, "registered routes") || !strings.Contains(out, "/ping") {
 		t.Fatalf("a development composition did not log its routes:\n%s", out)
 	}
 
 	buf.Reset()
-	composeMuxWithAPI(&config.Config{Environment: config.EnvironmentProduction}, logger, testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	logRoutes(&config.Config{Environment: config.EnvironmentProduction}, logger, router)
 	if buf.Len() != 0 {
 		t.Fatalf("a production composition logged its routes:\n%s", buf.String())
 	}
 }
-{{- end}}
 
-// TestComposedServerAppliesMiddleware proves the Loom graph serves the project
-// middleware chain: the graph wraps its mux with httpserver.Chain, so even a
-// not-found response carries a request id. It needs no socket.
+// TestComposedServerAppliesMiddleware proves the generated server serves the
+// project middleware chain: newServer wraps its handler with httpserver.Chain,
+// so even a not-found response carries a request id. It needs no socket.
 func TestComposedServerAppliesMiddleware(t *testing.T) {
 	lifecycle := loom.NewLifecycle()
 	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
 	recorder := httptest.NewRecorder()
 	server.HTTP.Handler.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/does-not-exist", nil))
 	if recorder.Header().Get("X-Request-Id") == "" {
-		t.Fatal("the Loom composition did not apply the middleware chain")
+		t.Fatal("the generated server did not apply the middleware chain")
 	}
 }
 
@@ -404,10 +377,34 @@ func TestServerLogsLifecycle(t *testing.T) {
 	}
 {{- end}}
 }
-
 {{- if .Caps.Has "api"}}
+
+// newAPIServerForTest builds the managed server over the module-independent API
+// surface, so the end-to-end test binds a real loopback socket without any
+// installed business module.
+func newAPIServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
+	t.Helper()
+	cfg := &config.Config{HTTP: config.HTTP{Addr: addr}}
+	server, err := newServer(lifecycle, cfg, logger, apiOnlyMux(testPolicies, api.NewService()))
+	if err != nil {
+		t.Fatalf("newServer: %v", err)
+	}
+	return server
+}
+
+// TestComposedMuxHasNoDocumentEndpoint proves the composition no longer serves
+// a documentation endpoint: the reserved path is an ordinary 404.
+func TestComposedMuxHasNoDocumentEndpoint(t *testing.T) {
+	mux := apiOnlyMux(testPolicies, api.NewService())
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/openapi.json", nil))
+	if recorder.Code != nethttp.StatusNotFound {
+		t.Fatalf("GET /api/openapi.json = %d, want 404", recorder.Code)
+	}
+}
+
 func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
-	mux := newMuxWithAPI(testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
+	mux := apiOnlyMux(testPolicies, api.NewService())
 	body := `{"name":"widget","quantity":2,"status":"active"}`
 	request := httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -446,7 +443,7 @@ func envelopeData(t *testing.T, raw []byte) json.RawMessage {
 // never depends on a fixed port.
 func TestComposedServerServesInMemoryAPI(t *testing.T) {
 	lifecycle := loom.NewLifecycle()
-	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
+	server := newAPIServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
 	ctx := context.Background()
 	if err := lifecycle.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -502,48 +499,6 @@ func getJSON(t *testing.T, url string) []byte {
 	return raw
 }
 {{- end}}
-
-{{- if .Modules}}
-// TestComposedMuxServesModulesWithoutSocket proves the graph registers every
-// installed business module on the composed mux, with no socket and no database.
-func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
-	mux := newMux{{if .Caps.Has "api"}}WithAPI{{end}}(testPolicies, {{if .Caps.Has "api"}}api.NewService(),{{end}}{{range .Modules}}{{.Name}}FakeService{},{{end}})
-	prefix := httpserver.ModulePrefix({{(index .Modules 0).Name}}.Name)
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, prefix, nil))
-	if recorder.Code != nethttp.StatusOK {
-		t.Fatalf("GET %s = %d: %s", prefix, recorder.Code, recorder.Body)
-	}
-}
-{{- if .Caps.Has "api"}}
-
-// TestComposedMuxServesModuleRoutes proves the graph registers every installed
-// business module on the composed mux, including its guarded administrator
-// route: the public route answers and the unauthenticated write is refused.
-func TestComposedMuxServesModuleRoutes(t *testing.T) {
-	mux := newMuxWithAPI(testPolicies, api.NewService(){{range .Modules}}, {{.Name}}FakeService{}{{end}})
-	{{- range .Modules}}
-	{
-		prefix := httpserver.ModulePrefix({{.Name}}.Name)
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, prefix, nil))
-		if recorder.Code != nethttp.StatusOK {
-			t.Fatalf("GET %s = %d: %s", prefix, recorder.Code, recorder.Body)
-		}
-		request := httptest.NewRequest(nethttp.MethodPost, prefix+"/admin/items", strings.NewReader(`{"name":"widget"}`))
-		request.Header.Set("Content-Type", "application/json")
-		recorder = httptest.NewRecorder()
-		mux.ServeHTTP(recorder, request)
-		if recorder.Code != nethttp.StatusUnauthorized {
-			t.Fatalf("POST %s/admin/items without auth = %d, want 401", prefix, recorder.Code)
-		}
-	}
-	{{- end}}
-}
-
-{{- end}}
-{{- end}}
-
 {{if .Caps.Has "cron"}}
 // TestSchedulerStartsAfterTheServerAndStopsFirst proves the graph wiring: the
 // server binds its socket before the scheduler starts, and the scheduler stops

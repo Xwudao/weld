@@ -289,7 +289,7 @@ func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
 	// With only http installed the Loom server graph exists and serves nothing
 	// beyond the middleware chain.
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	if !strings.Contains(di, "loom.Graph[*App](") || !strings.Contains(di, "func newMux(") {
+	if !strings.Contains(di, "loom.Graph[*App](") || !strings.Contains(di, "func composeMux(") {
 		t.Fatalf("the Loom server graph is missing:\n%s", di)
 	}
 

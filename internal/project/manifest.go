@@ -65,10 +65,6 @@ type ManagedFile struct {
 	Path       string `json:"path"`
 	Capability string `json:"capability"`
 	SHA256     string `json:"sha256"`
-	// Preserve keeps a user-edited generated seam stable. Weld still records
-	// ownership so later plans can recognize the file, but does not refresh its
-	// hash or replace its contents.
-	Preserve bool `json:"preserve,omitempty"`
 }
 
 // NewManifest builds an empty manifest for a freshly scaffolded project.
@@ -204,23 +200,11 @@ func (m *Manifest) SetFile(path, capability string, content []byte) {
 	entry := ManagedFile{Path: path, Capability: capability, SHA256: HashContent(content)}
 	for i := range m.Files {
 		if m.Files[i].Path == path {
-			entry.Preserve = m.Files[i].Preserve
 			m.Files[i] = entry
 			return
 		}
 	}
 	m.Files = append(m.Files, entry)
-}
-
-// PreserveFile marks a managed generated seam as user-owned after it has been
-// edited. Future capability adds retain its contents instead of replacing it.
-func (m *Manifest) PreserveFile(path string) {
-	for i := range m.Files {
-		if m.Files[i].Path == path {
-			m.Files[i].Preserve = true
-			return
-		}
-	}
 }
 
 // Encode serializes the manifest with a trailing newline.
@@ -250,9 +234,6 @@ func RefreshManifest(root string) error {
 		return err
 	}
 	for i := range manifest.Files {
-		if manifest.Files[i].Preserve {
-			continue
-		}
 		raw, err := os.ReadFile(filepath.Join(root, manifest.Files[i].Path))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -279,33 +260,6 @@ func (m *Manifest) Owns(path string) bool {
 	return false
 }
 
-// Modified reports whether a managed file has been changed since weld wrote it.
-//
-// A file marked preserve was already accepted as edited, so it stays modified.
-// Otherwise the file is compared with the hash weld recorded, which is what
-// distinguishes a user edit from content that only differs because weld wrote
-// an older template. A missing file, or a path weld does not manage, is not
-// modified.
-func (m *Manifest) Modified(root, path string) (bool, error) {
-	for _, file := range m.Files {
-		if file.Path != path {
-			continue
-		}
-		if file.Preserve {
-			return true, nil
-		}
-		raw, err := os.ReadFile(filepath.Join(root, path))
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return false, nil
-			}
-			return false, err
-		}
-		return HashContent(raw) != file.SHA256, nil
-	}
-	return false, nil
-}
-
 // Drift describes a managed file that no longer matches the manifest.
 type Drift struct {
 	Path   string
@@ -316,9 +270,6 @@ type Drift struct {
 func (m *Manifest) Drift(root string) []Drift {
 	var drift []Drift
 	for _, file := range m.Files {
-		if file.Preserve {
-			continue
-		}
 		raw, err := os.ReadFile(filepath.Join(root, file.Path))
 		if err != nil {
 			drift = append(drift, Drift{Path: file.Path, Reason: "missing"})

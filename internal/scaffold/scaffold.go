@@ -317,7 +317,11 @@ func Add(req Request, name string) (*Result, error) {
 	result := &Result{Dir: req.Dir, Capability: requested}
 	if len(order) == 0 {
 		result.Notes = alreadyInstalledNotes(req.Dir, manifest, requested)
-		return result, nil
+		// An installed set that did not grow can still be out of date: the
+		// generated graph follows the current templates, so re-adding an installed
+		// capability refreshes di.go and di_test.go for a project scaffolded by an
+		// older weld. Nothing is planned when the rendered graph already matches.
+		return result, reconcileInstalled(req, manifest, result)
 	}
 	for _, capability := range order {
 		if capability.Name != requested.Name {
@@ -335,6 +339,27 @@ func Add(req Request, name string) (*Result, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// reconcileInstalled re-renders the generated dependency graph for an unchanged
+// installed set, so `weld add <installed>` refreshes a project whose generated
+// files were written by an older weld. It returns without writing anything when
+// the rendered graph already matches what is on disk, so a repeat add stays a
+// no-op.
+func reconcileInstalled(req Request, manifest *project.Manifest, result *Result) error {
+	p := newPlanner(req, manifest, result)
+	if err := reconcileDI(req, manifest, p.present, p.planned, p.upsert, result); err != nil {
+		return err
+	}
+	if len(result.Operations) == 0 {
+		return nil
+	}
+	encoded, err := manifest.Encode()
+	if err != nil {
+		return err
+	}
+	p.upsert(project.Operation{Path: project.ManifestName, Content: encoded, Overwrite: true})
+	return nil
 }
 
 // containsCapability reports whether order already includes name.
@@ -574,31 +599,7 @@ func reconcileDI(req Request, manifest *project.Manifest, present map[string]boo
 			if bytes.Equal(current, source.content) {
 				continue
 			}
-			// The graph test is a project-owned seam. It is generated for a
-			// fresh project, but users commonly add fakes and route assertions
-			// there as their module interfaces evolve. Preserve it only once the
-			// user has actually edited it: an unmodified file still matches the
-			// hash weld recorded, so a later capability keeps refreshing it, and
-			// content that differs only because weld wrote an older template is
-			// regenerated rather than mistaken for an edit.
 			_, statErr := os.Stat(filepath.Join(req.Dir, source.path))
-			if source.path == path.Join(capability.DI.Dir, "di_test.go") {
-				edited, err := manifest.Modified(req.Dir, source.path)
-				if err != nil {
-					return err
-				}
-				if edited {
-					// A preserved test is never rewritten, but the user is told:
-					// replacing its contents would discard their assertions, and a
-					// later module whose Service signature changes has to be
-					// updated by hand because weld cannot merge it.
-					manifest.PreserveFile(source.path)
-					result.Notes = append(result.Notes, fmt.Sprintf(
-						"%s was edited locally; keeping your version (weld will not regenerate it, and a later module whose Service signature changes may need a manual update)",
-						source.path))
-					continue
-				}
-			}
 			planned[source.path] = source.content
 			upsert(project.Operation{Path: source.path, Content: source.content, Overwrite: statErr == nil})
 			manifest.SetFile(source.path, capability.Name, source.content)

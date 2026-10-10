@@ -600,8 +600,9 @@ Test conventions:
 - The scaffold tests for `loom` generate a real project, run the pinned
   generator, and assert the committed `internal/di/loom_gen.go` is generator
   output and reproduces byte for byte (`generate -dry-run`). The generated
-  `internal/di/di_test.go` exercises the composed graph with an injected
-  `EnvLookup` and an in-memory repository: no database and no `DATABASE_URL`.
+  `internal/di/di_test.go` is module-independent: it exercises configuration, the
+  server lifecycle and the API surface with no database and no `DATABASE_URL`,
+  and adding a module leaves it byte-for-byte unchanged.
   A regression test proves a `db`+`loom` project with `DATABASE_URL` unset still
   builds and tests (the graph tests inject a fake environment) and only
   resolving the graph fails, naming `DATABASE_URL` without inventing or echoing
