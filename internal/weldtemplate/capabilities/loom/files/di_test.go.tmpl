@@ -3,13 +3,15 @@ package di
 import (
 	"context"
 	"io/fs"
+{{- if or (.Caps.Has "http") (.Caps.Has "db")}}
+	"io"
+	"log/slog"
+{{- end}}
 {{- if .Caps.Has "http"}}
 	"bytes"
 {{- if .Caps.Has "api"}}
 	"encoding/json"
 {{- end}}
-	"io"
-	"log/slog"
 	"net"
 	nethttp "net/http"
 	"net/http/httptest"
@@ -28,7 +30,7 @@ import (
 {{- if .Caps.Has "http"}}
 	"__module__/internal/httpserver"
 {{- end}}
-{{- if .Caps.Has "http"}}
+{{- if or (.Caps.Has "http") (.Caps.Has "db")}}
 	"__module__/internal/logging"
 {{- end}}
 {{- range .Modules}}
@@ -139,7 +141,7 @@ func TestNewConfigNeedsNoDatabase(t *testing.T) {
 // pool, the one constructor that needs a database: constructing it without a
 // database setting fails loudly rather than inventing a dsn.
 func TestNewPoolRequiresDatabaseCredentials(t *testing.T) {
-	pool, cleanup, err := NewPool(context.Background(), &config.Config{})
+	pool, cleanup, err := NewPool(context.Background(), &config.Config{}, discardLogger())
 	if err == nil {
 		t.Fatal("expected an error when the database has no credentials")
 	}
@@ -155,7 +157,7 @@ func TestNewPoolParsesWithoutConnecting(t *testing.T) {
 	cfg := &config.Config{Database: config.Database{
 		Host: "localhost", Port: 5432, User: "app", Password: "pw", Name: "{{.Name}}",
 	}}
-	pool, cleanup, err := NewPool(context.Background(), cfg)
+	pool, cleanup, err := NewPool(context.Background(), cfg, discardLogger())
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -171,6 +173,34 @@ func TestNewPoolParsesWithoutConnecting(t *testing.T) {
 	// The lifecycle calls a cleanup once, and it must stay safe if called again.
 	if err := cleanup(context.Background()); err != nil {
 		t.Fatalf("second cleanup: %v", err)
+	}
+}
+
+// TestNewPoolLogsQueriesOnlyInDevelopment proves the query logger belongs to a
+// development environment: the development pool carries a tracer and every other
+// pool carries none, so a production pool logs no statement. It parses the dsn
+// without connecting, so it needs no database.
+func TestNewPoolLogsQueriesOnlyInDevelopment(t *testing.T) {
+	database := config.Database{Host: "localhost", Port: 5432, User: "app", Password: "pw", Name: "{{.Name}}"}
+	pool, cleanup, err := NewPool(context.Background(), &config.Config{
+		Environment: config.EnvironmentLocal,
+		Database:    database,
+	}, discardLogger())
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	defer cleanup(context.Background())
+	if pool.Config().ConnConfig.Tracer == nil {
+		t.Fatal("a development pool has no query tracer")
+	}
+
+	pool, cleanup, err = NewPool(context.Background(), &config.Config{Database: database}, discardLogger())
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	defer cleanup(context.Background())
+	if pool.Config().ConnConfig.Tracer != nil {
+		t.Fatal("a production pool logs statements")
 	}
 }
 {{- end}}
@@ -263,12 +293,6 @@ func TestDevelopmentLogsTheComposedRoutes(t *testing.T) {
 	}
 }
 {{- end}}
-
-// discardLogger is the injected logger for lifecycle tests that do not assert
-// on output.
-func discardLogger() *slog.Logger {
-	return logging.New(io.Discard, logging.TextFormat, nil)
-}
 
 // TestComposedServerAppliesMiddleware proves the Loom graph serves the project
 // middleware chain: the graph wraps its mux with httpserver.Chain, so even a
@@ -562,4 +586,11 @@ func TestSchedulerStartsAfterTheServerAndStopsFirst(t *testing.T) {
 	}
 }
 {{- end}}
+{{- end}}
+{{- if or (.Caps.Has "http") (.Caps.Has "db")}}
+
+// discardLogger is the injected logger for tests that do not assert on output.
+func discardLogger() *slog.Logger {
+	return logging.New(io.Discard, logging.TextFormat, nil)
+}
 {{- end}}

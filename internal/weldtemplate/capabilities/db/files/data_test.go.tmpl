@@ -1,12 +1,19 @@
 package data
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	sqlc "__module__/internal/data/sqlc"
 )
@@ -62,5 +69,52 @@ func TestNewPoolDoesNotEchoDSN(t *testing.T) {
 		if strings.Contains(err.Error(), password) {
 			t.Errorf("NewPool(%q) error echoes the credential: %v", dsn, err)
 		}
+	}
+}
+
+// TestWithQueryLogAttachesATracer proves statement logging is opt-in: a pool
+// configured without the option carries no tracer and logs nothing.
+func TestWithQueryLogAttachesATracer(t *testing.T) {
+	config, err := pgxpool.ParseConfig("postgres://user:pw@localhost:5432/app")
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if config.ConnConfig.Tracer != nil {
+		t.Fatal("a pool config without WithQueryLog already has a tracer")
+	}
+	WithQueryLog(slog.New(slog.NewTextHandler(io.Discard, nil)))(config)
+	if config.ConnConfig.Tracer == nil {
+		t.Fatal("WithQueryLog did not attach a tracer")
+	}
+}
+
+// TestQueryLoggerLogsTheStatementAndResult drives the tracer directly, so the
+// record it writes is pinned without a database.
+func TestQueryLoggerLogsTheStatementAndResult(t *testing.T) {
+	var buf bytes.Buffer
+	tracer := queryLogger{logger: slog.New(slog.NewTextHandler(&buf, nil))}
+	ctx := tracer.TraceQueryStart(context.Background(), nil, pgx.TraceQueryStartData{SQL: "select 1", Args: []any{7}})
+	tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{CommandTag: pgconn.NewCommandTag("SELECT 1")})
+	out := buf.String()
+	for _, want := range []string{"level=INFO", `sql="select 1"`, "args=[7]", "duration=", "rows=1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("a query record is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestQueryLoggerLogsAFailure proves a failed statement is still one record, with
+// the error where the row count would be.
+func TestQueryLoggerLogsAFailure(t *testing.T) {
+	var buf bytes.Buffer
+	tracer := queryLogger{logger: slog.New(slog.NewTextHandler(&buf, nil))}
+	ctx := tracer.TraceQueryStart(context.Background(), nil, pgx.TraceQueryStartData{SQL: "select 1"})
+	tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{Err: errors.New("boom")})
+	out := buf.String()
+	if !strings.Contains(out, "error=boom") {
+		t.Fatalf("a failed statement was not logged with its error:\n%s", out)
+	}
+	if strings.Contains(out, "rows=") {
+		t.Fatalf("a failed statement logged a row count:\n%s", out)
 	}
 }

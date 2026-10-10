@@ -48,6 +48,25 @@ so the edit survives later capability installs. Do not add providers to
 `internal/di/di.go`: it is regenerated. See
 `internal/di/README.md` and `internal/api/README.md`.
 
+## The development query log
+
+`di.NewPool` attaches `data.WithQueryLog` to the graph's logger when the
+configuration marks a development environment, so every statement the pool runs
+is one record with the statement, its arguments, the elapsed time and either the
+row count or the error. Any other environment attaches nothing, so a production
+pool logs no statement and no argument.
+
+A pool built outside the graph passes the option itself:
+
+```go
+pool, err := data.NewPool(ctx, cfg.DSN(), data.WithQueryLog(logger))
+```
+
+The statement is the field the text logger paints (see `internal/logging`), so it
+stands out among the request records. The record carries the arguments verbatim,
+so attach the option to a development pool only: a production statement's
+arguments can hold a credential.
+
 ## SQL is the source of truth
 
 ```

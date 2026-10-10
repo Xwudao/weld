@@ -213,11 +213,20 @@ func NewLogger() *slog.Logger {
 // construction succeeds, so the pool is closed exactly once whether a later
 // constructor fails or the lifecycle stops normally. The dsn is built from the
 // validated configuration and is never logged.
-func NewPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, loom.Cleanup, error) {
+//
+// A development environment attaches the query logger, so every statement the
+// pool runs is logged with its arguments and duration through the graph's logger;
+// any other environment attaches nothing, so a production pool logs no statement
+// and no argument.
+func NewPool(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool, loom.Cleanup, error) {
 	if err := cfg.ValidateDatabase(); err != nil {
 		return nil, nil, err
 	}
-	pool, err := data.NewPool(ctx, cfg.DSN())
+	var options []data.PoolOption
+	if cfg.Environment.IsDevelopment() {
+		options = append(options, data.WithQueryLog(logger))
+	}
+	pool, err := data.NewPool(ctx, cfg.DSN(), options...)
 	if err != nil {
 		return nil, nil, err
 	}

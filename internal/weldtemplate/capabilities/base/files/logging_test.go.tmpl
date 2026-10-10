@@ -86,10 +86,10 @@ func TestNewLogsErrorAttribute(t *testing.T) {
 	}
 }
 
-// TestNewFormatsTextRecordTime pins the text handler's time: time.DateTime, the
-// date and local wall clock to the second, written unquoted as
-// time=2006-01-02 15:04:05. slog's default RFC 3339 time carries the "T"
-// separator and the zone offset, which this drops.
+// TestNewFormatsTextRecordTime pins the text record's time: time.DateTime, the
+// date and local wall clock to the second, written unquoted and with no zone
+// offset. slog's default carries the "T" separator and the offset, which this
+// drops.
 func TestNewFormatsTextRecordTime(t *testing.T) {
 	w := &fakeWriter{}
 	New(w, TextFormat, nil).Info("hello")
@@ -100,27 +100,13 @@ func TestNewFormatsTextRecordTime(t *testing.T) {
 	}
 	got, _, ok := strings.Cut(rest, " level=")
 	if !ok {
-		t.Fatalf("text record time is not followed by the level:\n%s", out)
+		t.Fatalf("the time is not followed by the level:\n%s", out)
 	}
-	if strings.Contains(got, `"`) {
-		t.Fatalf("time %q is still quoted", got)
+	if strings.ContainsAny(got, `"TZ+`) {
+		t.Fatalf("time %q is quoted or carries the RFC 3339 separator or zone", got)
 	}
 	if _, err := time.Parse(timeLayout, got); err != nil {
 		t.Fatalf("time %q does not match timeLayout: %v", got, err)
-	}
-	if strings.ContainsAny(got, "TZ+") {
-		t.Fatalf("time %q still carries the RFC 3339 separator or zone offset", got)
-	}
-}
-
-// TestNewOnlyRewritesTheLeadingTimeField pins the rewrite to the start of the
-// record: a later attribute that looks like the time field keeps slog's quoting.
-func TestNewOnlyRewritesTheLeadingTimeField(t *testing.T) {
-	w := &fakeWriter{}
-	New(w, TextFormat, nil).Info("hello", "note", `time="x"`)
-	out := w.String()
-	if !strings.Contains(out, `note="time=\"x\""`) {
-		t.Fatalf("a non-time field was rewritten:\n%s", out)
 	}
 }
 
@@ -160,5 +146,130 @@ func TestNewTextHonoursCallerReplaceAttr(t *testing.T) {
 	}
 	if options.ReplaceAttr == nil {
 		t.Fatal("New mutated the caller's HandlerOptions")
+	}
+}
+
+// TestTextRecordPaintsTheStatement proves the statement field is painted and that
+// the record around it is written byte for byte, separators included: only the
+// colour is added.
+func TestTextRecordPaintsTheStatement(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).Info("query", StatementKey, "SELECT * FROM items WHERE id = $1", "rows", 1)
+	out := w.String()
+	want := `level=INFO msg=query ` + StatementKey + "=" + ansiCyan + `"SELECT * FROM items WHERE id = $1"` + ansiReset + " rows=1\n"
+	if !strings.HasSuffix(out, want) {
+		t.Fatalf("the painted record tail = %q, want %q", out, want)
+	}
+}
+
+// TestTextRecordWithoutAStatementIsPlain proves the colour is not paid for by
+// every record: a record with no statement field carries no escape byte, so a
+// production log stays plain text.
+func TestTextRecordWithoutAStatementIsPlain(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).Info("listening", "addr", ":8080")
+	if strings.ContainsRune(w.String(), 0x1b) {
+		t.Fatalf("a record without a statement emitted an escape:\n%q", w.String())
+	}
+}
+
+// TestTextRecordClosesTheStatementBeforeTheNewline proves the reset lands before
+// the record's newline, so the escape cannot open the next line.
+func TestTextRecordClosesTheStatementBeforeTheNewline(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).Info("query", StatementKey, "SELECT 1")
+	if out := w.String(); !strings.HasSuffix(out, ansiReset+"\n") {
+		t.Fatalf("the statement is not closed before the newline:\n%q", out)
+	}
+}
+
+// TestJSONRecordIsNeverPainted proves the JSON handler owns its own encoding: a
+// statement field stays plain JSON.
+func TestJSONRecordIsNeverPainted(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, JSONFormat, nil).Info("query", StatementKey, "SELECT 1")
+	if strings.ContainsRune(w.String(), 0x1b) {
+		t.Fatalf("the JSON record carries an escape:\n%q", w.String())
+	}
+}
+
+// TestTextRecordQuotesAmbiguousValues proves a value is quoted when it would
+// otherwise break the key=value record.
+func TestTextRecordQuotesAmbiguousValues(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).Info("hello world", "note", "a=b c")
+	out := w.String()
+	for _, want := range []string{`msg="hello world"`, `note="a=b c"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("an ambiguous value is not quoted with %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestTextRecordWritesTypedValues pins the kinds that need no quoting.
+func TestTextRecordWritesTypedValues(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).Info("m",
+		"count", 3,
+		"ratio", 0.5,
+		"ok", true,
+		"elapsed", 1500*time.Millisecond,
+		"at", time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC),
+	)
+	out := w.String()
+	for _, want := range []string{"count=3", "ratio=0.5", "ok=true", "elapsed=1.5s", "at=2026-10-10 08:00:00"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("a typed value is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestTextRecordFlattensGroups proves WithAttrs, WithGroup and a group attribute
+// flatten into dotted keys the way slog flattens them.
+func TestTextRecordFlattensGroups(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).With("app", "weld").WithGroup("http").Info("m", "status", 200, slog.Group("req", "id", 7))
+	out := w.String()
+	for _, want := range []string{"app=weld", "http.status=200", "http.req.id=7"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the flattened group is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestTextRecordKeepsAnAttributeInItsGroup proves WithAttrs binds an attribute to
+// the group that was open when it was added, not to one opened later.
+func TestTextRecordKeepsAnAttributeInItsGroup(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, nil).WithGroup("a").With("x", 1).WithGroup("b").Info("m", "y", 2)
+	out := w.String()
+	for _, want := range []string{"a.x=1", "a.b.y=2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the group path is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestTextRecordWritesSource proves AddSource is honoured, so a record can name
+// its call site.
+func TestTextRecordWritesSource(t *testing.T) {
+	w := &fakeWriter{}
+	New(w, TextFormat, &slog.HandlerOptions{AddSource: true}).Info("m")
+	if out := w.String(); !strings.Contains(out, "source=") {
+		t.Fatalf("AddSource did not add a source field:\n%s", out)
+	}
+}
+
+// TestTextRecordWritesOneWritePerRecord proves a record reaches the sink whole:
+// the handler holds its mutex across the line, so two goroutines cannot interleave
+// halves of one.
+func TestTextRecordWritesOneWritePerRecord(t *testing.T) {
+	w := &fakeWriter{}
+	logger := New(w, TextFormat, nil)
+	for i := 0; i < 3; i++ {
+		logger.Info("m", "i", i)
+	}
+	if w.Writes != 3 {
+		t.Fatalf("writes = %d, want one per record (3)", w.Writes)
 	}
 }

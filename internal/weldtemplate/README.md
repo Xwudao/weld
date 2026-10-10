@@ -96,7 +96,10 @@ commands/          per-name    -> `weld add command <name>` / `--command` payloa
 `base` is pure CLI: it never imports `net/http` and ships no configuration. It
 ships `internal/logging`, a small factory over `log/slog` (`New(w io.Writer,
 format Format, options *slog.HandlerOptions)`), so the process has one logging
-protocol with an injectable sink and no custom logger interface.
+protocol with an injectable sink and no custom logger interface. The text format
+is its own handler — a `time.DateTime` record time, and a statement field painted
+for a terminal, neither of which slog's `TextHandler` can express — while JSON
+stays slog's.
 
 `config` is the shared configuration capability, required by `loom` and
 installed automatically with any added capability. It ships `internal/config`:

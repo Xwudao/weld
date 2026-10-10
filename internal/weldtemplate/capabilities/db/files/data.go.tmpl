@@ -15,12 +15,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	sqlc "__module__/internal/data/sqlc"
+	"__module__/internal/logging"
 )
 
 // ErrNotFound is returned when a requested row does not exist.
@@ -50,23 +52,48 @@ type Repository interface {
 	ListItems(ctx context.Context, limit int) ([]Item, error)
 }
 
+// PoolOption configures the pool NewPool opens.
+type PoolOption func(*pgxpool.Config)
+
+// WithQueryLog attaches a tracer that logs every statement pgx runs, one record
+// per statement. The caller decides whether to attach it — the composition root
+// attaches it only in a development environment — so this package never reads the
+// environment and a production pool logs no statement.
+//
+// The record carries logging.StatementKey, then "args", "duration" and either
+// "rows" or "error", so the text handler paints the statement and the rest reads
+// as an ordinary record. It is logged at info level, like the other
+// development-only diagnostics (see the route log in internal/di), because the
+// graph's logger is built at the default level. The arguments are recorded
+// verbatim, so a development pool is the only place to attach it: a production
+// statement's arguments can hold a credential.
+func WithQueryLog(logger *slog.Logger) PoolOption {
+	return func(config *pgxpool.Config) {
+		config.ConnConfig.Tracer = queryLogger{logger: logger}
+	}
+}
+
 // NewPool opens a PostgreSQL connection pool from dsn.
 //
 // The pool is created lazily: NewPool parses the dsn but never connects or
 // pings, so it succeeds with a well-formed dsn even while the database is down.
 // Call pool.Ping(ctx) to verify connectivity and pool.Close() when done. The
 // dsn is a caller-supplied value (for example from an environment variable) and
-// is never read or logged here, so no credential enters this package.
+// is never read or logged here, so no credential enters this package. options
+// configures the pool; WithQueryLog is the one this package defines.
 //
 // A dsn that does not parse reports a fixed error rather than the parser's own:
 // the parser error can quote the dsn and its password, and the caller logs the
 // error it gets back, so this boundary must not carry a credential into a log
 // record.
-func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+func NewPool(ctx context.Context, dsn string, options ...PoolOption) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		// Do not echo the dsn or the parser error: either may carry a credential.
 		return nil, errors.New("data: invalid PostgreSQL dsn")
+	}
+	for _, option := range options {
+		option(config)
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -150,4 +177,42 @@ func WithTx(ctx context.Context, pool *pgxpool.Pool, fn func(repo *PostgresRepos
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return fn(&PostgresRepository{queries: sqlc.New(tx)})
 	})
+}
+
+// queryLogger logs every statement the pool runs. It is attached only through
+// WithQueryLog, so a pool without one pays nothing for it.
+type queryLogger struct{ logger *slog.Logger }
+
+// queryTrace is a statement in flight: TraceQueryStart records it on the context
+// that pgx hands back to TraceQueryEnd.
+type queryTrace struct {
+	sql   string
+	args  []any
+	start time.Time
+}
+
+// queryTraceKey is the context key a queryTrace travels under.
+type queryTraceKey struct{}
+
+// TraceQueryStart is part of pgx.QueryTracer. It cannot fail, so the statement,
+// its arguments and the start time are the only state it carries forward.
+func (l queryLogger) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	return context.WithValue(ctx, queryTraceKey{}, queryTrace{sql: data.SQL, args: data.Args, start: time.Now()})
+}
+
+// TraceQueryEnd is part of pgx.QueryTracer. It writes one record — the statement,
+// the arguments, the elapsed time and the outcome — so a statement is one line in
+// the log rather than two.
+func (l queryLogger) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	trace, _ := ctx.Value(queryTraceKey{}).(queryTrace)
+	fields := []any{
+		logging.StatementKey, trace.sql,
+		"args", trace.args,
+		"duration", time.Since(trace.start),
+	}
+	if data.Err != nil {
+		l.logger.Info("query failed", append(fields, "error", data.Err)...)
+		return
+	}
+	l.logger.Info("query", append(fields, "rows", data.CommandTag.RowsAffected())...)
 }

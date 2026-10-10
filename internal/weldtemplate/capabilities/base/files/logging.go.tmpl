@@ -4,13 +4,30 @@
 // captures records in a buffer and no package reaches for os.Stderr or
 // slog.Default. There is no custom logger interface — code depends on
 // *slog.Logger directly and replaces the sink by supplying a different Writer.
+//
+// Text records are written by this package's own handler rather than by
+// slog.TextHandler, because the project needs two things HandlerOptions cannot
+// express: a time that reads as time.DateTime instead of RFC 3339, and a
+// statement field painted for a terminal. slog quotes any value that holds a
+// space or an escape, so neither can travel through a value; only writing the
+// line can produce them. The format is otherwise slog's — the same quoting, the
+// same ReplaceAttr, group and AddSource behaviour — so a record is still logfmt
+// and an option means what its documentation says. JSON stays slog's own handler.
 package logging
 
 import (
-	"bytes"
+	"context"
+	"encoding"
+	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Format selects how a logger encodes records.
@@ -23,18 +40,30 @@ const (
 	JSONFormat Format = "json"
 )
 
-// timeLayout is how the text handler renders a record's time: time.DateTime, the
-// date and local wall clock to the second. The JSON handler keeps slog's RFC 3339
-// timestamp, which a log pipeline parses.
+// StatementKey is the attribute a query logger records a SQL statement under. The
+// text format paints that one field (see appendField), so a statement is visible
+// in a stream of request records. Only the pool logger writes it, and only in a
+// development environment, so a production record carries no escape byte.
+const StatementKey = "sql"
+
+// timeLayout is the record time the text format writes: time.DateTime, the date
+// and local wall clock to the second, unquoted and with no zone offset.
 const timeLayout = time.DateTime
+
+// The ANSI select-graphic-rendition codes the text format writes. They are the
+// 3-bit colours every terminal understands, and a painted value is closed with a
+// reset, so an interrupted stream cannot bleed one colour into the next record.
+const (
+	ansiReset = "\x1b[0m"
+	ansiCyan  = "\x1b[36m"
+)
 
 // New returns a *slog.Logger that writes records to w.
 //
-// format selects the handler encoding; any value other than JSONFormat selects
-// the text handler, so the zero Format is a working default. options configures
-// the handler — for example its Level — and a nil options uses slog's defaults.
-// The text handler renders the time with timeLayout and unquoted; a caller's own
-// ReplaceAttr, if any, still runs first.
+// format selects the encoder: JSONFormat writes one JSON object per record
+// through slog's JSON handler, and any other value writes the text format, so the
+// zero Format is a working default. options configures the handler — for example
+// its Level — and a nil options uses slog's defaults.
 func New(w io.Writer, format Format, options *slog.HandlerOptions) *slog.Logger {
 	if options == nil {
 		options = &slog.HandlerOptions{}
@@ -42,63 +71,246 @@ func New(w io.Writer, format Format, options *slog.HandlerOptions) *slog.Logger 
 	if format == JSONFormat {
 		return slog.New(slog.NewJSONHandler(w, options))
 	}
-	textOptions := *options
-	textOptions.ReplaceAttr = textTime(textOptions.ReplaceAttr)
-	return slog.New(slog.NewTextHandler(unquotedTime{w}, &textOptions))
+	return slog.New(newTextHandler(w, options))
 }
 
-// textTime returns a ReplaceAttr for the text handler that renders a record's
-// time with timeLayout. It calls next first, so a caller that supplied its own
-// ReplaceAttr keeps control: an attribute it drops stays dropped, and the time is
-// reformatted only while it is still the handler's time.Time.
-func textTime(next func([]string, slog.Attr) slog.Attr) func([]string, slog.Attr) slog.Attr {
-	return func(groups []string, a slog.Attr) slog.Attr {
-		if next != nil {
-			a = next(groups, a)
+// textHandler writes a record as key=value fields, one space apart, ending in a
+// newline: the time, the level, the message, a source when asked for, the
+// WithAttrs attributes, then the record's own. A group is flattened into dotted
+// keys, as slog flattens it.
+//
+// A handler derived by WithAttrs or WithGroup shares the writer, the options and
+// the mutex, so a record is always one Write and two goroutines cannot interleave
+// halves of a line.
+type textHandler struct {
+	w    io.Writer
+	opts *slog.HandlerOptions
+
+	mu     *sync.Mutex
+	attrs  []byte   // the WithAttrs fields, rendered and space-separated
+	groups []string // the WithGroup path the record's own attributes live under
+}
+
+// newTextHandler returns the text handler that writes to w.
+func newTextHandler(w io.Writer, opts *slog.HandlerOptions) *textHandler {
+	return &textHandler{w: w, opts: opts, mu: new(sync.Mutex)}
+}
+
+// Enabled reports whether a record at level is written. It is the handler's own
+// threshold — options.Level, or slog's default of INFO — so a logger built here
+// filters exactly like one built on slog's text handler.
+func (h *textHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= h.threshold()
+}
+
+// threshold is the level Enabled compares against.
+func (h *textHandler) threshold() slog.Level {
+	if h.opts.Level != nil {
+		return h.opts.Level.Level()
+	}
+	return slog.LevelInfo
+}
+
+// Handle writes one record under the handler's mutex, so the line reaches the
+// writer whole however many pieces it was built from.
+func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	line := make([]byte, 0, 128+len(h.attrs))
+	if !r.Time.IsZero() {
+		line = h.append(line, nil, slog.Time(slog.TimeKey, r.Time))
+	}
+	line = h.append(line, nil, slog.Any(slog.LevelKey, r.Level))
+	line = h.append(line, nil, slog.String(slog.MessageKey, r.Message))
+	if h.opts.AddSource && r.PC != 0 {
+		line = h.append(line, nil, slog.String(slog.SourceKey, source(r.PC)))
+	}
+	if len(h.attrs) > 0 {
+		if len(line) > 0 {
+			line = append(line, ' ')
 		}
-		if len(groups) == 0 && a.Key == slog.TimeKey {
-			if t, ok := a.Value.Any().(time.Time); ok {
-				return slog.String(slog.TimeKey, t.Format(timeLayout))
+		line = append(line, h.attrs...)
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		line = h.append(line, h.groups, a)
+		return true
+	})
+	_, err := h.w.Write(append(line, '\n'))
+	return err
+}
+
+// WithAttrs returns a handler that writes attrs with every record. They are
+// rendered once here rather than once per record, which is also when ReplaceAttr
+// sees them, exactly as slog's text handler does it.
+func (h *textHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if len(attrs) == 0 {
+		return h
+	}
+	derived := h.clone()
+	for _, a := range attrs {
+		derived.attrs = derived.append(derived.attrs, derived.groups, a)
+	}
+	return derived
+}
+
+// WithGroup returns a handler that writes the record's own attributes under
+// group. An empty name opens nothing, as slog ignores it.
+func (h *textHandler) WithGroup(group string) slog.Handler {
+	if group == "" {
+		return h
+	}
+	derived := h.clone()
+	derived.groups = append(derived.groups, group)
+	return derived
+}
+
+// clone returns the handler a With* call starts from: the same writer, options and
+// mutex, with its own attribute and group state.
+func (h *textHandler) clone() *textHandler {
+	return &textHandler{
+		w:      h.w,
+		opts:   h.opts,
+		mu:     h.mu,
+		attrs:  append([]byte(nil), h.attrs...),
+		groups: append([]string(nil), h.groups...),
+	}
+}
+
+// append appends one attribute: ReplaceAttr first, then a group flattened into
+// its members, then a field. groups is the path the attribute lives under, which
+// a group extends and ReplaceAttr receives.
+func (h *textHandler) append(line []byte, groups []string, a slog.Attr) []byte {
+	a.Value = a.Value.Resolve()
+	if h.opts.ReplaceAttr != nil && a.Value.Kind() != slog.KindGroup {
+		a = h.opts.ReplaceAttr(groups, a)
+		a.Value = a.Value.Resolve()
+	}
+	// Drop what slog drops: an attribute with neither a key nor a value.
+	if a.Key == "" && a.Value.Kind() != slog.KindGroup && a.Value.Equal(slog.Value{}) {
+		return line
+	}
+	if a.Value.Kind() == slog.KindGroup {
+		members := a.Value.Group()
+		if len(members) == 0 {
+			return line
+		}
+		if a.Key != "" {
+			groups = append(append([]string(nil), groups...), a.Key)
+		}
+		for _, member := range members {
+			line = h.append(line, groups, member)
+		}
+		return line
+	}
+	return h.appendField(line, dotted(groups, a.Key), a.Value)
+}
+
+// appendField appends " key=value". The statement field is the one value the
+// terminal gets to see painted, which is the highlight this format exists for.
+func (h *textHandler) appendField(line []byte, key string, v slog.Value) []byte {
+	if len(line) > 0 {
+		line = append(line, ' ')
+	}
+	line = appendQuoted(line, key)
+	line = append(line, '=')
+	if key == StatementKey {
+		line = append(line, ansiCyan...)
+		line = appendValue(line, v)
+		return append(line, ansiReset...)
+	}
+	return appendValue(line, v)
+}
+
+// dotted joins a group path and an attribute key the way slog flattens a group.
+func dotted(groups []string, key string) string {
+	if len(groups) == 0 {
+		return key
+	}
+	return strings.Join(groups, ".") + "." + key
+}
+
+// source renders a record's call site as "file:line", the form slog uses.
+func source(pc uintptr) string {
+	frame, _ := runtime.CallersFrames([]uintptr{pc}).Next()
+	return fmt.Sprintf("%s:%d", frame.File, frame.Line)
+}
+
+// appendValue appends a value the way slog's text handler does: a string is
+// quoted only when it has to be, a number is written as a number, and a time is
+// written with timeLayout so a time attribute reads like the record's own.
+func appendValue(line []byte, v slog.Value) []byte {
+	switch v.Kind() {
+	case slog.KindString:
+		return appendQuoted(line, v.String())
+	case slog.KindInt64:
+		return strconv.AppendInt(line, v.Int64(), 10)
+	case slog.KindUint64:
+		return strconv.AppendUint(line, v.Uint64(), 10)
+	case slog.KindFloat64:
+		return strconv.AppendFloat(line, v.Float64(), 'g', -1, 64)
+	case slog.KindBool:
+		return strconv.AppendBool(line, v.Bool())
+	case slog.KindDuration:
+		return appendQuoted(line, v.Duration().String())
+	case slog.KindTime:
+		return append(line, v.Time().Format(timeLayout)...)
+	case slog.KindAny:
+		return appendAny(line, v.Any())
+	}
+	return appendQuoted(line, v.String())
+}
+
+// appendAny appends a value slog has no kind for: a TextMarshaler and a []byte
+// keep their own rendering, and anything else goes through fmt.Sprint. The result
+// is quoted only when it needs to be, so an ordinary string stays readable.
+func appendAny(line []byte, value any) []byte {
+	if marshaler, ok := value.(encoding.TextMarshaler); ok {
+		if text, err := marshaler.MarshalText(); err == nil {
+			return appendQuoted(line, string(text))
+		}
+	}
+	if raw, ok := value.([]byte); ok {
+		return strconv.AppendQuote(line, string(raw))
+	}
+	return appendQuoted(line, fmt.Sprint(value))
+}
+
+// appendQuoted appends text, quoted when it would otherwise be ambiguous.
+func appendQuoted(line []byte, text string) []byte {
+	if !needsQuoting(text) {
+		return append(line, text...)
+	}
+	return strconv.AppendQuote(line, text)
+}
+
+// needsQuoting reports whether text has to be quoted to stay one field of a
+// key=value record. It is slog's rule: an empty value, an '=', a double quote, a
+// control character, or a non-ASCII rune that is a space or is not printable.
+// A backslash is left bare, which is also what slog does.
+func needsQuoting(text string) bool {
+	if text == "" {
+		return true
+	}
+	for i := 0; i < len(text); {
+		if b := text[i]; b < utf8.RuneSelf {
+			if b == '=' || (b != '\\' && !safeByte(b)) {
+				return true
 			}
+			i++
+			continue
 		}
-		return a
+		r, size := utf8.DecodeRuneInString(text[i:])
+		if r == utf8.RuneError || unicode.IsSpace(r) || !unicode.IsPrint(r) {
+			return true
+		}
+		i += size
 	}
+	return false
 }
 
-// unquotedTime writes the text handler's records with an unquoted time field.
-//
-// timeLayout contains a space, and the text handler quotes any value that needs
-// quoting, so textTime on its own would write time="2026-10-10 07:42:19" where
-// slog's default was the unquoted time=2026-10-10T07:42:19.731+08:00. The handler
-// gives no way to emit a bare string value, so the quotes are dropped at the sink
-// instead; every other field keeps slog's formatting and quoting.
-//
-// The text handler emits the time first, writes a whole record in one Write, and
-// holds its mutex across that Write, so the leading field is always the time and
-// two records can never interleave here.
-type unquotedTime struct{ w io.Writer }
-
-// Write rewrites a leading time="<value>" field to time=<value>, and forwards the
-// record unchanged when it has no such field.
-func (u unquotedTime) Write(p []byte) (int, error) {
-	const open = `time="`
-	if !bytes.HasPrefix(p, []byte(open)) {
-		_, err := u.w.Write(p)
-		return len(p), err
-	}
-	body := p[len(open):]
-	quote := bytes.IndexByte(body, '"')
-	if quote < 0 {
-		_, err := u.w.Write(p)
-		return len(p), err
-	}
-	// Drop the two quotes in place: time="<value>"<tail> becomes time=<value><tail>.
-	// The value moves left one byte and the tail two; copy shifts bytes, so the
-	// overlapping slices are safe.
-	value, tail := body[:quote], body[quote+1:]
-	key := len("time=")
-	n := copy(p[key:], value)
-	copy(p[key+n:], tail)
-	_, err := u.w.Write(p[:key+n+len(tail)])
-	return len(p), err
+// safeByte reports whether a printable ASCII byte may appear unquoted: the
+// printable range but for the double quote.
+func safeByte(b byte) bool {
+	return b >= '!' && b <= '~' && b != '"'
 }
