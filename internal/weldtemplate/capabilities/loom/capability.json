@@ -14,6 +14,7 @@
     { "path": "tools/loom/go.sum", "source": "files/tools/go.sum" },
     { "path": "internal/commandkit/commandkit.go", "source": "files/commandkit.go.tmpl" },
     { "path": "internal/commandkit/commandkit_test.go", "source": "files/commandkit_test.go.tmpl" },
+    { "path": "internal/di/repository_providers.go", "source": "files/repository_providers.go.tmpl" },
     { "path": "internal/di/README.md", "source": "files/README.md" }
   ],
   "patches": [

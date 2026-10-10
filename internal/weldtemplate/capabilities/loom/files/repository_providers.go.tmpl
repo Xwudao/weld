@@ -1,0 +1,41 @@
+package di
+
+import "github.com/Xwudao/loom"
+
+// repositoryModule is the project-owned seam for repository providers.
+//
+// weld writes this file once and never regenerates it, so the wiring below
+// survives every later `weld add`. The generated commonModule (di.go) includes
+// this module, so a provider declared here is visible to the server graph and to
+// every command graph at once. Loom still prunes every provider a root does not
+// depend on, so declaring a repository here costs a command that never asks for
+// it nothing.
+//
+// The module is empty by default, so a project that does not use a database
+// compiles with no data import: the JSON API stays the in-memory development
+// demo. After `weld add db`, register the repositories your services consume
+// here rather than editing the regenerated di.go. For example:
+//
+//	import (
+//		"__module__/internal/data"
+//	)
+//
+//	var repositoryModule = loom.Module(
+//		loom.As[data.Repository](NewRepository),
+//	)
+//
+// NewRepository, declared in di.go, wraps data.NewRepository and is the explicit
+// opt-in for the shipped SQL repository; use data.NewRepository directly if you
+// prefer. Register a project repository the same way, with the narrow interface
+// your own package declares.
+//
+// A service should depend on a narrow repository interface (data.Repository or
+// one your own package declares) rather than on *pgxpool.Pool: the pool is an
+// implementation detail, and an interface keeps the service testable and free of
+// the database package.
+//
+// Declaring a repository turns NewPool on only for the roots that depend on it,
+// so an unrelated command still needs no database credential and Loom prunes the
+// pool everywhere else. Keep the repositoryModule name unchanged: the generated
+// commonModule references it.
+var repositoryModule = loom.Module()

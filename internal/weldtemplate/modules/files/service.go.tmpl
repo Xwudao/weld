@@ -20,10 +20,14 @@ type Service interface {
 // It is a replaceable development demo, not persistence: it holds no state
 // across restarts and needs no database. It is the seam the Loom server graph
 // binds (`loom.Provide(__modname__.NewService)`), so you may change its
-// signature to take the dependencies your implementation needs, such as the
-// repository the db capability declares. This package's own tests build the
-// demo through NewDemoService instead, so they keep compiling after the
-// signature changes. Keep the Service interface and this symbol stable.
+// signature to take the dependencies your implementation needs. Take a narrow
+// repository interface — the db capability's data.Repository, registered in
+// internal/di/repository_providers.go, or an interface this package declares —
+// rather than a raw *pgxpool.Pool: the pool is an implementation detail, and an
+// interface keeps the package testable and free of the database dependency.
+// This package's own tests build the demo through NewDemoService instead, so
+// they keep compiling after the signature changes. Keep the Service interface
+// and this symbol stable.
 func NewService() Service {
 	return NewDemoService()
 }

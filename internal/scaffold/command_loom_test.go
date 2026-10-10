@@ -232,10 +232,13 @@ func TestLoomCommandGraphDeclaresOptionalBindingsButPrunes(t *testing.T) {
 	addCommand(t, dir, "orders")
 
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{"loom.Provide(NewPool)", "loom.As[data.Repository](NewRepository)"} {
+	for _, want := range []string{"loom.Provide(NewPool)", "repositoryModule"} {
 		if !strings.Contains(di, want) {
 			t.Errorf("commonModule does not declare %q:\n%s", want, di)
 		}
+	}
+	if strings.Contains(di, "loom.As[data.Repository]") {
+		t.Errorf("commonModule binds data.Repository by default:\n%s", di)
 	}
 	graph := readFile(t, filepath.Join(dir, commandGraph("orders")))
 	if !strings.Contains(graph, "commonModule") {
@@ -359,6 +362,16 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	editInPlace(t, commandPath, "\tLogger *slog.Logger\n", "\tLogger *slog.Logger\n\tRepo data.Repository\n")
 	editInPlace(t, commandPath, "func NewDeps(logger *slog.Logger) *Deps { return &Deps{Logger: logger} }", "func NewDeps(logger *slog.Logger, repo data.Repository) *Deps { return &Deps{Logger: logger, Repo: repo} }")
 	editInPlace(t, commandPath, "\t\"example.com/demo/internal/commandkit\"\n", "\t\"example.com/demo/internal/commandkit\"\n\t\"example.com/demo/internal/data\"\n")
+
+	// Register the repository in the project-owned seam. The generated graph
+	// includes repositoryModule but declares no default data.Repository.
+	providersPath := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	editInPlace(t, providersPath,
+		"var repositoryModule = loom.Module()",
+		"var repositoryModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
+	editInPlace(t, providersPath,
+		"import \"github.com/Xwudao/loom\"",
+		"import (\n\t\"example.com/demo/internal/data\"\n\n\t\"github.com/Xwudao/loom\"\n)")
 
 	if _, ok := runLoomTool(t, dir, "generate", "./internal/di"); !ok {
 		t.Skip("cannot rebuild the pinned Loom generator (network/module cache unavailable)")
@@ -543,6 +556,16 @@ func TestLoomModuleServiceSignatureChangeCompiles(t *testing.T) {
 			editInPlace(t, servicePath,
 				"\t\"strings\"\n",
 				"\t\"strings\"\n\n\t\"example.com/demo/internal/data\"\n")
+
+			// Register the repository in the project-owned seam: the generated
+			// graph includes repositoryModule but declares no default repository.
+			providersPath := filepath.Join(dir, "internal", "di", "repository_providers.go")
+			editInPlace(t, providersPath,
+				"var repositoryModule = loom.Module()",
+				"var repositoryModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
+			editInPlace(t, providersPath,
+				"import \"github.com/Xwudao/loom\"",
+				"import (\n\t\"example.com/demo/internal/data\"\n\n\t\"github.com/Xwudao/loom\"\n)")
 
 			if _, ok := runLoomTool(t, dir, "generate", "./internal/di"); !ok {
 				t.Skip("cannot rebuild the pinned Loom generator (network/module cache unavailable)")

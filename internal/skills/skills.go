@@ -302,8 +302,9 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 	}
 	if set["db"] {
 		b.WriteString("- **db** installs a pool and repository but connects nothing. No pool is\n")
-		b.WriteString("  constructed and no database credential is needed until you inject\n")
-		b.WriteString("  `data.Repository` (see `internal/data/README.md`).\n")
+		b.WriteString("  constructed and no database credential is needed until a provider consumes\n")
+		b.WriteString("  the pool, either directly or through a repository you register in\n")
+		b.WriteString("  `internal/di/repository_providers.go` (see `internal/data/README.md`).\n")
 		wrote = true
 	}
 	if set["redis"] {

@@ -113,7 +113,8 @@ require). The generated Loom server graph in `internal/di` provides
 `__modname__.NewService`, mounts the module under the API prefix
 (`httpserver.ModulePrefix`) and defines the `admin` policy once with
 `httpserver.AdminGuard`. You may change `NewService`'s signature — for example to
-take `data.Repository` after `weld add db` — and the graph follows it. Nothing in
+take `data.Repository` after `weld add db` and registering the repository in
+`internal/di/repository_providers.go` — and the graph follows it. Nothing in
 this package quotes the graph, and no separate route file is written.
 
 Adding the optional Cobra command group (`weld add module __modname__ --command`)

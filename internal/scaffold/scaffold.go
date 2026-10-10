@@ -265,6 +265,13 @@ func (p *planner) applyPatch(capability *template.Capability, patch template.Pat
 // finish renders the dependency graph for the resulting installed set and
 // writes the manifest.
 func (p *planner) finish() error {
+	// Before regenerating the graph, make sure the stable provider seams it will
+	// reference in its own package exist: a project scaffolded by an older weld
+	// (or one adding a module) may lack a file a newer weld introduced, and
+	// regenerating di.go without it would not compile.
+	if err := p.restoreMissingDIFiles(); err != nil {
+		return err
+	}
 	if err := reconcileDI(p.req, p.manifest, p.present, p.planned, p.upsert, p.result); err != nil {
 		return err
 	}
@@ -348,6 +355,9 @@ func Add(req Request, name string) (*Result, error) {
 // no-op.
 func reconcileInstalled(req Request, manifest *project.Manifest, result *Result) error {
 	p := newPlanner(req, manifest, result)
+	if err := p.restoreMissingDIFiles(); err != nil {
+		return err
+	}
 	if err := reconcileDI(req, manifest, p.present, p.planned, p.upsert, result); err != nil {
 		return err
 	}
@@ -359,6 +369,61 @@ func reconcileInstalled(req Request, manifest *project.Manifest, result *Result)
 		return err
 	}
 	p.upsert(project.Operation{Path: project.ManifestName, Content: encoded, Overwrite: true})
+	return nil
+}
+
+// restoreMissingDIFiles plans a capability's generated-package Go provider
+// seam that is absent on disk.
+//
+// The regenerated graph references the stable seams by name (for example the
+// loom capability's repositoryModule in internal/di/repository_providers.go), so
+// a project scaffolded by an older weld must gain such a file before di.go is
+// regenerated to reference it, and adding a module to such a project regenerates
+// di.go the same way. The rule is narrow on purpose: only a capability that
+// declares the DI graph is considered, only the files it ships under that
+// graph's own directory and only its Go files, so an arbitrary project-deleted
+// file (a README, a config patch target, another capability's provider) is never
+// resurrected. A file that already exists is never planned, so a project's edits
+// to a stable seam survive.
+func (p *planner) restoreMissingDIFiles() error {
+	names, err := p.req.Catalog.Names()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if !p.present[name] {
+			continue
+		}
+		capability, err := p.req.Catalog.Get(name)
+		if err != nil {
+			return err
+		}
+		if capability.DI == nil {
+			continue
+		}
+		for _, file := range capability.Files {
+			if path.Dir(file.Path) != capability.DI.Dir || !strings.HasSuffix(file.Path, ".go") {
+				continue
+			}
+			if !entryApplies(p.present, file.When, file.WhenAbsent) {
+				continue
+			}
+			if _, planned := p.planned[file.Path]; planned {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(p.req.Dir, file.Path)); !errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			content, err := capability.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			vars := template.Vars{Name: p.manifest.Name, Module: p.manifest.Module, Version: capability.Version}
+			if err := p.planNewFile(file.Path, capability.Name, template.Render(content, vars)); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

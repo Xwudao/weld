@@ -30,10 +30,22 @@ repo := data.NewRepository(pool)
 `config.Database.ValidateDatabase` and `Config.DSN` exist for exactly this
 explicit path; an unrelated startup never calls them.
 
-The project's Loom graph already declares
-`*pgxpool.Pool` and `data.Repository` as available bindings. Rather than
-construct the pool yourself, edit `internal/di/api_provider.go`, the stable
-provider seam, to have your service consume `data.Repository`:
+The project's Loom graph declares `*pgxpool.Pool` as an available binding and
+ships `NewRepository`, but it registers no `data.Repository` by default: the
+generic items API is the in-memory demo, so the generated graph claims no
+production consumer. Register a repository in `internal/di/repository_providers.go`,
+the project-owned seam `commonModule` includes, rather than editing the
+regenerated `internal/di/di.go`:
+
+```go
+// internal/di/repository_providers.go
+var repositoryModule = loom.Module(
+	loom.As[data.Repository](NewRepository),
+)
+```
+
+Then have a provider consume it — for example edit
+`internal/di/api_provider.go`, the stable provider seam:
 
 ```go
 // internal/di/api_provider.go
@@ -43,9 +55,9 @@ func NewAPIService(repo data.Repository) api.Service {
 ```
 
 Loom then constructs the pool, the repository and your service together,
-validating the database settings at that point, and weld never rewrites the file,
-so the edit survives later capability installs. Do not add providers to
-`internal/di/di.go`: it is regenerated. See
+validating the database settings at that point, and weld never rewrites the
+stable files, so the edits survive later capability installs. Do not add
+providers to `internal/di/di.go`: it is regenerated. See
 `internal/di/README.md` and `internal/api/README.md`.
 
 ## The development query log

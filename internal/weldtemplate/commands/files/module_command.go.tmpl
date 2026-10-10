@@ -26,8 +26,9 @@ import (
 // NewDeps. There are two cases:
 //
 //   - A dependency the shared commonModule already provides needs nothing else.
-//     That covers *config.Config, *slog.Logger and, when installed,
-//     data.Repository and the Redis, mail and storage bindings: Loom injects
+//     That covers *config.Config, *slog.Logger and, when installed, the Redis,
+//     mail and storage bindings, plus a data.Repository the project registered
+//     in repository_providers.go: Loom injects
 //     them and prunes them until a subcommand consumes them.
 //   - A dependency no provider declares needs a provider in
 //     internal/di/__modname___graph.go, for example loom.Provide(NewThing), with

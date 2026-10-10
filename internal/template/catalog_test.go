@@ -458,6 +458,7 @@ func TestLoomCapabilityLoads(t *testing.T) {
 	for _, want := range []string{
 		"tools/loom/go.mod",
 		"tools/loom/go.sum",
+		"internal/di/repository_providers.go",
 	} {
 		if !paths[want] {
 			t.Errorf("loom capability does not ship %s", want)
@@ -534,14 +535,21 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDIGraph(db,api): %v", err)
 	}
-	// Installing db declares the pool and repository as available bindings, but
-	// the default composition never depends on them: the API service stays the
-	// in-memory demo and the graph root holds no repository. The provider itself
-	// lives in the stable api_provider.go seam, not in this regenerated graph.
-	for _, want := range []string{"loom.Provide(NewPool)", "loom.As[data.Repository](NewRepository)", "loom.Provide(NewAPIService)"} {
+	// Installing db declares the pool as an available binding, but the default
+	// composition never depends on it and the graph registers no data.Repository:
+	// the API service stays the in-memory demo and the graph root holds no
+	// repository. The project registers a repository in repositoryModule
+	// (repository_providers.go); the API provider itself lives in the stable
+	// api_provider.go seam, not in this regenerated graph.
+	for _, want := range []string{"loom.Provide(NewPool)", "repositoryModule", "loom.Provide(NewAPIService)"} {
 		if !strings.Contains(string(withDB), want) {
 			t.Errorf("db+api graph is missing %q:\n%s", want, withDB)
 		}
+	}
+	// No default repository binding: the generated graph must not claim a
+	// production consumer the in-memory items API does not have.
+	if strings.Contains(string(withDB), "loom.As[data.Repository]") {
+		t.Errorf("db+api graph still binds data.Repository by default:\n%s", withDB)
 	}
 	if strings.Contains(string(withDB), "func NewAPIService") {
 		t.Errorf("db+api graph defines NewAPIService in di.go; the provider must live in api_provider.go:\n%s", withDB)

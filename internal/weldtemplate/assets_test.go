@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"go/format"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"path"
 	"strings"
@@ -964,6 +966,7 @@ func TestLoomCapabilityRequiresConfigAndDeclaresGraph(t *testing.T) {
 		"tools/loom/go.sum",
 		"internal/commandkit/commandkit.go",
 		"internal/commandkit/commandkit_test.go",
+		"internal/di/repository_providers.go",
 	} {
 		if !paths[want] {
 			t.Errorf("loom capability does not ship %s", want)
@@ -983,6 +986,66 @@ func TestLoomCapabilityRequiresConfigAndDeclaresGraph(t *testing.T) {
 	}
 	if !makefile {
 		t.Error("loom does not patch the Makefile loom extension point")
+	}
+}
+
+// TestLoomShipsRepositoryProviderSeam guards the project-owned repository seam:
+// the loom capability ships internal/di/repository_providers.go unconditionally,
+// it declares the empty repositoryModule the generated commonModule includes, it
+// imports no data package (so a project without db still compiles), and the
+// generated graph registers no data.Repository by default.
+func TestLoomShipsRepositoryProviderSeam(t *testing.T) {
+	fsys := FS()
+	seam, err := fs.ReadFile(fsys, "capabilities/loom/files/repository_providers.go.tmpl")
+	if err != nil {
+		t.Fatalf("read repository providers template: %v", err)
+	}
+	seamText := string(seam)
+	for _, want := range []string{
+		"var repositoryModule = loom.Module()",
+		"github.com/Xwudao/loom",
+		"loom.As[data.Repository](NewRepository)",
+	} {
+		if !strings.Contains(seamText, want) {
+			t.Errorf("repository_providers.go template is missing %q:\n%s", want, seamText)
+		}
+	}
+	// The seam must not import the data package itself: a project without db
+	// compiles it as the empty module. Only the code matters; the example in the
+	// doc comment may name data.
+	rendered := []byte(strings.ReplaceAll(seamText, "__module__", "example.com/demo"))
+	file, err := parser.ParseFile(token.NewFileSet(), "repository_providers.go", rendered, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("repository_providers.go template does not parse: %v\n%s", err, seamText)
+	}
+	for _, spec := range file.Imports {
+		if strings.Contains(spec.Path.Value, "internal/data") {
+			t.Errorf("repository_providers.go imports data; a no-db project must not need it: %s", spec.Path.Value)
+		}
+	}
+
+	d := readDescriptor(t, "loom")
+	var seamFile bool
+	for _, file := range d.Files {
+		if file.Path != "internal/di/repository_providers.go" {
+			continue
+		}
+		seamFile = file.Source == "files/repository_providers.go.tmpl" && len(file.When) == 0 && len(file.WhenAbsent) == 0
+	}
+	if !seamFile {
+		t.Errorf("loom repository_providers.go is not declared with source files/repository_providers.go.tmpl and no guard: %+v", d.Files)
+	}
+
+	graph, err := fs.ReadFile(fsys, "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read di template: %v", err)
+	}
+	graphText := string(graph)
+	if !strings.Contains(graphText, "repositoryModule,") {
+		t.Error("di template commonModule does not include repositoryModule")
+	}
+	if strings.Contains(graphText, "loom.As[data.Repository](NewRepository)") {
+		t.Error("di template still binds data.Repository by default; the items API is in-memory")
 	}
 }
 

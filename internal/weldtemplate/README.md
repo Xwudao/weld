@@ -420,7 +420,8 @@ and a README. `weld add module` installs `http` (and the `loom` and `config` it
 requires), and the regenerated `internal/di` graph provides `<name>.NewService`
 and registers the module on the composed mux — no separate route file is
 written. Because the graph binds `NewService`, it may take a dependency (for
-example `NewService(repo data.Repository)` after `weld add db`), and the
+example `NewService(repo data.Repository)` after `weld add db` and registering
+the repository in `internal/di/repository_providers.go`), and the
 regenerated composition test serves the module through a generated fake so it
 does not depend on the constructor's signature. The generated service is a
 replaceable in-memory example, not persistence. Unlike generated capability

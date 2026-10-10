@@ -80,6 +80,7 @@ with `httpx.RawText`, `httpx.Bytes` or `httpx.RawJSON`.
 
 `NewService` returns an in-memory development service: items are lost on
 restart and no database is required. Installing `db` does not switch it to
-PostgreSQL. To persist the API, change `NewService` (or the `NewAPIService`
-provider in `internal/di/api_provider.go`) to consume `data.Repository`; the
-Loom graph follows the signature.
+PostgreSQL. To persist the API, register a repository in
+`internal/di/repository_providers.go` (the project-owned seam) and change
+`NewService` (or the `NewAPIService` provider in `internal/di/api_provider.go`)
+to consume `data.Repository`; the Loom graph follows the signature.

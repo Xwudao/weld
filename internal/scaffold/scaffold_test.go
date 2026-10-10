@@ -1261,6 +1261,7 @@ func TestAddLoomInstallsCLIOnlyGraph(t *testing.T) {
 	for _, path := range []string{
 		"internal/di/di.go",
 		"internal/di/di_test.go",
+		"internal/di/repository_providers.go",
 		"internal/di/README.md",
 		"tools/loom/go.mod",
 		"tools/loom/go.sum",
@@ -1341,10 +1342,95 @@ func TestAddLoomIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestAddLoomRepositoryProviderSeamIsStable proves repository_providers.go is a
+// stable seam: a later capability install regenerates di.go around it but never
+// rewrites the project's repository wiring, and di.go still includes the seam.
+func TestAddLoomRepositoryProviderSeamIsStable(t *testing.T) {
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "loom")
+
+	path := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	const marker = "// project-owned repository wiring"
+	if err := os.WriteFile(path, []byte(readFile(t, path)+"\n"+marker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add(t, dir, "db")
+
+	if got := readFile(t, path); !strings.Contains(got, marker) {
+		t.Fatalf("a later add rewrote the stable repository providers seam:\n%s", got)
+	}
+	di := readFile(t, filepath.Join(dir, "internal", "di", "di.go"))
+	if !strings.Contains(di, "repositoryModule") {
+		t.Fatalf("di.go does not include the repository seam:\n%s", di)
+	}
+}
+
+// TestAddLoomReconcileRestoresMissingRepositoryProviderSeam proves a project
+// scaffolded by an older weld (before the seam existed) gains it on
+// `weld add <installed capability>`: the regenerated graph references
+// repositoryModule, so reconciliation must write the file that declares it.
+func TestAddLoomReconcileRestoresMissingRepositoryProviderSeam(t *testing.T) {
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "loom")
+
+	path := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "loom")
+	if err != nil {
+		t.Fatalf("reconcile loom: %v", err)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("apply reconcile: %v", err)
+	}
+	if !strings.Contains(readFile(t, path), "var repositoryModule = loom.Module()") {
+		t.Fatalf("reconcile did not restore the repository providers seam:\n%s", readFile(t, path))
+	}
+	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after reconcile: %+v", drift)
+	}
+}
+
+// TestAddModuleRestoresRepositoryProviderSeam proves `weld add module` on an
+// older project restores repository_providers.go before it regenerates di.go.
+// Without the restore the regenerated graph would reference repositoryModule but
+// the file would be absent, so the Loom generation and the build would fail.
+func TestAddModuleRestoresRepositoryProviderSeam(t *testing.T) {
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "api")
+
+	path := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	addModule(t, dir, "widget")
+
+	if !strings.Contains(readFile(t, path), "var repositoryModule = loom.Module()") {
+		t.Fatalf("add module did not restore the repository providers seam:\n%s", readFile(t, path))
+	}
+	di := readFile(t, filepath.Join(dir, "internal", "di", "di.go"))
+	if !strings.Contains(di, "repositoryModule") || !strings.Contains(di, "widget") {
+		t.Fatalf("the regenerated graph does not include the repository seam and the module:\n%s", di)
+	}
+	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after add module: %+v", drift)
+	}
+}
+
 // TestAddLoomGraphFollowsInstalledCapabilities proves the CLI-only graph is
 // regenerated for the installed set in either order, and that installing db only
-// declares the pool and repository as available bindings: the CLI-only graph has
-// no server root and no generated initializer, so nothing constructs them.
+// declares the pool plus the project-owned repository seam: the CLI-only graph
+// has no server root and no generated initializer, so nothing constructs them.
 func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 	loomToolAvailable(t)
 	orders := []struct {
@@ -1362,10 +1448,16 @@ func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 				add(t, dir, capability)
 			}
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-			for _, want := range []string{"loom.Provide(NewPool)", "loom.As[data.Repository](NewRepository)"} {
+			for _, want := range []string{"loom.Provide(NewPool)", "repositoryModule"} {
 				if !strings.Contains(di, want) {
-					t.Errorf("di.go does not declare the available binding %q:\n%s", want, di)
+					t.Errorf("di.go does not declare %q:\n%s", want, di)
 				}
+			}
+			// The repository providers are project-owned: the graph includes the
+			// seam but registers no default repository.
+			providers := readFile(t, filepath.Join(dir, "internal/di/repository_providers.go"))
+			if !strings.Contains(providers, "var repositoryModule = loom.Module()") {
+				t.Errorf("repository_providers.go is not the empty project seam:\n%s", providers)
 			}
 			// A CLI-only project has no server graph and so no generated initializer.
 			for _, forbidden := range []string{"func InitApp", "NewServer", "internal/httpserver"} {
@@ -1742,10 +1834,13 @@ func TestAddLoomKeepsAPIInMemory(t *testing.T) {
 				add(t, dir, capability)
 			}
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-			for _, want := range []string{"loom.Provide(NewAPIService)", "loom.Provide(NewPool)", "loom.As[data.Repository](NewRepository)"} {
+			for _, want := range []string{"loom.Provide(NewAPIService)", "loom.Provide(NewPool)", "repositoryModule"} {
 				if !strings.Contains(di, want) {
 					t.Errorf("di.go is missing %q:\n%s", want, di)
 				}
+			}
+			if strings.Contains(di, "loom.As[data.Repository]") {
+				t.Errorf("di.go binds data.Repository by default; the items API is in-memory:\n%s", di)
 			}
 			for _, forbidden := range []string{"repositoryService", "func NewAPIService"} {
 				if strings.Contains(di, forbidden) {
@@ -1855,6 +1950,17 @@ func NewAPIService(repo data.Repository) api.Service {
 	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
+	// Register the repository in the project-owned seam. The generated graph
+	// includes repositoryModule but declares no default data.Repository, so Loom
+	// constructs the pool and repository only because this seam declares it.
+	providersPath := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	editInPlace(t, providersPath,
+		"var repositoryModule = loom.Module()",
+		"var repositoryModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
+	editInPlace(t, providersPath,
+		"import \"github.com/Xwudao/loom\"",
+		"import (\n\t\"example.com/demo/internal/data\"\n\n\t\"github.com/Xwudao/loom\"\n)")
 
 	add(t, dir, "web")
 
