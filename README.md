@@ -12,7 +12,7 @@ Install the latest patch release with Go 1.23 or newer (the tool itself builds o
 Go directive to `go 1.25.0`):
 
 ```bash
-go install github.com/Xwudao/weld/cmd/weld@v0.2.0
+go install github.com/Xwudao/weld/cmd/weld@v0.2.1
 ```
 
 ```bash
@@ -46,6 +46,7 @@ weld add command <name> [--dir dir] [--dry-run]
 weld dev [--dir dir]
 weld build [--dir dir]
 weld config example
+weld config init [--force]
 weld list [--dir dir]
 weld skills [--dir dir] [--dry-run]
 weld version
@@ -64,7 +65,9 @@ release path; `make build` stays available as the self-contained, no-weld
 fallback.
 
 Both commands read the optional, user-owned `weld.yml` (print a commented
-starter with `weld config example`). `weld.yml` is deliberately **not** the
+starter with `weld config example`, or write one into a project that has none
+with `weld config init`, which keeps an existing file unless `--force` is
+given). `weld.yml` is deliberately **not** the
 machine-owned `weld.json` manifest: `weld` never rewrites it and `weld add`
 never touches it, so your hand-edited build and dev settings survive every
 later capability. Every setting is optional and defaults from the installed

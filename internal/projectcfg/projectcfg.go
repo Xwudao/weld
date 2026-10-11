@@ -103,7 +103,7 @@ type Config struct {
 
 // Load reads weld.yml from dir and returns ErrNotFound when it is absent.
 func Load(dir string) (*Config, error) {
-	path := filepath.Join(dir, FileName)
+	path := Path(dir)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -119,6 +119,30 @@ func Load(dir string) (*Config, error) {
 		return nil, fmt.Errorf("%s: unsupported %s version %d (want 1)", dir, FileName, cfg.Version)
 	}
 	return cfg, nil
+}
+
+// Path returns the weld.yml path inside dir.
+func Path(dir string) string {
+	return filepath.Join(dir, FileName)
+}
+
+// WriteExample writes the commented Example to dir/weld.yml. It refuses to
+// overwrite an existing file unless force is true and reports whether it wrote,
+// so `weld config init` is idempotent and never clobbers hand-edited settings
+// by accident. The directory must already exist.
+func WriteExample(dir string, force bool) (path string, written bool, err error) {
+	path = Path(dir)
+	if _, statErr := os.Stat(path); statErr == nil {
+		if !force {
+			return path, false, nil
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return path, false, statErr
+	}
+	if err := os.WriteFile(path, []byte(Example()), 0o644); err != nil {
+		return path, false, err
+	}
+	return path, true, nil
 }
 
 // LoadOptional reads weld.yml from dir, returning (nil, nil) when it is absent.
@@ -287,7 +311,8 @@ func Example() string {
 # is absent the commands derive their defaults from the installed capabilities
 # and the host platform.
 #
-# Run ` + "`weld config example`" + ` to print this file again.
+# Run ` + "`weld config example`" + ` to print this file, or
+# ` + "`weld config init`" + ` to write it into a project that has none.
 
 version: 1
 

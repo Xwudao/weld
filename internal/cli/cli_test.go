@@ -783,6 +783,51 @@ func TestConfigExample(t *testing.T) {
 	}
 }
 
+func TestConfigInitWritesOnce(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "weld.yml")
+
+	out, err := run(t, "config", "init", "--dir", dir)
+	if err != nil {
+		t.Fatalf("config init: %v", err)
+	}
+	if !strings.Contains(out, "add "+path) {
+		t.Errorf("config init output = %q", out)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(raw), "version: 1") {
+		t.Fatalf("weld.yml not written: %v", err)
+	}
+
+	// Idempotent: an existing file is kept, even when it was edited.
+	if err := os.WriteFile(path, []byte("version: 1\n# mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(t, "config", "init", "--dir", dir)
+	if err != nil {
+		t.Fatalf("second config init: %v", err)
+	}
+	if !strings.Contains(out, "already exists") {
+		t.Errorf("second config init output = %q", out)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != "version: 1\n# mine\n" {
+		t.Fatalf("existing weld.yml was clobbered: %q", raw)
+	}
+
+	// A dry run reports the write but never touches the disk.
+	other := t.TempDir()
+	out, err = run(t, "config", "init", "--dry-run", "--dir", other)
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(out, "dry run") {
+		t.Errorf("dry-run output = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(other, "weld.yml")); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote a file: %v", err)
+	}
+}
+
 func TestBuildAndDevHelp(t *testing.T) {
 	for _, name := range []string{"build", "dev"} {
 		out, err := run(t, name, "--help")

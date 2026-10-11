@@ -130,3 +130,36 @@ func TestExampleIsValidYAML(t *testing.T) {
 		t.Errorf("Example version = %d", cfg.Version)
 	}
 }
+
+func TestWriteExample(t *testing.T) {
+	dir := t.TempDir()
+	path, written, err := WriteExample(dir, false)
+	if err != nil {
+		t.Fatalf("WriteExample: %v", err)
+	}
+	if !written || path != filepath.Join(dir, FileName) {
+		t.Fatalf("path=%q written=%v", path, written)
+	}
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("written weld.yml does not load: %v", err)
+	}
+
+	// A second call without force must keep hand-edited settings.
+	if err := os.WriteFile(path, []byte("version: 1\n# edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, written, err := WriteExample(dir, false); err != nil || written {
+		t.Fatalf("second WriteExample written=%v err=%v, want written=false", written, err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != "version: 1\n# edited\n" {
+		t.Fatalf("existing file was clobbered: %q", raw)
+	}
+
+	// force restores the canonical example.
+	if _, written, err := WriteExample(dir, true); err != nil || !written {
+		t.Fatalf("force WriteExample written=%v err=%v, want written=true", written, err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != Example() {
+		t.Fatalf("force did not restore the example")
+	}
+}

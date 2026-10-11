@@ -23,7 +23,7 @@ import (
 
 const (
 	progName = "weld"
-	version  = "0.2.0"
+	version  = "0.2.1"
 )
 
 // Run executes a weld invocation and returns a non-nil error on failure. It
@@ -294,8 +294,10 @@ weld.yml is user-owned: it configures weld build (cross-compilation targets,
 build tags, CGO_ENABLED, ldflags) and weld dev (the backend and frontend
 commands), and weld never rewrites it. It is not the machine-owned weld.json
 manifest, and weld add never touches it. weld config example prints a
-commented starter; every setting defaults from the installed capabilities and
-the host platform, so a project without weld.yml still builds and runs.`
+commented starter and weld config init writes one into the project (existing
+files are kept unless --force is given); every setting defaults from the
+installed capabilities and the host platform, so a project without weld.yml
+still builds and runs.`
 
 // runNew plans and applies `weld new`.
 func runNew(cmd *cobra.Command, args []string) error {

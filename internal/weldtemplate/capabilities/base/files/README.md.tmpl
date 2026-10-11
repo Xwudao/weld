@@ -27,7 +27,9 @@ make test    # run the Go tests
 `weld dev` and `weld build` read the optional, user-owned `weld.yml`. It is not
 the machine-owned `weld.json` manifest: `weld` never rewrites it and `weld add`
 never touches it, so your build and dev settings survive every later capability.
-Print a commented starter with `weld config example`. Every setting is optional;
+Print a commented starter with `weld config example`, or write it into the
+project with `weld config init` (an existing `weld.yml` is kept unless
+`--force` is given). Every setting is optional;
 without the file, `weld dev` runs `go run .` plus `pnpm run dev` in `web/`, and
 `weld build` builds the host platform once into `bin/`.
 
