@@ -10,10 +10,13 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Xwudao/weld/internal/loomgen"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/scaffold"
 	"github.com/Xwudao/weld/internal/skills"
@@ -72,6 +75,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(
 		newNewCommand(),
 		newAddCommand(),
+		newGenCommand(),
 		newListCommand(),
 		newSkillsCommand(),
 		newBuildCommand(),
@@ -109,14 +113,14 @@ func newAddCommand() *cobra.Command {
 		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("usage: %s add <capability> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]", progName, progName, progName, progName)
+				return fmt.Errorf("usage: %s add <capability> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName)
 			}
 			return nil
 		},
 		RunE: runAdd,
 	}
 	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
-	cmd.AddCommand(newAddModuleCommand(), newAddCommandSubcommand(), newAddSeederSubcommand())
+	cmd.AddCommand(newAddModuleCommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddEnumCommand())
 	return cmd
 }
 
@@ -141,6 +145,10 @@ func addHelp() string {
 	b.WriteString("\nmissing requirement is an error unless --with-dependencies is given.")
 	b.WriteString("\n\n`weld add seeder <name>` writes internal/data/seeder/seed_<name>.go and")
 	b.WriteString("\nregisters it in the seed capability's register.go index.")
+	b.WriteString("\n\n`weld add enum <name> <value>...` writes internal/enums/<name>.go (the type and")
+	b.WriteString("\nits string constants, written once) and generates internal/enums/<name>_gen.go")
+	b.WriteString("\n(the derived methods). Run `weld gen enum` to refresh the generated file after")
+	b.WriteString("\nediting the constants.")
 	b.WriteString("\n\nRun `weld list` to see installed capabilities in this project.")
 	return b.String()
 }
@@ -221,6 +229,239 @@ func runAddSeeder(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return applyAddResult(stdout, result, dryRun)
+}
+
+// newAddEnumCommand builds `weld add enum <name> <value>...`, which writes a
+// typed string enum under internal/enums and generates its methods.
+func newAddEnumCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "enum <name> <value> [value...]",
+		Short: "add a typed string enum under internal/enums",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) < 2 {
+				return fmt.Errorf("usage: %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName)
+			}
+			return nil
+		},
+		RunE: runAddEnum,
+	}
+	return cmd
+}
+
+// runAddEnum plans and applies `weld add enum <name> <value>...`.
+func runAddEnum(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+	result, err := scaffold.AddEnum(scaffold.Request{Dir: dir, Catalog: template.Load()}, args[0], args[1:])
+	if err != nil {
+		return err
+	}
+	return applyAddResult(stdout, result, dryRun)
+}
+
+// newGenCommand builds `weld gen`, the umbrella for the project's code
+// generators. A bare invocation runs every generator that applies; the `enum`
+// and `loom` subcommands select one.
+func newGenCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "gen",
+		Short: "regenerate the project's generated code",
+		Long:  genHelp(),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return fmt.Errorf("usage: %s gen [enum|loom] [--dir dir] [--dry-run]", progName)
+			}
+			return nil
+		},
+		RunE: runGen,
+	}
+	cmd.AddCommand(newGenEnumCommand(), newGenLoomCommand())
+	return cmd
+}
+
+// genHelp explains the generator surface.
+func genHelp() string {
+	return `Regenerate the project's generated code.
+
+A bare ` + progName + ` gen runs every generator that applies to the project:
+
+  enum   regenerate internal/enums/*_gen.go from the enum types and constants,
+         so editing a value and running ` + progName + ` gen enum refreshes the derived methods
+  loom   rebuild internal/di/loom_gen.go with the generator pinned in tools/loom
+         (the same generator make generate runs, without the make fallback)
+
+The enum generator reads the human-owned internal/enums/*.go files (the type and
+its constants) and writes one <name>_gen.go per enum. It never rewrites the
+definition file. ` + progName + ` gen enum --check reports stale files without writing,
+for CI; --prune deletes a generated file whose enum no longer exists.`
+}
+
+// runGen runs every generator that applies to the project.
+func runGen(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+
+	ran := false
+	if _, err := os.Stat(filepath.Join(dir, "internal", "enums")); err == nil {
+		if err := genEnums(stdout, dir, false, false, dryRun); err != nil {
+			return err
+		}
+		ran = true
+	}
+
+	manifest, err := project.Load(dir)
+	if err != nil {
+		return err
+	}
+	if manifest.HasCapability("loom") {
+		if err := genLoom(stdout, dir, dryRun); err != nil {
+			return err
+		}
+		ran = true
+	}
+	if !ran {
+		fmt.Fprintln(stdout, "Nothing to generate in this project.")
+	}
+	return nil
+}
+
+// newGenEnumCommand builds `weld gen enum`.
+func newGenEnumCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "enum",
+		Short: "regenerate internal/enums/*_gen.go from the enum definitions",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return fmt.Errorf("usage: %s gen enum [--check] [--prune] [--dir dir] [--dry-run]", progName)
+			}
+			return nil
+		},
+		RunE: runGenEnum,
+	}
+	cmd.Flags().Bool("check", false, "report stale generated files and fail instead of writing")
+	cmd.Flags().Bool("prune", false, "delete a generated file whose enum no longer exists")
+	return cmd
+}
+
+// runGenEnum plans and applies `weld gen enum`.
+func runGenEnum(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+	prune, err := cmd.Flags().GetBool("prune")
+	if err != nil {
+		return err
+	}
+	check, err := cmd.Flags().GetBool("check")
+	if err != nil {
+		return err
+	}
+	return genEnums(stdout, dir, prune, check, dryRun)
+}
+
+// genEnums regenerates the enum methods. With check it writes nothing and
+// returns an error naming every stale file; otherwise it applies the plan
+// unless dryRun is set.
+func genEnums(stdout io.Writer, dir string, prune, check, dryRun bool) error {
+	if check {
+		stale, err := scaffold.CheckEnums(scaffold.Request{Dir: dir})
+		if err != nil {
+			return err
+		}
+		if len(stale) > 0 {
+			return fmt.Errorf("generated enum files are out of date:\n  %s\nrun: %s gen enum", strings.Join(stale, "\n  "), progName)
+		}
+		fmt.Fprintln(stdout, "generated enum files are up to date.")
+		return nil
+	}
+
+	result, err := scaffold.GenEnums(scaffold.Request{Dir: dir, Catalog: template.Load()}, prune)
+	if err != nil {
+		return err
+	}
+	if dryRun {
+		printResult(stdout, result, true)
+		return nil
+	}
+	if err := result.Apply(); err != nil {
+		return err
+	}
+	printResult(stdout, result, false)
+	return nil
+}
+
+// newGenLoomCommand builds `weld gen loom`.
+func newGenLoomCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "loom",
+		Short: "rebuild internal/di/loom_gen.go with the pinned generator",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return fmt.Errorf("usage: %s gen loom [--dir dir] [--dry-run]", progName)
+			}
+			return nil
+		},
+		RunE: runGenLoom,
+	}
+}
+
+// runGenLoom rebuilds the Loom initializer with the pinned generator.
+func runGenLoom(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+	return genLoom(stdout, dir, dryRun)
+}
+
+// genLoom regenerates internal/di/loom_gen.go with the pinned generator. It is
+// a no-op note when Loom is not installed.
+func genLoom(stdout io.Writer, dir string, dryRun bool) error {
+	manifest, err := project.Load(dir)
+	if err != nil {
+		return err
+	}
+	if !manifest.HasCapability("loom") {
+		fmt.Fprintln(stdout, "loom is not installed; nothing to generate.")
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tools", "loom")); err != nil {
+		return fmt.Errorf("tools/loom is missing; reinstall with: %s add loom", progName)
+	}
+	if dryRun {
+		fmt.Fprintln(stdout, "Plan (1 change(s), dry run):\n  update internal/di/loom_gen.go")
+		return nil
+	}
+	if err := loomgen.Generate(dir, "internal/di"); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "Regenerated internal/di/loom_gen.go")
+	return nil
 }
 
 // newListCommand builds `weld list` (alias `ls`).
@@ -332,6 +573,23 @@ Seeders:
   in the seed capability's stable register.go index, so one seeder is one file
   and the run order stays in one place. --with-dependencies installs the
   db/loom/config/seed chain first when seed is not installed.
+
+Enums:
+  add enum <name> <value>... writes internal/enums/<name>.go, a typed string
+  enumeration (the type and its constants) that weld writes once and never
+  rewrites, and immediately generates internal/enums/<name>_gen.go with the
+  derived methods (String, the *Values/*Names slices, Parse<Name>, IsValid and
+  the JSON/YAML text and database/sql codecs). It requires no capability. Add a
+  value by editing the definition file, then run 'weld gen enum' to refresh the
+  generated methods.
+
+Generators:
+  gen runs every generator that applies to the project. gen enum regenerates
+  internal/enums/*_gen.go from the definitions, reads the human-owned files and
+  rewrites only the generated ones; --check reports stale files for CI, and
+  --prune deletes a generated file whose enum no longer exists. gen loom
+  rebuilds internal/di/loom_gen.go with the pinned tools/loom generator (the
+  same generator make generate runs, without the make fallback).
 
 Requirements are not installed silently: weld add <capability> fails when a
 required capability is missing and names it, and --with-dependencies installs
@@ -608,7 +866,10 @@ func printResult(stdout io.Writer, result *scaffold.Result, dryRun bool) {
 	}
 	for _, operation := range result.Operations {
 		action := "add"
-		if operation.Overwrite {
+		switch {
+		case operation.Delete:
+			action = "remove"
+		case operation.Overwrite:
 			action = "update"
 		}
 		fmt.Fprintf(stdout, "  %s %s\n", action, operation.Path)

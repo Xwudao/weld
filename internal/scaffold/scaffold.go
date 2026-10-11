@@ -301,10 +301,26 @@ func (p *planner) finish() error {
 	if err := reconcileDI(p.req, p.manifest, p.present, p.planned, p.upsert, p.result); err != nil {
 		return err
 	}
+	return p.writeManifest()
+}
+
+// writeManifest records the manifest as a planned write, without touching the
+// dependency graph. It is finish for a plan (such as an enum) that does not
+// affect the graph. An unchanged manifest plans nothing, so a repeat run stays a
+// no-op while a manifest that gained an entry is still written.
+func (p *planner) writeManifest() error {
 	encoded, err := p.manifest.Encode()
 	if err != nil {
 		return err
 	}
+	if planned, ok := p.planned[project.ManifestName]; ok {
+		if bytes.Equal(planned, encoded) {
+			return nil
+		}
+	} else if current, err := os.ReadFile(filepath.Join(p.req.Dir, project.ManifestName)); err == nil && bytes.Equal(current, encoded) {
+		return nil
+	}
+	p.planned[project.ManifestName] = encoded
 	p.upsert(project.Operation{Path: project.ManifestName, Content: encoded, Overwrite: true})
 	return nil
 }

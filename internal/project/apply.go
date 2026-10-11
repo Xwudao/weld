@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// Operation is a single planned file write.
+// Operation is a single planned file write or delete.
 //
 // The final content is computed when a plan is built, so applying a plan reads
 // nothing and performs no text replacement: every precondition has already been
@@ -17,6 +17,9 @@ type Operation struct {
 	Path      string
 	Content   []byte
 	Overwrite bool
+	// Delete removes Path instead of writing Content. A missing file is skipped,
+	// and the previous content is captured so a rollback restores it.
+	Delete bool
 }
 
 // ConflictError reports a precondition that would lose or clobber user data.
@@ -62,7 +65,7 @@ func Apply(root string, operations []Operation) (err error) {
 			if _, seen := backups[operation.Path]; !seen {
 				backups[operation.Path] = backup{existed: true, content: existing}
 			}
-			if !operation.Overwrite {
+			if !operation.Overwrite && !operation.Delete {
 				return &ConflictError{Path: operation.Path, Reason: "already exists"}
 			}
 		case errors.Is(readErr, os.ErrNotExist):
@@ -73,6 +76,12 @@ func Apply(root string, operations []Operation) (err error) {
 			return readErr
 		}
 
+		if operation.Delete {
+			if err := os.Remove(absolute); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			continue
+		}
 		if err := os.MkdirAll(filepath.Dir(absolute), 0o755); err != nil {
 			return err
 		}

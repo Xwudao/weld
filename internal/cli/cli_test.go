@@ -916,3 +916,118 @@ func TestSeedRequiresAProject(t *testing.T) {
 		t.Fatal("weld seed succeeded outside a project")
 	}
 }
+
+func TestAddEnumAndGenEnum(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err := run(t, "add", "enum", "status", "draft", "published", "in_progress", "--dir", dir)
+	if err != nil {
+		t.Fatalf("add enum: %v", err)
+	}
+	for _, want := range []string{"internal/enums/status.go", "internal/enums/status_gen.go"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("add enum output is missing %q: %q", want, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "enums", "status.go")); err != nil {
+		t.Fatalf("add enum did not write the definition: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "enums", "status_gen.go")); err != nil {
+		t.Fatalf("add enum did not write the generated methods: %v", err)
+	}
+
+	// A fresh project is up to date.
+	out, err = run(t, "gen", "enum", "--check", "--dir", dir)
+	if err != nil {
+		t.Fatalf("gen enum --check: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "up to date") {
+		t.Fatalf("check output = %q", out)
+	}
+
+	// Editing the definition makes the generated file stale...
+	definitionPath := filepath.Join(dir, "internal", "enums", "status.go")
+	definition, err := os.ReadFile(definitionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(definition), "\n)\n", "\n\tStatusArchived  Status = \"archived\"\n)\n", 1)
+	if err := os.WriteFile(definitionPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "gen", "enum", "--check", "--dir", dir); err == nil {
+		t.Fatal("gen enum --check accepted a stale generated file")
+	}
+
+	// ...and `weld gen enum` refreshes it.
+	if _, err := run(t, "gen", "enum", "--dir", dir); err != nil {
+		t.Fatalf("gen enum: %v", err)
+	}
+	generated, err := os.ReadFile(filepath.Join(dir, "internal", "enums", "status_gen.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(generated), "StatusArchived") {
+		t.Fatalf("regeneration did not pick up the new value:\n%s", generated)
+	}
+
+	// Repeating `add enum` is a no-op.
+	out, err = run(t, "add", "enum", "status", "draft", "published", "--dir", dir)
+	if err != nil {
+		t.Fatalf("repeat add enum: %v", err)
+	}
+	if !strings.Contains(out, "already installed") {
+		t.Fatalf("repeat add enum output = %q", out)
+	}
+}
+
+func TestAddEnumRequiresValues(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "add", "enum", "status", "--dir", dir); err == nil {
+		t.Fatal("expected add enum without a value to fail")
+	}
+	if _, err := run(t, "add", "enum", "--dir", dir); err == nil {
+		t.Fatal("expected add enum without a name to fail")
+	}
+}
+
+func TestGenUmbrellaRunsEnum(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "add", "enum", "status", "draft", "--dir", dir); err != nil {
+		t.Fatalf("add enum: %v", err)
+	}
+	out, err := run(t, "gen", "--dir", dir)
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	if !strings.Contains(out, "up to date") {
+		t.Fatalf("gen output = %q", out)
+	}
+}
+
+func TestGenLoomRequiresLoom(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	out, err := run(t, "gen", "loom", "--dir", dir)
+	if err != nil {
+		t.Fatalf("gen loom: %v", err)
+	}
+	if !strings.Contains(out, "not installed") {
+		t.Fatalf("gen loom output = %q", out)
+	}
+}

@@ -250,6 +250,16 @@ func RefreshManifest(root string) error {
 	return writeAtomic(filepath.Join(root, ManifestName), encoded)
 }
 
+// RemoveFile drops a managed file from the manifest.
+func (m *Manifest) RemoveFile(path string) {
+	for i := range m.Files {
+		if m.Files[i].Path == path {
+			m.Files = append(m.Files[:i], m.Files[i+1:]...)
+			return
+		}
+	}
+}
+
 // Owns reports whether path is a file weld manages in this project.
 func (m *Manifest) Owns(path string) bool {
 	for _, file := range m.Files {

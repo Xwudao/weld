@@ -256,3 +256,65 @@ func TestLoadReportsNonProject(t *testing.T) {
 		t.Fatal("expected error for directory without manifest")
 	}
 }
+
+// TestApplyDeleteRemovesAndRollsBack proves a Delete operation removes a file
+// and that a later conflict restores it, so prune is as safe as a write.
+func TestApplyDeleteRemovesAndRollsBack(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "generated.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(root, []Operation{{Path: "generated.go", Delete: true}}); err != nil {
+		t.Fatalf("Apply delete: %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("delete left the file: %v", err)
+	}
+
+	// A delete followed by a conflicting write rolls the delete back.
+	if err := os.WriteFile(target, []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("user\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	operations := []Operation{
+		{Path: "generated.go", Delete: true},
+		{Path: "keep.txt", Content: []byte("clobber\n")},
+	}
+	if err := Apply(root, operations); err == nil {
+		t.Fatal("expected a conflict")
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("the deleted file was not restored: %v", err)
+	}
+	if string(raw) != "package x\n" {
+		t.Fatalf("restored content = %q", raw)
+	}
+}
+
+// TestApplyDeleteMissingIsNoOp proves deleting a path that does not exist is not
+// an error, so prune is idempotent.
+func TestApplyDeleteMissingIsNoOp(t *testing.T) {
+	if err := Apply(t.TempDir(), []Operation{{Path: "absent.go", Delete: true}}); err != nil {
+		t.Fatalf("delete of a missing file: %v", err)
+	}
+}
+
+// TestManifestRemoveFile proves RemoveFile drops an entry and is a no-op for an
+// unknown path.
+func TestManifestRemoveFile(t *testing.T) {
+	manifest := NewManifest("demo", "example.com/demo", "weld 0.1.0")
+	manifest.SetFile("a.go", "base", []byte("a\n"))
+	manifest.SetFile("b.go", "base", []byte("b\n"))
+	manifest.RemoveFile("a.go")
+	manifest.RemoveFile("absent.go")
+	if manifest.Owns("a.go") {
+		t.Fatal("RemoveFile left a.go")
+	}
+	if !manifest.Owns("b.go") {
+		t.Fatal("RemoveFile dropped the wrong entry")
+	}
+}
