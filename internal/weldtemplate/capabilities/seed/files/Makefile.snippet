@@ -2,7 +2,9 @@
 .PHONY: seed
 
 # seed runs the registered seeders against the database configured by config.yml
-# (or DATABASE_URL). Seeders are idempotent, so re-running is safe. Pass one
+# (or DATABASE_URL). The seeders live behind the `seed` build tag, so the
+# production binary (go build / weld build) carries neither the seed data nor any
+# faker a seeder imports. Seeders are idempotent, so re-running is safe. Pass one
 # seeder name with ARGS, for example: make seed ARGS=items
 seed: ## Populate the database with the registered seeders
-	go run . seed $(ARGS)
+	go run -tags seed . seed $(ARGS)

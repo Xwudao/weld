@@ -51,7 +51,8 @@ capabilities/
   seed/            kind: add    -> database seeding, requires db
     capability.json
     files/         internal/data/seeder (Deps, Registry, Runner, the stable
-                   register.go index, one seed_<name>.go per seeder, added by
+                   register.go index and its `!seed` register_stub.go stand-in,
+                   one seed_<name>.go per seeder, added by
                    `weld add seeder <name>`), internal/app/seed.go (the short seed command),
                    internal/di/seed_providers.go (stable Loom repository seam),
                    Makefile seed target (db region), README
@@ -151,7 +152,11 @@ seeder over the `items` table, and the stable `internal/di/seed_providers.go`
 seam that wires the repositories the seeders receive. A short `seed` command
 resolves a dedicated Loom graph — the only graph that consumes `*pgxpool.Pool` —
 so serving still needs no database credential; installing seed seeds nothing
-until you register a seeder.
+until you register a seeder. The seed command, `register.go` and every
+`seed_<name>.go` carry `//go:build seed`, and `register_stub.go` is the
+`//go:build !seed` stand-in, so an untagged (production) build has no seed
+command, no seed data and no faker a seeder imports; `make seed` and
+`weld seed` compile the tag in.
 
 `redis` is likewise independent: it requires `loom` but not `http`, so it can
 be added to a CLI-only project and composed with `http`/`db` in any order.

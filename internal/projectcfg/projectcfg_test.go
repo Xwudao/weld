@@ -163,3 +163,18 @@ func TestWriteExample(t *testing.T) {
 		t.Fatalf("force did not restore the example")
 	}
 }
+
+func TestSeedTagDefaultAndOverride(t *testing.T) {
+	var cfg *Config
+	if got := cfg.SeedTag(); got != "seed" {
+		t.Errorf("nil SeedTag = %q, want seed", got)
+	}
+	dir := writeConfig(t, "version: 1\nseed:\n  tag: devseed\n")
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.SeedTag(); got != "devseed" {
+		t.Errorf("SeedTag = %q, want devseed", got)
+	}
+}

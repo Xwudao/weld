@@ -97,7 +97,9 @@ func AddSeeder(req Request, name string) (*Result, error) {
 // the same file for every name but the identifiers.
 func seederFile(name string) []byte {
 	exported := template.ExportName(name)
-	return []byte(fmt.Sprintf(`package seeder
+	return []byte(fmt.Sprintf(`//go:build seed
+
+package seeder
 
 import "context"
 

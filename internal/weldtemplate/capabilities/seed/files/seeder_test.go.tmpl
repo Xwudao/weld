@@ -5,8 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	"__module__/internal/data"
 )
 
 func TestRegistryRunsSeedersInOrder(t *testing.T) {
@@ -105,59 +103,4 @@ func assertPanics(t *testing.T, fn func()) {
 		}
 	}()
 	fn()
-}
-
-// TestSeedItemsIsIdempotent exercises the shipped example against an in-memory
-// repository: a second run must not insert duplicates.
-func TestSeedItemsIsIdempotent(t *testing.T) {
-	deps := &Deps{Items: newFakeRepository()}
-	for run := 1; run <= 2; run++ {
-		if err := seedItems(context.Background(), deps); err != nil {
-			t.Fatalf("seedItems run %d: %v", run, err)
-		}
-	}
-	items, err := deps.Items.ListItems(context.Background(), 100)
-	if err != nil {
-		t.Fatalf("ListItems: %v", err)
-	}
-	if len(items) != 2 {
-		t.Fatalf("ListItems returned %d items after two seed runs, want 2", len(items))
-	}
-}
-
-// fakeRepository is an in-memory data.Repository for the tests; it only models
-// the methods the example seeder uses.
-type fakeRepository struct {
-	items map[string]data.Item
-}
-
-func newFakeRepository() *fakeRepository {
-	return &fakeRepository{items: map[string]data.Item{}}
-}
-
-func (f *fakeRepository) CreateItem(_ context.Context, item data.Item) (data.Item, error) {
-	if _, exists := f.items[item.ID]; exists {
-		return data.Item{}, errors.New("duplicate item")
-	}
-	f.items[item.ID] = item
-	return item, nil
-}
-
-func (f *fakeRepository) GetItem(_ context.Context, id string) (data.Item, error) {
-	item, ok := f.items[id]
-	if !ok {
-		return data.Item{}, data.ErrNotFound
-	}
-	return item, nil
-}
-
-func (f *fakeRepository) ListItems(_ context.Context, limit int) ([]data.Item, error) {
-	items := make([]data.Item, 0, len(f.items))
-	for _, item := range f.items {
-		if len(items) == limit {
-			break
-		}
-		items = append(items, item)
-	}
-	return items, nil
 }

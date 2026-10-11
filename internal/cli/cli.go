@@ -76,6 +76,7 @@ func newRootCommand() *cobra.Command {
 		newSkillsCommand(),
 		newBuildCommand(),
 		newDevCommand(),
+		newSeedCommand(),
 		newConfigCommand(),
 		newVersionCommand(),
 	)
@@ -262,7 +263,8 @@ const usageLong = `weld builds a minimal Go CLI and then extends that same proje
 place, one capability at a time. It also drives the assembled project:
 weld dev runs the backend and frontend together and weld build builds the
 frontend and cross-compiles the binary, both configured by the optional,
-user-owned weld.yml.
+user-owned weld.yml; weld seed runs the project's seeders behind the seed
+build tag, so the built binary carries no seeder data.
 
 Capabilities:
   base   (scaffold) minimal Go CLI on a Cobra command tree with a tint-backed
@@ -353,8 +355,8 @@ with the capability and version that produced it. The skills command writes
 file once you edit it.
 
 weld.yml is user-owned: it configures weld build (cross-compilation targets,
-build tags, CGO_ENABLED, ldflags) and weld dev (the backend and frontend
-commands), and weld never rewrites it. It is not the machine-owned weld.json
+build tags, CGO_ENABLED, ldflags), weld dev (the backend and frontend commands)
+and weld seed (the seeder build tag), and weld never rewrites it. It is not the machine-owned weld.json
 manifest, and weld add never touches it. weld config example prints a
 commented starter and weld config init writes one into the project (existing
 files are kept unless --force is given); every setting defaults from the

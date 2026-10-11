@@ -1,0 +1,16 @@
+//go:build !seed
+
+package seeder
+
+// Register is the untagged stand-in for register.go. Without the `seed` build
+// tag, register.go and the concrete seed_<name>.go files are compiled out, so
+// the production binary carries neither the seed data nor any faker a seeder
+// imports. This stub keeps the seeder package the generated Loom seed graph
+// references compiling, and registers nothing.
+//
+// Run the real seeders with the tag:
+//
+//	go run -tags seed . seed
+//	make seed
+//	weld seed
+func Register(*Registry) {}

@@ -4,8 +4,9 @@
 capabilities to the *same* project over time — `weld add web` modifies your
 existing project to gain a web frontend instead of generating a second
 template. It also drives the assembled project: `weld dev` runs the backend and
-frontend together, and `weld build` builds the frontend and cross-compiles the
-binary, both configured by the optional, user-owned `weld.yml`.
+frontend together, `weld build` builds the frontend and cross-compiles the
+binary, and `weld seed` runs the project's database seeders — all configured by
+the optional, user-owned `weld.yml`.
 
 Install the latest patch release with Go 1.23 or newer (the tool itself builds on Go
 1.23; a generated project that adds a capability installs Loom and raises its
@@ -24,6 +25,7 @@ weld add db            # PostgreSQL: SQL migrations + sqlc, pool and repository
 weld config example    # print the optional, user-owned weld.yml starter
 weld dev               # backend + pnpm frontend dev servers, side by side
 weld build             # builds the frontend and cross-compiles the binary
+weld seed              # runs the database seeders (seed build tag)
 make build             # the Makefile stays as the no-weld fallback
 make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
 ```
@@ -45,6 +47,7 @@ weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld dev [--dir dir]
 weld build [--dir dir]
+weld seed [name] [--tag tag] [--dir dir]
 weld config example
 weld config init [--force]
 weld list [--dir dir]
@@ -64,12 +67,21 @@ then cross-compiles the Go binary for every configured target. It is the
 release path; `make build` stays available as the self-contained, no-weld
 fallback.
 
+`weld seed` runs the project's database seeders. The seeders live behind the
+`seed` build tag (`//go:build seed`), so the binary `go build` / `weld build`
+produce compiles in neither the seed data nor any faker a seeder imports.
+`weld seed` compiles the tag in and runs the project's short `seed` command,
+optionally naming one seeder (`weld seed items`); the generated `make seed`
+target does the same. The tag defaults to `seed` and can be overridden with
+`weld.yml`'s `seed.tag` or `weld seed --tag`. It requires the `seed`
+capability.
+
 Both commands read the optional, user-owned `weld.yml` (print a commented
 starter with `weld config example`, or write one into a project that has none
 with `weld config init`, which keeps an existing file unless `--force` is
 given). `weld.yml` is deliberately **not** the
 machine-owned `weld.json` manifest: `weld` never rewrites it and `weld add`
-never touches it, so your hand-edited build and dev settings survive every
+never touches it, so your hand-edited build, dev and seed settings survive every
 later capability. Every setting is optional and defaults from the installed
 capabilities and the host platform.
 
@@ -109,10 +121,13 @@ Capabilities:
   code, an injectable connection pool and a repository. Requires `loom` but not
   `http`: it adds a pruned binding and no server.
 - `seed` (add) — opt-in database seeding: named, idempotent seeders run by a
-  short `seed` command (`make seed`) over the repositories the Loom seed graph
-  injects. Requires `db`; installing it seeds nothing until you register a
-  seeder. `weld add seeder <name>` writes one `seed_<name>.go` per seeder and adds
-  it to `internal/data/seeder/register.go`, and repositories are wired in
+  short `seed` command (`make seed`, `weld seed`) over the repositories the Loom
+  seed graph injects. The seeders are behind the `seed` build tag, so the
+  production binary carries none of them (nor any faker they import) and the
+  `seed` command appears only in a seed-tagged build. Requires `db`; installing
+  it seeds nothing until you register a seeder. `weld add seeder <name>` writes
+  one `seed_<name>.go` per seeder and adds it to
+  `internal/data/seeder/register.go`, and repositories are wired in
   `internal/di/seed_providers.go`.
 - `redis` (add) — an opt-in Redis client with typed connection configuration.
   Requires `loom` but not `http`; installing it never connects Redis to a

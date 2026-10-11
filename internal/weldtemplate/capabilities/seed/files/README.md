@@ -17,6 +17,26 @@ exits. It reads the same `config.yml` (and `DATABASE_URL`) as the rest of the
 application. The seed graph is the only root that consumes `*pgxpool.Pool`, so
 serving still needs no database credential.
 
+## Build tag
+
+Every seeder — and the `seed` command itself — lives behind the `seed` build
+tag (`//go:build seed`), so the production binary `go build` / `weld build`
+produce has no `seed` command, no seed data and none of the faker or fixture
+packages a seeder imports. Only a seed-tagged build carries them:
+
+```sh
+make seed                 # runs: go run -tags seed . seed
+weld seed                 # compiles the project with -tags seed and runs it
+weld seed items           # a single seeder
+go run -tags seed . seed  # the underlying command make/weld seed use
+```
+
+An untagged `go run . seed` reports an unknown command, so a production binary
+never suggests it can seed. The tag defaults to `seed`; override it for `weld
+seed` with `weld.yml`'s `seed.tag` or `weld seed --tag <tag>`. The generated
+`make seed` target uses the literal `seed` tag — change it there too if you
+change `seed.tag`.
+
 ## Adding a seeder
 
 Seeds are split by file. Each seeder is a `seed_<name>.go` file in this package,
@@ -29,6 +49,9 @@ Generate the file and its registration with:
 weld add seeder <name>                     # writes seed_<name>.go and registers it
 weld add seeder <name> --with-dependencies # also installs db/loom/config/seed
 ```
+
+The generated `seed_<name>.go` carries the `//go:build seed` tag too, so keep
+that first line when you edit it.
 
 The command validates the name and is idempotent (a repeated add is a no-op).
 Then wire the repository it needs and write the body:
@@ -63,12 +86,15 @@ your repository's insert an upsert (`INSERT ... ON CONFLICT DO NOTHING`). The
 shipped `items` seeder uses the check-then-insert form.
 
 weld ships no faker dependency. For generated fake data, add one yourself — for
-example `github.com/brianvoe/gofakeit/v7` — and call it inside a seeder.
+example `github.com/brianvoe/gofakeit/v7` — and call it inside a seeder. It is
+linked only into the seed-tagged build, never into the production binary.
 
 ## Stable files
 
 `internal/data/seeder/register.go` and `internal/di/seed_providers.go` are
 written once and never regenerated, so your edits survive every later
 `weld add`. `seeder.go` and the example `seed_items.go` are also written once;
-add your own `seed_<name>.go` files beside them. `internal/di/di.go` and
-`internal/di/loom_gen.go` are regenerated and must not be edited.
+add your own `seed_<name>.go` files beside them. `register_stub.go` is the
+untagged `!seed` stand-in that keeps the package compiling without the tag.
+`internal/di/di.go` and `internal/di/loom_gen.go` are regenerated and must not be
+edited.

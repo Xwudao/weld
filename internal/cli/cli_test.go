@@ -825,7 +825,7 @@ func TestHelpListsBuildDevAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"build", "dev", "config"} {
+	for _, want := range []string{"build", "dev", "seed", "config"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help omitted %q:\n%s", want, out)
 		}
@@ -898,5 +898,21 @@ func TestBuildAndDevHelp(t *testing.T) {
 		if !strings.Contains(out, "weld.yml") {
 			t.Errorf("%s help does not mention weld.yml:\n%s", name, out)
 		}
+	}
+}
+
+func TestSeedHelpMentionsBuildTag(t *testing.T) {
+	out, err := run(t, "seed", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "build tag") {
+		t.Errorf("seed help does not mention the build tag:\n%s", out)
+	}
+}
+
+func TestSeedRequiresAProject(t *testing.T) {
+	if _, err := run(t, "seed", "--dir", t.TempDir()); err == nil {
+		t.Fatal("weld seed succeeded outside a project")
 	}
 }

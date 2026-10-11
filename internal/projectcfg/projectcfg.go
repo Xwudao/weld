@@ -93,12 +93,19 @@ type DevConfig struct {
 	Frontend DevFrontendConfig `yaml:"frontend"`
 }
 
+// SeedConfig holds the `weld seed` settings.
+type SeedConfig struct {
+	// Tag is the build tag that compiles the seeders. It defaults to "seed".
+	Tag string `yaml:"tag"`
+}
+
 // Config is a parsed weld.yml.
 type Config struct {
 	// Version is the schema version. It is currently always 1.
 	Version int         `yaml:"version"`
 	Build   BuildConfig `yaml:"build"`
 	Dev     DevConfig   `yaml:"dev"`
+	Seed    SeedConfig  `yaml:"seed"`
 }
 
 // Load reads weld.yml from dir and returns ErrNotFound when it is absent.
@@ -245,6 +252,15 @@ func (c *Config) EffectiveDev() DevConfig {
 	return cfg
 }
 
+// SeedTag returns the build tag `weld seed` compiles the seeders with. It
+// defaults to "seed", the tag the generated seeders carry (`//go:build seed`).
+func (c *Config) SeedTag() string {
+	if c != nil && c.Seed.Tag != "" {
+		return c.Seed.Tag
+	}
+	return "seed"
+}
+
 // expandVars resolves ${VAR} placeholders in s. Built-in variables take
 // precedence over environment variables, so a build never depends on a
 // same-named variable a user happened to export.
@@ -350,5 +366,12 @@ dev:
     dir: web
     pm: pnpm
     cmd: run dev
+
+seed:
+  # Build tag that compiles the seeders (default: seed). The generated seeders
+  # live behind this tag, so the production binary ` + "`weld build`" + ` produces
+  # carries neither the seed data nor any faker a seeder imports. Run them with
+  # ` + "`weld seed`" + ` or ` + "`make seed`" + `.
+  tag: seed
 `
 }
