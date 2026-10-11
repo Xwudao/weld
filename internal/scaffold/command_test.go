@@ -37,6 +37,7 @@ func addModuleWithCommand(t *testing.T, dir, name string) *Result {
 }
 
 func TestValidateCommandName(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"orders", "cleanup", "a1", "catalog2"} {
 		if err := ValidateCommandName(name); err != nil {
 			t.Errorf("ValidateCommandName(%q) = %v, want nil", name, err)
@@ -55,6 +56,7 @@ func TestValidateCommandName(t *testing.T) {
 // the base app's RegisterCommand seam. Every non-base capability is a Loom
 // project, so the command also installs loom (and the config it requires).
 func TestAddCommandGeneratesIndependentGroup(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	baseApp := readFile(t, filepath.Join(dir, "internal/app/app.go"))
@@ -114,6 +116,7 @@ func TestAddCommandGeneratesIndependentGroup(t *testing.T) {
 }
 
 func TestAddCommandIsIdempotent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addCommand(t, dir, "orders")
@@ -138,6 +141,7 @@ func TestAddCommandIsIdempotent(t *testing.T) {
 }
 
 func TestAddCommandIsDryRunnable(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -158,6 +162,7 @@ func TestAddCommandIsDryRunnable(t *testing.T) {
 }
 
 func TestAddCommandRejectsReservedNameBeforeWriting(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -178,6 +183,7 @@ func TestAddCommandRejectsReservedNameBeforeWriting(t *testing.T) {
 // TestAddCommandRejectsModuleCollision proves a name is either a module or a
 // command, never both, in both creation orders.
 func TestAddCommandRejectsModuleCollision(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addModule(t, dir, "widget")
@@ -200,6 +206,7 @@ func TestAddCommandRejectsModuleCollision(t *testing.T) {
 // writes the HTTP module (installing http and loom) and a command group backed
 // by the same Service.
 func TestAddModuleWithCommandGeneratesBoth(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -251,6 +258,7 @@ func TestAddModuleWithCommandGeneratesBoth(t *testing.T) {
 // facet to a module that already exists writes only the command files and never
 // rewrites the user's module service or handler.
 func TestAddModuleCommandUpgradeAddsOnlyCommandFiles(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addModule(t, dir, "widget")
@@ -283,6 +291,7 @@ func TestAddModuleCommandUpgradeAddsOnlyCommandFiles(t *testing.T) {
 }
 
 func TestAddModuleCommandIsIdempotent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addModuleWithCommand(t, dir, "widget")
@@ -307,6 +316,7 @@ func TestAddModuleCommandIsIdempotent(t *testing.T) {
 // generated base + command project. Its generated command factory test runs the
 // unknown-subcommand path in process.
 func TestAddCommandGeneratedProjectBuildsAndTests(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addCommand(t, dir, "orders")
@@ -319,6 +329,7 @@ func TestAddCommandGeneratedProjectBuildsAndTests(t *testing.T) {
 // generated module + command project, exercising the module-backed command
 // factory against the module's own Service.
 func TestAddModuleCommandGeneratedProjectBuildsAndTests(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addModuleWithCommand(t, dir, "widget")
@@ -331,6 +342,7 @@ func TestAddModuleCommandGeneratedProjectBuildsAndTests(t *testing.T) {
 // through the graph and still gets the module-backed command group, which shares
 // the module's NewService.
 func TestAddModuleCommandWithLoom(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -360,6 +372,7 @@ func TestAddModuleCommandWithLoom(t *testing.T) {
 // starts the HTTP server: with http installed a bare invocation serves, but a
 // custom command shows its own help and exits without binding a socket.
 func TestCustomCommandDoesNotStartServer(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "http")

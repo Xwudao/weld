@@ -57,6 +57,7 @@ func assertLoomCommandSeam(t *testing.T, dir, name, initializer string) {
 // command upgrades the group to the command-specific graph instead of leaving it
 // without dependency injection.
 func TestAddCommandThenLoomMigratesSeam(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -76,6 +77,7 @@ func TestAddCommandThenLoomMigratesSeam(t *testing.T) {
 // TestAddLoomThenCommandGeneratesSeam proves adding a command to a Loom project
 // creates the command-specific graph in one step.
 func TestAddLoomThenCommandGeneratesSeam(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -95,6 +97,7 @@ func TestAddLoomThenCommandGeneratesSeam(t *testing.T) {
 // TestAddModuleThenLoomMigratesSeam proves installing Loom after a module-backed
 // command upgrades that group too, keeping the module Service as its root.
 func TestAddModuleThenLoomMigratesSeam(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -123,6 +126,7 @@ func TestAddModuleThenLoomMigratesSeam(t *testing.T) {
 // Loom project is wired through the graph from the start, without the non-Loom
 // route seam.
 func TestAddLoomThenModuleCommandGeneratesSeam(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -145,6 +149,7 @@ func TestAddLoomThenModuleCommandGeneratesSeam(t *testing.T) {
 // and that a conflict anywhere fails the plan before anything is written: no
 // partial Loom install, no command files.
 func TestAddCommandOnBaseIsAtomicOnConflict(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	// A user file at the command target makes the command facet conflict.
@@ -181,6 +186,7 @@ func TestAddCommandOnBaseIsAtomicOnConflict(t *testing.T) {
 // di.go (and may add its binding to the HTTP graph) but never rewrites the
 // command graph, even when the user has edited it.
 func TestLoomCommandGraphSurvivesLaterCapabilityAdds(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -224,6 +230,7 @@ func TestLoomCommandGraphSurvivesLaterCapabilityAdds(t *testing.T) {
 // initializer for the command constructs neither the pool nor the repository: a
 // short command never opens a database.
 func TestLoomCommandGraphDeclaresOptionalBindingsButPrunes(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -264,6 +271,7 @@ func TestLoomCommandGraphDeclaresOptionalBindingsButPrunes(t *testing.T) {
 // group (and help) never starts the HTTP server: with http installed the bare
 // root serves, but `orders` shows its own help and exits without listening.
 func TestLoomCommandBareInvocationDoesNotStartServer(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -328,6 +336,7 @@ func editInPlace(t *testing.T, path, needle, replacement string) {
 // bare command and help never resolve the graph and so never open the database
 // or a Redis client.
 func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -410,6 +419,7 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 // NewService signature cannot break it, and the production graph still gains its
 // API composition entry point.
 func TestAddAPIRefreshesGeneratedDITest(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	loomToolAvailable(t)
 	root := t.TempDir()
@@ -425,6 +435,16 @@ func TestAddAPIRefreshesGeneratedDITest(t *testing.T) {
 	editInPlace(t, servicePath,
 		"\t\"strings\"\n",
 		"\t\"strings\"\n\n\t\"example.com/demo/internal/data\"\n")
+
+	// Register the repository in the project-owned seam: the generated graph
+	// includes repositoryModule but declares no default data.Repository.
+	providersPath := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	editInPlace(t, providersPath,
+		"var repositoryModule = loom.Module()",
+		"var repositoryModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
+	editInPlace(t, providersPath,
+		"import \"github.com/Xwudao/loom\"",
+		"import (\n\t\"example.com/demo/internal/data\"\n\n\t\"github.com/Xwudao/loom\"\n)")
 
 	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
 	const userTestMarker = "// user-owned module route assertion"
@@ -455,6 +475,7 @@ func TestAddAPIRefreshesGeneratedDITest(t *testing.T) {
 // capability set, never with the module list, so adding a module cannot churn or
 // break it. The production graph still lists the module.
 func TestAddModuleKeepsDITestModuleIndependent(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	dir := create(t, t.TempDir())
 	add(t, dir, "api")
@@ -484,6 +505,7 @@ func TestAddModuleKeepsDITestModuleIndependent(t *testing.T) {
 // that a single-module project cannot expose. The composed graph routes both
 // modules while the generated DI test stays module-independent.
 func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	dir := create(t, t.TempDir())
 	addModule(t, dir, "first")
@@ -500,6 +522,7 @@ func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
 // never regenerates. The regenerated test matches the manifest hash, so weld
 // still owns it.
 func TestAddOverwritesEditedDITest(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	dir := create(t, t.TempDir())
 	add(t, dir, "http")
@@ -527,6 +550,7 @@ func TestAddOverwritesEditedDITest(t *testing.T) {
 // tests build the demo through NewDemoService, so neither depends on NewService's
 // signature.
 func TestLoomModuleServiceSignatureChangeCompiles(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	cases := []struct {
 		name  string
@@ -544,6 +568,7 @@ func TestLoomModuleServiceSignatureChangeCompiles(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			tc.setup(t, dir)

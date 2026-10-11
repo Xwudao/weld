@@ -105,6 +105,7 @@ func readFile(t *testing.T, path string) string {
 }
 
 func TestCreateWritesMinimalCLI(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -184,6 +185,7 @@ func TestCreateWritesMinimalCLI(t *testing.T) {
 }
 
 func TestCreateRefusesExistingDirectory(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, testName), 0o755); err != nil {
 		t.Fatal(err)
@@ -194,6 +196,7 @@ func TestCreateRefusesExistingDirectory(t *testing.T) {
 }
 
 func TestAddWebInstallsHTTPDependency(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -270,6 +273,7 @@ func TestAddWebInstallsHTTPDependency(t *testing.T) {
 }
 
 func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -299,6 +303,7 @@ func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
 }
 
 func TestAddWebAfterHTTPResolvesNothingExtra(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "http")
@@ -320,6 +325,7 @@ func TestAddWebAfterHTTPResolvesNothingExtra(t *testing.T) {
 }
 
 func TestAddWebIsIdempotent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "web")
@@ -357,6 +363,7 @@ func TestAddWebIsIdempotent(t *testing.T) {
 }
 
 func TestAddRejectsNonAdditiveCapability(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	if _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "base"); err == nil {
@@ -365,6 +372,7 @@ func TestAddRejectsNonAdditiveCapability(t *testing.T) {
 }
 
 func TestAddWebRejectsUnmanagedFile(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -398,12 +406,14 @@ func TestAddWebRejectsUnmanagedFile(t *testing.T) {
 }
 
 func TestAddRequiresWeldProject(t *testing.T) {
+	t.Parallel()
 	if _, err := Add(Request{Dir: t.TempDir(), Catalog: newCatalog()}, "web"); err == nil {
 		t.Fatal("expected error for non-project directory")
 	}
 }
 
 func TestAddIsDryRunnable(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -433,6 +443,7 @@ func TestAddIsDryRunnable(t *testing.T) {
 }
 
 func TestAddWebDoesNotTouchUnrelatedFiles(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -506,18 +517,19 @@ func goModTidy(t *testing.T, dir string) bool {
 	return true
 }
 
-// buildAndTestGeneratedProject runs gofmt, resolves dependencies, then builds,
-// vets and tests the generated project. It returns false when dependencies
-// cannot be resolved (no network or module cache), so the caller can skip
-// rather than fail on an environment limitation.
+// buildAndTestGeneratedProject runs gofmt, resolves dependencies, then builds
+// and tests the generated project. `go test` already builds every package and
+// runs the default vet checks, so the helper does not invoke `go build` or
+// `go vet` again: the earlier pair doubled the compiler work per test for no
+// extra coverage. It returns false when dependencies cannot be resolved (no
+// network or module cache), so the caller can skip rather than fail on an
+// environment limitation.
 func buildAndTestGeneratedProject(t *testing.T, dir string) bool {
 	t.Helper()
 	gofmtCheck(t, dir)
 	if !goModTidy(t, dir) {
 		return false
 	}
-	goBuild(t, dir)
-	runGo(t, dir, "vet", "./...")
 	goTest(t, dir, "./...")
 	return true
 }
@@ -561,6 +573,7 @@ func snapshotDir(t *testing.T, dir string) map[string]string {
 }
 
 func TestAddAPIInstallsHTTPDependency(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -635,6 +648,7 @@ func TestAddAPIInstallsHTTPDependency(t *testing.T) {
 }
 
 func TestAddAPIIsIdempotent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "api")
@@ -665,6 +679,7 @@ func TestAddAPIIsIdempotent(t *testing.T) {
 }
 
 func TestAddAPIRejectsMissingExtensionPoint(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -689,6 +704,7 @@ func TestAddAPIRejectsMissingExtensionPoint(t *testing.T) {
 // API project with the published go-validate dependency. It skips only when
 // dependencies cannot be resolved.
 func TestAddAPIGeneratedProjectBuildsAndTests(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -708,6 +724,7 @@ func TestAddAPIGeneratedProjectBuildsAndTests(t *testing.T) {
 // server in both orders: each requires http, both are mounted on the one Loom
 // server graph, and the generated project compiles and tests either way.
 func TestAddAPIAndWebInEitherOrder(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	orders := []struct {
 		name          string
@@ -718,6 +735,7 @@ func TestAddAPIAndWebInEitherOrder(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			add(t, dir, order.first)
@@ -757,6 +775,7 @@ func TestAddAPIAndWebInEitherOrder(t *testing.T) {
 // installs only db — no HTTP server, no web frontend, no API — and the
 // generated repository speaks pgx, not HTTP or JSON.
 func TestAddDBInstallsAlone(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -859,6 +878,7 @@ func TestAddDBInstallsAlone(t *testing.T) {
 }
 
 func TestAddDBIsIdempotent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -896,6 +916,7 @@ func TestAddDBIsIdempotent(t *testing.T) {
 }
 
 func TestAddDBRejectsUnmanagedFile(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -923,6 +944,7 @@ func TestAddDBRejectsUnmanagedFile(t *testing.T) {
 }
 
 func TestAddDBIsDryRunnable(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -955,6 +977,7 @@ func TestAddDBIsDryRunnable(t *testing.T) {
 // confirmation and reverts a single migration, and no target shells out to psql.
 // It also proves the generated integration test never drops application tables.
 func TestAddDBMigrationTargetsAreGuarded(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -1052,6 +1075,7 @@ func runMakeExpectError(t *testing.T, dir string, env []string, args ...string) 
 // project without PostgreSQL: the shipped sqlc output makes the project build,
 // and the integration test skips because PG_TEST_DSN is unset.
 func TestAddDBGeneratedProjectBuildsAndTests(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -1065,6 +1089,7 @@ func TestAddDBGeneratedProjectBuildsAndTests(t *testing.T) {
 // pinned tool and requires the committed output to be byte-identical, so the
 // shipped code cannot drift from db/migrations and db/query.
 func TestAddDBSqlcGenerationIsReproducible(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -1084,6 +1109,7 @@ func TestAddDBSqlcGenerationIsReproducible(t *testing.T) {
 // TestAddDBComposesWithWeb proves db and the HTTP capabilities compose in either
 // order: web installs http and both leave the app building and testing.
 func TestAddDBComposesWithWeb(t *testing.T) {
+	t.Parallel()
 	orders := []struct {
 		name          string
 		first, second string
@@ -1093,6 +1119,7 @@ func TestAddDBComposesWithWeb(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			add(t, dir, order.first)
@@ -1123,6 +1150,7 @@ func TestAddDBComposesWithWeb(t *testing.T) {
 // the JSON API stays independent of the sqlc rows. It uses the published
 // go-validate version unless a local checkout is explicitly requested.
 func TestAddDBComposesWithAPI(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	orders := []struct {
 		name          string
@@ -1133,6 +1161,7 @@ func TestAddDBComposesWithAPI(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			add(t, dir, order.first)
@@ -1177,6 +1206,7 @@ func TestAddDBComposesWithAPI(t *testing.T) {
 // live application database here would be a mistake the operator makes on
 // purpose, not one this suite can make by accident.
 func TestAddDBPostgresIntegration(t *testing.T) {
+	t.Parallel()
 	dsn := os.Getenv("PG_TEST_DSN")
 	if dsn == "" {
 		t.Skip("PG_TEST_DSN is not set; no dedicated PostgreSQL test database is available")
@@ -1250,6 +1280,7 @@ func runLoomTool(t *testing.T, dir string, args ...string) (string, bool) {
 }
 
 func TestAddLoomInstallsCLIOnlyGraph(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -1313,6 +1344,7 @@ func TestAddLoomInstallsCLIOnlyGraph(t *testing.T) {
 }
 
 func TestAddLoomIsIdempotent(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -1346,6 +1378,7 @@ func TestAddLoomIsIdempotent(t *testing.T) {
 // stable seam: a later capability install regenerates di.go around it but never
 // rewrites the project's repository wiring, and di.go still includes the seam.
 func TestAddLoomRepositoryProviderSeamIsStable(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -1373,6 +1406,7 @@ func TestAddLoomRepositoryProviderSeamIsStable(t *testing.T) {
 // `weld add <installed capability>`: the regenerated graph references
 // repositoryModule, so reconciliation must write the file that declares it.
 func TestAddLoomReconcileRestoresMissingRepositoryProviderSeam(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -1403,6 +1437,7 @@ func TestAddLoomReconcileRestoresMissingRepositoryProviderSeam(t *testing.T) {
 // Without the restore the regenerated graph would reference repositoryModule but
 // the file would be absent, so the Loom generation and the build would fail.
 func TestAddModuleRestoresRepositoryProviderSeam(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -1432,6 +1467,7 @@ func TestAddModuleRestoresRepositoryProviderSeam(t *testing.T) {
 // declares the pool plus the project-owned repository seam: the CLI-only graph
 // has no server root and no generated initializer, so nothing constructs them.
 func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	orders := []struct {
 		name string
@@ -1442,6 +1478,7 @@ func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			for _, capability := range order.caps {
@@ -1486,6 +1523,7 @@ func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 // HTTP, keeps items in memory, and loses them on restart. Installing db must not
 // switch the API to PostgreSQL, require a credential, or read the dsn.
 func TestAPIDBMatrixServesInMemoryWithoutDatabase(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	cases := []struct {
 		name      string
@@ -1506,6 +1544,7 @@ func TestAPIDBMatrixServesInMemoryWithoutDatabase(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if tc.needsLoom {
 				loomToolAvailable(t)
 			}
@@ -1697,6 +1736,7 @@ func getRaw(t *testing.T, url string) (int, []byte) {
 // Loom, so the in-memory API and its HTTP composition are race-clean
 // without PostgreSQL.
 func TestGeneratedProjectRaceAndVet(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	cases := []struct {
 		name      string
@@ -1708,6 +1748,7 @@ func TestGeneratedProjectRaceAndVet(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if tc.needsLoom {
 				loomToolAvailable(t)
 			}
@@ -1731,6 +1772,7 @@ func TestGeneratedProjectRaceAndVet(t *testing.T) {
 // requires it to report no change, so the committed initializer cannot drift
 // from the graph.
 func TestAddLoomGenerationIsReproducible(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -1752,6 +1794,7 @@ func TestAddLoomGenerationIsReproducible(t *testing.T) {
 // config. config is the one leaf Loom itself requires, so weld plans Loom for an
 // explicit `weld add config` too.
 func TestLoomInstalledByEveryAdd(t *testing.T) {
+	t.Parallel()
 	catalog := newCatalog()
 	for _, name := range []string{"http", "db", "redis", "mail", "storage"} {
 		capability, err := catalog.Get(name)
@@ -1816,6 +1859,7 @@ func mustLoad(t *testing.T, dir string) *project.Manifest {
 // serves the API over a real socket with no
 // PostgreSQL.
 func TestAddLoomKeepsAPIInMemory(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	loomToolAvailable(t)
 	orders := []struct {
@@ -1827,6 +1871,7 @@ func TestAddLoomKeepsAPIInMemory(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			useLocalGoValidate(t, dir, goValidate)
@@ -1877,6 +1922,7 @@ func TestAddLoomKeepsAPIInMemory(t *testing.T) {
 // requires loom), loom is always present when api installs, so the guard always
 // applies and loom itself no longer declares the file.
 func TestAPIProviderSeamGuardsInstallOnce(t *testing.T) {
+	t.Parallel()
 	const path = "internal/di/api_provider.go"
 	catalog := newCatalog()
 
@@ -1920,6 +1966,7 @@ func TestAPIProviderSeamGuardsInstallOnce(t *testing.T) {
 // from the new provider but leaves api_provider.go byte for byte intact, and the
 // project still builds, vets and tests without PostgreSQL.
 func TestAPIProviderSeamSurvivesLaterAdd(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	loomToolAvailable(t)
 	root := t.TempDir()
@@ -1996,6 +2043,7 @@ func NewAPIService(repo data.Repository) api.Service {
 // committed example, the git-ignore rule and the yaml dependency. An http-only
 // project never gains a database section.
 func TestAddHTTPInstallsSharedConfig(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -2034,6 +2082,7 @@ func TestAddHTTPInstallsSharedConfig(t *testing.T) {
 // gratuitous http section: the config capability writes only the marker region
 // and each capability appends its own section.
 func TestAddDBOnlyConfigHasNoHTTPSection(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -2055,6 +2104,7 @@ func TestAddDBOnlyConfigHasNoHTTPSection(t *testing.T) {
 // its section to the existing local config.yml and committed example, whichever
 // order http and db are added in, and does so exactly once.
 func TestAddDBMergesConfigSectionInBothOrders(t *testing.T) {
+	t.Parallel()
 	orders := []struct {
 		name          string
 		first, second string
@@ -2064,6 +2114,7 @@ func TestAddDBMergesConfigSectionInBothOrders(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			add(t, dir, order.first)
@@ -2090,6 +2141,7 @@ func TestAddDBMergesConfigSectionInBothOrders(t *testing.T) {
 // clobbering a user's edits to the local file: the changed address and an added
 // comment survive while the database section is appended.
 func TestAddDBPreservesEditedConfig(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "http")
@@ -2112,6 +2164,7 @@ func TestAddDBPreservesEditedConfig(t *testing.T) {
 // TestAddPreservesConfigPassword proves a user's local database password in
 // config.yml survives later adds, including an idempotent repeat of db.
 func TestAddPreservesConfigPassword(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -2135,6 +2188,7 @@ func TestAddPreservesConfigPassword(t *testing.T) {
 // capability must restore the local file from the example rather than fail on
 // the missing patch target, and must merge its section exactly once.
 func TestAddRestoresGitIgnoredConfigInBothOrders(t *testing.T) {
+	t.Parallel()
 	orders := []struct {
 		name          string
 		first, second string
@@ -2144,6 +2198,7 @@ func TestAddRestoresGitIgnoredConfigInBothOrders(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			add(t, dir, order.first)
@@ -2182,6 +2237,7 @@ func TestAddRestoresGitIgnoredConfigInBothOrders(t *testing.T) {
 // (which never absorbed the secret) rather than inventing or scraping a
 // credential.
 func TestAddConfigRestoreKeepsSecretsOutOfTheExample(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -2216,6 +2272,7 @@ func TestAddConfigRestoreKeepsSecretsOutOfTheExample(t *testing.T) {
 // silent default: the missing local config is a distinct error naming the
 // example to restore.
 func TestAddConfigRestoreReportsAMissingOrCorruptExample(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		corrupt string
@@ -2226,6 +2283,7 @@ func TestAddConfigRestoreReportsAMissingOrCorruptExample(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			add(t, dir, "db")
@@ -2259,6 +2317,7 @@ func TestAddConfigRestoreReportsAMissingOrCorruptExample(t *testing.T) {
 }
 
 func TestAddDoesNotBootstrapUnmanagedConfig(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -2344,6 +2403,7 @@ func assertInjectedLogger(t *testing.T, dir string) {
 // failure is a slog record rather than a fmt.Fprintln line, and the logger is
 // built by the base factory with no process default logger.
 func TestBaseGeneratedProjectLogsErrorsThroughSlog(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	assertInjectedLogger(t, dir)
@@ -2377,6 +2437,7 @@ func TestBaseGeneratedProjectLogsErrorsThroughSlog(t *testing.T) {
 // argument) prints the command help and exits zero: with no capability there is
 // no long-running root action, so nothing starts.
 func TestBaseGeneratedProjectBareRunShowsHelp(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	if !goModTidy(t, dir) {
@@ -2405,6 +2466,7 @@ func TestBaseGeneratedProjectBareRunShowsHelp(t *testing.T) {
 // shared --addr and log the listening line, and both stop cleanly on SIGTERM.
 // help, version and an unknown command never start it.
 func TestBareAppAndServeShareOneLifecycle(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "http")
@@ -2437,6 +2499,7 @@ func TestBareAppAndServeShareOneLifecycle(t *testing.T) {
 // bare `app` and `app serve` identical: both run the generated graph and log the
 // listening line, and both stop cleanly on SIGTERM.
 func TestLoomBareAppAndServeShareOneLifecycle(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -2463,6 +2526,7 @@ func TestLoomBareAppAndServeShareOneLifecycle(t *testing.T) {
 // generated file reaches for the process default logger, and the composed
 // project gofmt/builds/vets/tests.
 func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	cases := []struct {
 		name      string
@@ -2487,6 +2551,7 @@ func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if tc.needsLoom {
 				loomToolAvailable(t)
 			}
@@ -2513,6 +2578,7 @@ func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
 var redisSectionKeys = map[string]string{"http": "http:", "db": "database:", "redis": "redis:"}
 
 func TestAddRedisInstallsAlone(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -2584,6 +2650,7 @@ func TestAddRedisInstallsAlone(t *testing.T) {
 }
 
 func TestAddRedisGeneratedProjectBuildsAndTests(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "redis")
@@ -2593,6 +2660,7 @@ func TestAddRedisGeneratedProjectBuildsAndTests(t *testing.T) {
 }
 
 func TestAddRedisIsIdempotent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "redis")
@@ -2622,6 +2690,7 @@ func TestAddRedisIsIdempotent(t *testing.T) {
 }
 
 func TestAddRedisIsDryRunnable(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -2650,6 +2719,7 @@ func TestAddRedisIsDryRunnable(t *testing.T) {
 // local config.yml and the committed example whichever capability is added
 // first, exactly once, and that the other capability's section is untouched.
 func TestAddRedisConfigMergesInBothOrders(t *testing.T) {
+	t.Parallel()
 	orders := []struct {
 		name          string
 		first, second string
@@ -2661,6 +2731,7 @@ func TestAddRedisConfigMergesInBothOrders(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			add(t, dir, order.first)
@@ -2687,6 +2758,7 @@ func TestAddRedisConfigMergesInBothOrders(t *testing.T) {
 // TestAddRedisPreservesEditedConfig proves a late add merges its section without
 // clobbering a user's edits to the local file.
 func TestAddRedisPreservesEditedConfig(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "http")
@@ -2709,6 +2781,7 @@ func TestAddRedisPreservesEditedConfig(t *testing.T) {
 // TestAddRedisPreservesConfigPassword proves a user's local Redis password in
 // config.yml survives later adds, including an idempotent repeat of redis.
 func TestAddRedisPreservesConfigPassword(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "redis")
@@ -2731,6 +2804,7 @@ func TestAddRedisPreservesConfigPassword(t *testing.T) {
 // records it and the tracked config.example.yml remains. Adding another
 // capability restores the local file from the example and merges its section.
 func TestAddRedisRestoresGitIgnoredConfig(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "redis")
@@ -2761,6 +2835,7 @@ func TestAddRedisRestoresGitIgnoredConfig(t *testing.T) {
 // region, so `weld add redis` fails clearly instead of rewriting the file. The
 // project keeps its hand-written config and no redis files are written.
 func TestAddRedisRejectsConfigWithoutExtensionPoints(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	add(t, dir, "db")
@@ -2796,6 +2871,7 @@ func TestAddRedisRejectsConfigWithoutExtensionPoints(t *testing.T) {
 // the race detector and vets the Redis combinations, all using Loom, proving
 // the idle client and the composed graph are race-clean with no Redis server.
 func TestRedisGeneratedProjectRaceAndVet(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name      string
 		caps      []string
@@ -2806,6 +2882,7 @@ func TestRedisGeneratedProjectRaceAndVet(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if tc.needsLoom {
 				loomToolAvailable(t)
 			}
@@ -2830,6 +2907,7 @@ func TestRedisGeneratedProjectRaceAndVet(t *testing.T) {
 // no Redis setting is needed. The provider lives in the stable redis_provider.go
 // seam, not in the regenerated graph.
 func TestAddRedisLoomPrunesUnconsumedClient(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	orders := []struct {
 		name string
@@ -2840,6 +2918,7 @@ func TestAddRedisLoomPrunesUnconsumedClient(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			for _, capability := range order.caps {
@@ -2872,6 +2951,7 @@ func TestAddRedisLoomPrunesUnconsumedClient(t *testing.T) {
 // redis_provider.go survives a later capability add that regenerates the graph,
 // and the graph still follows the installed capabilities.
 func TestAddRedisLoomProviderSeamIsStable(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -2906,6 +2986,7 @@ func TestAddRedisLoomProviderSeamIsStable(t *testing.T) {
 // edited api_provider.go stay byte for byte intact. The API uses the published
 // go-validate Spec API by default.
 func TestAddRedisLoomConsumesWhenProviderAsks(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	loomToolAvailable(t)
 	root := t.TempDir()
@@ -2963,6 +3044,7 @@ func NewAPIService(client *redis.Client) api.Service {
 // loom is always present when redis installs, so the guard always applies and
 // loom itself no longer declares the file.
 func TestRedisProviderSeamGuardsInstallOnce(t *testing.T) {
+	t.Parallel()
 	const path = "internal/di/redis_provider.go"
 	catalog := newCatalog()
 
@@ -3100,6 +3182,7 @@ func waitForLog(t *testing.T, stderr *syncBuffer, substr string, timeout time.Du
 // registration file, attaches a runtime to the shared config seam, and creates
 // no serve command or HTTP package. It schedules nothing by itself.
 func TestAddCronInstallsHTTPAndLoom(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -3164,6 +3247,7 @@ func TestAddCronInstallsHTTPAndLoom(t *testing.T) {
 // HTTP server down and exits cleanly. No job fires; the point is that the
 // scheduler lifecycle really follows the long-running command.
 func TestAddCronSchedulerFollowsServe(t *testing.T) {
+	t.Parallel()
 	orders := []struct {
 		name string
 		caps []string
@@ -3173,6 +3257,7 @@ func TestAddCronSchedulerFollowsServe(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			for _, capability := range order.caps {
@@ -3212,6 +3297,7 @@ func TestAddCronSchedulerFollowsServe(t *testing.T) {
 // "listening" before the scheduler starts and the scheduler stops before the
 // server shuts down.
 func TestAddCronWithLoomWiresScheduler(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	orders := []struct {
 		name string
@@ -3223,6 +3309,7 @@ func TestAddCronWithLoomWiresScheduler(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			for _, capability := range order.caps {
@@ -3259,6 +3346,7 @@ func TestAddCronWithLoomWiresScheduler(t *testing.T) {
 // the graph-owned scheduler starts after the socket is bound and stops before
 // the HTTP server, observed from the generated binary's logs.
 func TestAddCronLoomSchedulerRunsWithServe(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -3292,6 +3380,7 @@ func TestAddCronLoomSchedulerRunsWithServe(t *testing.T) {
 // (which requires loom), loom is always present when cron installs, so the guard
 // always applies and loom itself no longer declares the file.
 func TestCronProviderSeamGuardsInstallOnce(t *testing.T) {
+	t.Parallel()
 	const path = "internal/di/cron_provider.go"
 	catalog := newCatalog()
 
@@ -3333,6 +3422,7 @@ func TestCronProviderSeamGuardsInstallOnce(t *testing.T) {
 // user edit to the stable register and provider files survives a later
 // capability add that regenerates the graph.
 func TestAddCronProviderSeamSurvivesLaterAdd(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	orders := []struct {
 		name string
@@ -3343,6 +3433,7 @@ func TestAddCronProviderSeamSurvivesLaterAdd(t *testing.T) {
 	}
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			for _, capability := range order.caps {
@@ -3383,6 +3474,7 @@ func TestAddCronProviderSeamSurvivesLaterAdd(t *testing.T) {
 // declares the provider, the stable seam defines it, the generated initializer
 // never constructs it, and the project builds and tests with no external server.
 func TestAddMailStorageWithLoomBothOrders(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	cases := []struct {
 		capability  string
@@ -3402,6 +3494,7 @@ func TestAddMailStorageWithLoomBothOrders(t *testing.T) {
 		}
 		for _, order := range orders {
 			t.Run(order.name, func(t *testing.T) {
+				t.Parallel()
 				root := t.TempDir()
 				dir := create(t, root)
 				for _, capability := range order.caps {
@@ -3432,6 +3525,7 @@ func TestAddMailStorageWithLoomBothOrders(t *testing.T) {
 // require loom, the guard always applies and loom itself no longer declares the
 // files.
 func TestMailStorageProviderSeamsGuardInstallOnce(t *testing.T) {
+	t.Parallel()
 	catalog := newCatalog()
 	loom, err := catalog.Get("loom")
 	if err != nil {
@@ -3446,6 +3540,7 @@ func TestMailStorageProviderSeamsGuardInstallOnce(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.capability, func(t *testing.T) {
+			t.Parallel()
 			capability, err := catalog.Get(tc.capability)
 			if err != nil {
 				t.Fatalf("Get %s: %v", tc.capability, err)
@@ -3483,6 +3578,7 @@ func TestMailStorageProviderSeamsGuardInstallOnce(t *testing.T) {
 // with the db/redis mix, and cron with api. No PostgreSQL, Redis, mail or object
 // store is reached.
 func TestCronGeneratedProjectRaceAndVet(t *testing.T) {
+	t.Parallel()
 	goValidate := goValidateDir(t)
 	cases := []struct {
 		name      string
@@ -3498,6 +3594,7 @@ func TestCronGeneratedProjectRaceAndVet(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if tc.needsLoom {
 				loomToolAvailable(t)
 			}
@@ -3523,6 +3620,7 @@ func TestCronGeneratedProjectRaceAndVet(t *testing.T) {
 // really invoked when serve starts the scheduler, not just compiled: a user job
 // with an invalid spec makes serve fail loudly instead of starting.
 func TestAddCronRegistrationFileIsConsumed(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	for _, capability := range []string{"http", "cron"} {
@@ -3573,6 +3671,7 @@ func TestAddCronRegistrationFileIsConsumed(t *testing.T) {
 // TestCronDoesNotStartForShortCommands proves the scheduler follows serve only:
 // help, version and an unknown command never start it.
 func TestCronDoesNotStartForShortCommands(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	for _, capability := range []string{"http", "cron"} {
@@ -3598,9 +3697,11 @@ func TestCronDoesNotStartForShortCommands(t *testing.T) {
 // stable seams preserve user wiring: an edit to the provider file survives a
 // later capability add that regenerates the graph.
 func TestAddMailStorageProviderSeamSurvivesLaterAdd(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	for _, capability := range []string{"mail", "storage"} {
 		t.Run(capability, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			dir := create(t, root)
 			for _, name := range []string{capability, "loom"} {

@@ -23,6 +23,7 @@ func addModule(t *testing.T, dir, name string) *Result {
 }
 
 func TestValidateModuleName(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"widget", "orders", "a1", "catalog2"} {
 		if err := ValidateModuleName(name); err != nil {
 			t.Errorf("ValidateModuleName(%q) = %v, want nil", name, err)
@@ -39,6 +40,7 @@ func TestValidateModuleName(t *testing.T) {
 }
 
 func TestAddModuleInstallsHTTPAndConfig(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -91,6 +93,7 @@ func TestAddModuleInstallsHTTPAndConfig(t *testing.T) {
 // the HTTP handler in process with httptest, so no socket and no database is
 // needed. It skips when dependencies cannot be resolved.
 func TestAddModuleGeneratedProjectBuildsAndTests(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addModule(t, dir, "widget")
@@ -100,6 +103,7 @@ func TestAddModuleGeneratedProjectBuildsAndTests(t *testing.T) {
 }
 
 func TestAddModuleIsIdempotent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addModule(t, dir, "widget")
@@ -129,6 +133,7 @@ func TestAddModuleIsIdempotent(t *testing.T) {
 }
 
 func TestAddModuleIsDryRunnable(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -152,6 +157,7 @@ func TestAddModuleIsDryRunnable(t *testing.T) {
 }
 
 func TestAddModuleRejectsInvalidNameBeforeWriting(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -168,6 +174,7 @@ func TestAddModuleRejectsInvalidNameBeforeWriting(t *testing.T) {
 }
 
 func TestAddModuleRefusesUnmanagedFile(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 
@@ -194,6 +201,7 @@ func TestAddModuleRefusesUnmanagedFile(t *testing.T) {
 // later capability add leaves a user-edited module file untouched while the
 // regenerated graph still routes the module and the later capability.
 func TestAddModuleFilesSurviveLaterAdd(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addModule(t, dir, "widget")
@@ -221,6 +229,7 @@ func TestAddModuleFilesSurviveLaterAdd(t *testing.T) {
 // module-first order, without touching module files and without wiring a
 // database into the HTTP surface.
 func TestAddModuleComposesWithDB(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
 	addModule(t, dir, "widget")
@@ -253,6 +262,7 @@ func TestAddModuleComposesWithDB(t *testing.T) {
 // the module, and installing db must still declare the pool and repository as
 // available bindings only, never constructing them in loom_gen.go.
 func TestAddModuleWithLoomRendersGraphAndPreservesDBPruning(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
@@ -293,6 +303,7 @@ func TestAddModuleWithLoomRendersGraphAndPreservesDBPruning(t *testing.T) {
 // must not be rewritten. The generated project is only gofmt-checked here, since
 // the module-after-Loom order already builds the same graph.
 func TestAddLoomAfterModuleRendersGraph(t *testing.T) {
+	t.Parallel()
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
