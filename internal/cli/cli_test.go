@@ -136,17 +136,17 @@ func TestAddSeederSubcommand(t *testing.T) {
 	}
 	dir := filepath.Join(root, "demo")
 
-	// With no name the seed subcommand installs the capability and its chain.
+	// `weld add seed` installs the capability and its chain.
 	if _, err := run(t, "add", "seed", "--with-dependencies", "--dir", dir); err != nil {
 		t.Fatalf("add seed: %v", err)
 	}
 
-	out, err := run(t, "add", "seed", "users", "--dir", dir)
+	out, err := run(t, "add", "seeder", "users", "--dir", dir)
 	if err != nil {
-		t.Fatalf("add seed users: %v", err)
+		t.Fatalf("add seeder users: %v", err)
 	}
 	if !strings.Contains(out, "internal/data/seeder/seed_users.go") {
-		t.Fatalf("add seed users output = %q", out)
+		t.Fatalf("add seeder users output = %q", out)
 	}
 	register, err := os.ReadFile(filepath.Join(dir, "internal", "data", "seeder", "register.go"))
 	if err != nil {
@@ -157,12 +157,12 @@ func TestAddSeederSubcommand(t *testing.T) {
 	}
 
 	// A repeat is a no-op.
-	out, err = run(t, "add", "seed", "users", "--dir", dir)
+	out, err = run(t, "add", "seeder", "users", "--dir", dir)
 	if err != nil {
-		t.Fatalf("repeat add seed users: %v", err)
+		t.Fatalf("repeat add seeder users: %v", err)
 	}
 	if !strings.Contains(out, "already installed") {
-		t.Fatalf("repeat add seed users output = %q", out)
+		t.Fatalf("repeat add seeder users output = %q", out)
 	}
 }
 

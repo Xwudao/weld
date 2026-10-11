@@ -52,7 +52,7 @@ capabilities/
     capability.json
     files/         internal/data/seeder (Deps, Registry, Runner, the stable
                    register.go index, one seed_<name>.go per seeder, added by
-                   `weld add seed <name>`), internal/app/seed.go (the short seed command),
+                   `weld add seeder <name>`), internal/app/seed.go (the short seed command),
                    internal/di/seed_providers.go (stable Loom repository seam),
                    Makefile seed target (db region), README
   redis/           kind: add    -> opt-in Redis client, requires loom

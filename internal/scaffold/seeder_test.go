@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// addSeeder plans and applies `weld add seed <name>`.
+// addSeeder plans and applies `weld add seeder <name>`.
 func addSeeder(t *testing.T, dir, name string) *Result {
 	t.Helper()
 	result, err := AddSeeder(Request{Dir: dir, Catalog: newCatalog()}, name)

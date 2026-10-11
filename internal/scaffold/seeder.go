@@ -11,7 +11,7 @@ import (
 
 const (
 	// seederRegisterMarker is the extension point in register.go that
-	// `weld add seed <name>` appends a registration to.
+	// `weld add seeder <name>` appends a registration to.
 	seederRegisterMarker = "seeders"
 	// seederDir is the seeder package, relative to the project root.
 	seederDir = "internal/data/seeder"

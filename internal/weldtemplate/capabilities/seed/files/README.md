@@ -26,8 +26,8 @@ never touches the others.
 Generate the file and its registration with:
 
 ```sh
-weld add seed <name>                     # writes seed_<name>.go and registers it
-weld add seed <name> --with-dependencies # also installs db/loom/config/seed
+weld add seeder <name>                     # writes seed_<name>.go and registers it
+weld add seeder <name> --with-dependencies # also installs db/loom/config/seed
 ```
 
 The command validates the name and is idempotent (a repeated add is a no-op).
