@@ -17,9 +17,9 @@ import (
 // graph declares NewMailSender, but nothing depends on *mailsender.Sender, so
 // Loom prunes it and an ordinary serve never constructs a sender and never needs
 // a mail setting. To use mail, make a provider the graph already consumes depend
-// on *mailsender.Sender. For an api+loom project, edit internal/di/api_provider.go
-// (the API service seam) to take *mailsender.Sender; Loom then constructs
-// NewMailSender and validates the mail configuration.
+// on *mailsender.Sender — for example edit the service.go of one of your
+// business modules so its NewService takes *mailsender.Sender; Loom then
+// constructs NewMailSender and validates the mail configuration.
 //
 // Construction never sends and never connects: mailsender.New only validates the
 // mail section and stores the settings, and the sender dials the SMTP server

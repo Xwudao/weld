@@ -147,7 +147,7 @@ func TestAddDBInstallsWithoutHTTP(t *testing.T) {
 		t.Fatalf("add db did not write the repository: %v", err)
 	}
 	// db is independent of the HTTP capabilities.
-	for _, path := range []string{"internal/httpserver", "internal/api", "internal/web"} {
+	for _, path := range []string{"internal/httpserver", "internal/web"} {
 		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
 			t.Errorf("add db created %s", path)
 		}
@@ -191,7 +191,7 @@ func TestAddRedisInstallsConfigOnly(t *testing.T) {
 	// redis is independent of the HTTP and database capabilities, but installing
 	// it also installs loom (and config), just without the HTTP surface: the
 	// dependency graph is CLI-only.
-	for _, path := range []string{"internal/httpserver", "internal/api", "internal/data", "internal/web"} {
+	for _, path := range []string{"internal/httpserver", "internal/data", "internal/web"} {
 		if _, err := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(err) {
 			t.Errorf("add redis created %s", path)
 		}
@@ -268,9 +268,6 @@ func TestSkillsFreshGenerationAndRepeat(t *testing.T) {
 	if _, err := run(t, "add", "http", "--dir", dir); err != nil {
 		t.Fatalf("add http: %v", err)
 	}
-	if _, err := run(t, "add", "api", "--dir", dir); err != nil {
-		t.Fatalf("add api: %v", err)
-	}
 
 	out, err := run(t, "skills", "--dir", dir)
 	if err != nil {
@@ -284,7 +281,7 @@ func TestSkillsFreshGenerationAndRepeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read skill: %v", err)
 	}
-	for _, want := range []string{"**http**", "**api**", "in-memory", "example.com/demo"} {
+	for _, want := range []string{"**http**", "example.com/demo"} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("generated skill is missing %q:\n%s", want, raw)
 		}
@@ -500,8 +497,8 @@ func TestAddModuleCommand(t *testing.T) {
 	}
 
 	// A bad name and a missing name are rejected.
-	if _, err := run(t, "add", "module", "items", "--dir", dir); err == nil {
-		t.Fatal("expected add module items to fail")
+	if _, err := run(t, "add", "module", "api", "--dir", dir); err == nil {
+		t.Fatal("expected add module api to fail")
 	}
 	if _, err := run(t, "add", "module", "--dir", dir); err == nil {
 		t.Fatal("expected add module without a name to fail")

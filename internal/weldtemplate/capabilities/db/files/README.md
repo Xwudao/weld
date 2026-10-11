@@ -2,14 +2,14 @@
 
 The PostgreSQL persistence layer. It imports `pgx/v5` only — no HTTP server and
 no JSON DTO shape leaks in — so it can be used by a plain CLI project and does
-not depend on `internal/api`.
+not depend on the HTTP layer.
 
 ## The database is wired by hand
 
 `weld add db` installs this package; it does not connect it. Nothing in the
-generated application constructs a pool or a repository, and serving the HTTP or
-JSON API capability never requires database credentials. The default JSON API is
-an in-memory development demo (`api.NewService()`) whose data is lost on
+generated application constructs a pool or a repository, and serving the HTTP
+capability never requires database credentials. A generated business module's
+default `Service` is an in-memory development demo whose data is lost on
 restart.
 
 To use the database, construct the pool and repository yourself and inject them
@@ -32,7 +32,7 @@ explicit path; an unrelated startup never calls them.
 
 The project's Loom graph declares `*pgxpool.Pool` as an available binding and
 ships `NewRepository`, but it registers no `data.Repository` by default: the
-generic items API is the in-memory demo, so the generated graph claims no
+generated graph claims no
 production consumer. Register a repository in `internal/di/repository_providers.go`,
 the project-owned seam `commonModule` includes, rather than editing the
 regenerated `internal/di/di.go`:
@@ -44,13 +44,13 @@ var repositoryModule = loom.Module(
 )
 ```
 
-Then have a provider consume it — for example edit
-`internal/di/api_provider.go`, the stable provider seam:
+Then have a provider consume it — for example edit the `service.go` of one of
+your business modules, whose `NewService` the server graph binds:
 
 ```go
-// internal/di/api_provider.go
-func NewAPIService(repo data.Repository) api.Service {
-	return myService{repo: repo} // your repository-backed api.Service
+// internal/modules/<name>/service.go
+func NewService(repo data.Repository) Service {
+	return &repositoryService{repo: repo} // your repository-backed Service
 }
 ```
 
@@ -58,7 +58,7 @@ Loom then constructs the pool, the repository and your service together,
 validating the database settings at that point, and weld never rewrites the
 stable files, so the edits survive later capability installs. Do not add
 providers to `internal/di/di.go`: it is regenerated. See
-`internal/di/README.md` and `internal/api/README.md`.
+`internal/di/README.md` and `internal/modules/<name>/README.md`.
 
 ## The development query log
 

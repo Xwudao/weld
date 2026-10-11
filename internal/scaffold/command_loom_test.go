@@ -412,19 +412,17 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	}
 }
 
-// TestAddAPIRefreshesGeneratedDITest proves the DI test is a generated file with
-// no user-owned state: after a module's constructor changes and the user appends
-// an assertion to di_test.go, adding api regenerates the test instead of
-// preserving the edit. The regenerated test never names a module, so the changed
-// NewService signature cannot break it, and the production graph still gains its
-// API composition entry point.
-func TestAddAPIRefreshesGeneratedDITest(t *testing.T) {
+// TestAddCapabilityRefreshesGeneratedDITest proves the DI test is a generated
+// file with no user-owned state: after a module's constructor changes and the
+// user appends an assertion to di_test.go, adding a capability regenerates the
+// test instead of preserving the edit. The regenerated test never names a
+// module, so the changed NewService signature cannot break it, and the
+// production graph still gains the new capability.
+func TestAddCapabilityRefreshesGeneratedDITest(t *testing.T) {
 	t.Parallel()
-	goValidate := goValidateDir(t)
 	loomToolAvailable(t)
 	root := t.TempDir()
 	dir := create(t, root)
-	useLocalGoValidate(t, dir, goValidate)
 	addModule(t, dir, "widget")
 	add(t, dir, "db")
 
@@ -452,18 +450,18 @@ func TestAddAPIRefreshesGeneratedDITest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	add(t, dir, "api")
+	add(t, dir, "cron")
 	generated := readFile(t, diTestPath)
 	if strings.Contains(generated, userTestMarker) {
-		t.Fatal("weld add api preserved an edit to the generated DI test")
+		t.Fatal("weld add cron preserved an edit to the generated DI test")
 	}
 	for _, forbidden := range []string{"internal/modules/widget", "FakeService"} {
 		if strings.Contains(generated, forbidden) {
 			t.Errorf("the regenerated di_test.go still names %q:\n%s", forbidden, generated)
 		}
 	}
-	if !strings.Contains(readFile(t, filepath.Join(dir, "internal", "di", "di.go")), "NewServerWithAPI") {
-		t.Fatal("the API graph did not gain its composition entry point")
+	if !strings.Contains(readFile(t, filepath.Join(dir, "internal", "di", "di.go")), "NewScheduler") {
+		t.Fatal("the graph did not gain the cron composition")
 	}
 	if !buildAndTestGeneratedProject(t, dir) {
 		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
@@ -478,7 +476,7 @@ func TestAddModuleKeepsDITestModuleIndependent(t *testing.T) {
 	t.Parallel()
 	loomToolAvailable(t)
 	dir := create(t, t.TempDir())
-	add(t, dir, "api")
+	add(t, dir, "http")
 
 	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
 	before := readFile(t, diTestPath)
@@ -510,7 +508,6 @@ func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
 	dir := create(t, t.TempDir())
 	addModule(t, dir, "first")
 	addModule(t, dir, "second")
-	add(t, dir, "api")
 	if !buildAndTestGeneratedProject(t, dir) {
 		t.Skip("cannot resolve generated project's dependencies (network/module cache unavailable)")
 	}
@@ -526,7 +523,6 @@ func TestAddOverwritesEditedDITest(t *testing.T) {
 	loomToolAvailable(t)
 	dir := create(t, t.TempDir())
 	add(t, dir, "http")
-	add(t, dir, "api")
 
 	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
 	const userTestMarker = "// user-owned assertion"

@@ -35,7 +35,7 @@ func Chain(logger *slog.Logger, handler nethttp.Handler) nethttp.Handler {
 // It is the injectable seam for tests: pass routes directly to exercise the mux
 // — and the real middleware chain — without installing a capability or opening
 // a socket. Production composition happens in the Loom server graph, which
-// registers the API and the business modules on its own mux.
+// registers the business modules on its own mux.
 func NewHandler(logger *slog.Logger, routes ...Route) nethttp.Handler {
 	mux := nethttp.NewServeMux()
 	for _, route := range routes {

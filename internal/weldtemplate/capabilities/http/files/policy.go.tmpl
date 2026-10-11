@@ -7,12 +7,12 @@ import (
 	"__module__/internal/httpx"
 )
 
-// APIPrefix is the default mount prefix for the built-in API and the business
-// modules (see ModulePrefix).
+// APIPrefix is the default mount prefix for the business modules (see
+// ModulePrefix).
 //
 // It is the one place the HTTP surface's default top-level path is declared.
 // Change it (for example to "/api/v2") to version the surface; the generated
-// server graph mounts the API and the modules from this constant (through
+// server graph mounts the modules from this constant (through
 // ModulePrefix), so the change survives every later `weld add`. A module declares
 // its paths relative to its mount, so it follows the prefix without an edit.
 const APIPrefix = "/api"

@@ -29,10 +29,10 @@ func TestValidateModuleName(t *testing.T) {
 			t.Errorf("ValidateModuleName(%q) = %v, want nil", name, err)
 		}
 	}
-	// Not a canonical Go package / URL segment, a Go keyword, or a reserved
-	// built-in API path. 'openapi' is not reserved: the document endpoint it once
-	// guarded was removed.
-	for _, name := range []string{"", "Widget", "widget-1", "1widget", "_widget", "widget_1", "range", "func", "items", "api"} {
+	// Not a canonical Go package / URL segment, a Go keyword, or the reserved
+	// module URL root. 'openapi' and 'items' are not reserved: the document
+	// endpoint and the built-in items API were removed.
+	for _, name := range []string{"", "Widget", "widget-1", "1widget", "_widget", "widget_1", "range", "func", "api"} {
 		if err := ValidateModuleName(name); err == nil {
 			t.Errorf("ValidateModuleName(%q) = nil, want an error", name)
 		}
@@ -162,7 +162,7 @@ func TestAddModuleRejectsInvalidNameBeforeWriting(t *testing.T) {
 	dir := create(t, root)
 
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
-	if _, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "items"); err == nil {
+	if _, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "api"); err == nil {
 		t.Fatal("expected an error for a reserved module name")
 	}
 	if readFile(t, filepath.Join(dir, project.ManifestName)) != manifestBefore {

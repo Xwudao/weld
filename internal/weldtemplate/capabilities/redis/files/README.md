@@ -36,10 +36,10 @@ an available binding. The generated graph declares it but nothing depends on
 needs no Redis setting.
 
 To use Redis, make a provider the graph already consumes depend on
-`*redis.Client`. For an `api` + `loom` project, edit `internal/di/api_provider.go`
-so `NewAPIService` takes `*redis.Client`; Loom then constructs `NewRedisClient`,
+`*redis.Client`: edit the `service.go` of one of your business modules so its
+`NewService` takes `*redis.Client`; Loom then constructs `NewRedisClient`,
 validates the Redis configuration and registers the cleanup that closes the
-client when the lifecycle stops. `redis_provider.go` and `api_provider.go` are
+client when the lifecycle stops. `redis_provider.go` is
 written once and never regenerated, so those edits survive every later
 `weld add`.
 

@@ -45,31 +45,33 @@ every added capability installs `loom` (and the `config` it requires).
 
 ```sh
 weld add web   # installs loom, config and http, then the React + TS + Vite frontend
-weld add api   # installs loom, config and http, then the JSON API
+weld add module items # installs loom, config and http, then one business JSON module
 weld add db    # PostgreSQL: SQL migrations, sqlc queries and a repository (no HTTP)
 weld add redis # an opt-in Redis client with typed connection config (no HTTP)
 ```
 
 `weld add web` installs `http`, which owns the `serve` command and the HTTP
-server, and then the frontend it serves. `weld add api` installs the same
-`http` capability and adds the JSON API under `/api/`; it does not require the
-frontend. `web` and `api` are independent, so they can be added in either order
-and both are served by the one `serve` command. `weld add db` requires `loom`
-but not `http`: it adds PostgreSQL persistence without an HTTP server, so it
-works in a CLI-only project and composes with `http`/`web`/`api` in any order.
+server, and then the frontend it serves. `weld add module <name>` installs the
+same `http` capability and adds one business JSON module under `/api/<name>`; it
+does not require the frontend, so `web` and a module are independent, can be
+added in either order, and both are served by the one `serve` command. `weld add
+db` requires `loom` but not `http`: it adds PostgreSQL persistence without an
+HTTP server, so it works in a CLI-only project and composes with `http`/`web` in
+any order.
 `weld add redis` likewise requires `loom` but not `http`: it installs an opt-in
 Redis client that the caller owns, never a connection, so it composes with the
 other capabilities and needs no Redis server to build or serve.
 
-The generated JSON API is a **development demo**: it keeps items in process
-memory, so data is lost on restart and no database is required. `weld add db`
+A generated business module is a **development demo** until you wire it: its
+default `Service` keeps its data in process memory, so data is lost on restart
+and no database is required. `weld add db`
 installs the PostgreSQL persistence library but does not connect it; `weld add
 redis` installs a lazy client but never imports it into the application. When
-you need either, wire it in yourself through a stable file (the `api`, `db`,
+you need either, wire it in yourself through a stable file (the `db`,
 `redis` and `loom` READMEs name them), not through the regenerated Loom graph.
 
 The frontend reserves the API mount prefix (`httpserver.APIPrefix`, `/api` by
-default) for the API and the business modules: unknown paths under it return a
+default) for the business modules: unknown paths under it return a
 not-found rather than the HTML shell. The base project does not install or
 require any capability.
 

@@ -7,7 +7,7 @@
 // injected dependency.
 //
 // It is independent of the HTTP layer: it imports pgx, not net/http, and its
-// model carries no JSON tags, so the HTTP DTOs in internal/api never see a sqlc
+// model carries no JSON tags, so the HTTP DTOs never see a sqlc
 // row and a schema change cannot silently alter the wire contract.
 package data
 

@@ -21,8 +21,8 @@ import (
 // graph declares NewRedisClient, but nothing depends on *redis.Client, so Loom
 // prunes it and an ordinary serve never constructs a client and never needs a
 // Redis setting. To use Redis, make a provider the graph already consumes
-// depend on *redis.Client. For an api+loom project, edit internal/di/api_provider.go
-// (the API service seam) to take *redis.Client; Loom then constructs
+// depend on *redis.Client — for example edit the service.go of one of your
+// business modules so its NewService takes *redis.Client; Loom then constructs
 // NewRedisClient, validates the Redis configuration and registers the cleanup
 // that closes the client exactly once.
 //

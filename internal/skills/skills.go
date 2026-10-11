@@ -282,7 +282,6 @@ var curatedNotes = map[string]string{
 	"config":  "shared typed configuration in `internal/config`: `config.yml` from the working directory with flag > environment > file > defaults precedence. `config.yml` is local and git-ignored and `config.example.yml` is committed. `config.Secret` redacts itself in `fmt`, `log/slog`, JSON and YAML.",
 	"http":    "HTTP server lifecycle in `internal/httpserver` and the `serve` command in `internal/app/serve.go`. Routes are composed explicitly with `httpx.NewRouter(mux)` and its typed helpers (`Get`, `Post`, `NoInput`, ...) or a raw `Router.Get`/`Router.HandleFunc`; there is no global route registry. The shared HTTP toolkit is `internal/httpx`: the `{code,msg,data}` JSON response envelope with raw writers for responses that must stay unwrapped, a router with grouping, per-group middleware and named route policies, typed handlers, query/path and JSON binding with a body limit, automatic `Validate() error` on a request DTO, `*HTTPError` status mapping, and the composable middleware (`RequestID`, `AccessLog`, `Recover`). The global middleware stack and the named policies are declared in the stable, project-owned `internal/httpserver/middleware.go` and `internal/httpserver/policy.go`; `internal/httpserver.APIPrefix` is the mount prefix, so versioning is one line. The router records every route it registers (`Routes`, `LogRoutes`, `PrintRoutes`), and the generated composition logs the table with each route's policies at startup when `environment` is local or development, so the surface and its coverage are visible without a request. A route policy is only a name: the composition root resolves it into middleware with `httpx.Router.WithPolicy`, and the generated `AdminGuard` is a replaceable placeholder, so the project's real check (a JWT, a session or a database role lookup) is implemented there or in a package it delegates to. Once installed, a bare invocation runs the same serve lifecycle as `serve`, and `--config`/`--addr` are shared persistent root flags so both parse one definition.",
 	"web":     "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
-	"api":     "JSON HTTP API in `internal/api`: typed, self-validating DTOs and routes declared once with the `internal/httpx` typed helpers, writing the `{code,msg,data}` envelope. The default `Service` is an in-memory development demo whose items are lost on restart; it is not persistence.",
 	"db":      "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
 	"loom":    "compile-time dependency injection in `internal/di`, automatically installed for every capability and command beyond the bare CLI. All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage bindings. A command group resolves its graph lazily through the shared `internal/commandkit` seam, so a subcommand injects a dependency by adding a field to its `Deps` and a parameter to `NewDeps` (a provider already in `commonModule` needs no graph edit; a new one needs `loom.Provide(...)` in `internal/di/<name>_graph.go`). Loom raises the project's Go directive to 1.25.",
 	"redis":   "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
@@ -297,13 +296,6 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 	b.WriteString("`weld.json`. Installed does not mean **wired**: the generated application only\n")
 	b.WriteString("uses a capability where project code explicitly references it.\n\n")
 	wrote := false
-	if set["api"] {
-		b.WriteString("- **api** serves an in-memory development demo (`api.NewService()`). Items are\n")
-		b.WriteString("  lost on restart and no database is required; installing **db** does not switch\n")
-		b.WriteString("  the service to PostgreSQL. Wire persistence in explicitly (see\n")
-		b.WriteString("  `internal/api/README.md`).\n")
-		wrote = true
-	}
 	if set["db"] {
 		b.WriteString("- **db** installs a pool and repository but connects nothing. No pool is\n")
 		b.WriteString("  constructed and no database credential is needed until a provider consumes\n")
@@ -413,9 +405,6 @@ func writeEditing(b *strings.Builder, set map[string]bool) {
 	var seams []string
 	if set["http"] {
 		seams = append(seams, "`internal/httpserver/middleware.go`", "`internal/httpserver/policy.go`")
-	}
-	if set["api"] && set["loom"] {
-		seams = append(seams, "`internal/di/api_provider.go`")
 	}
 	if set["redis"] && set["loom"] {
 		seams = append(seams, "`internal/di/redis_provider.go`")

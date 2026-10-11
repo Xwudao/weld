@@ -41,7 +41,7 @@ func manifest(caps ...string) *project.Manifest {
 }
 
 func TestRenderDescribesInstalledCapabilities(t *testing.T) {
-	body, err := Render(manifest("config", "http", "api", "db", "redis"), template.Load())
+	body, err := Render(manifest("config", "http", "db", "redis"), template.Load())
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -53,11 +53,9 @@ func TestRenderDescribesInstalledCapabilities(t *testing.T) {
 		"**base** v0.1.0",
 		"**config** v0.1.0",
 		"**http** v0.1.0",
-		"**api** v0.1.0",
 		"**db** v0.1.0",
 		"**redis** v0.1.0",
 		"## Installed is not the same as wired",
-		"in-memory development demo",
 		"## Generated and editable files",
 		"## Regenerating this skill",
 	} {
@@ -72,18 +70,18 @@ func TestRenderDescribesInstalledCapabilities(t *testing.T) {
 }
 
 func TestRenderIsDeterministicAndOrderIndependent(t *testing.T) {
-	first, err := Render(manifest("db", "api"), template.Load())
+	first, err := Render(manifest("db", "redis"), template.Load())
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	second, err := Render(manifest("db", "api"), template.Load())
+	second, err := Render(manifest("db", "redis"), template.Load())
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if !bytes.Equal(first, second) {
 		t.Fatal("Render is not deterministic")
 	}
-	reordered, err := Render(manifest("api", "db"), template.Load())
+	reordered, err := Render(manifest("redis", "db"), template.Load())
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -123,14 +121,13 @@ func TestRenderListsManagedFilesSorted(t *testing.T) {
 }
 
 func TestRenderLoomSeams(t *testing.T) {
-	body, err := Render(manifest("config", "http", "api", "loom", "redis"), template.Load())
+	body, err := Render(manifest("config", "http", "loom", "redis"), template.Load())
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	text := string(body)
 	for _, want := range []string{
 		"`internal/di/di.go` and `internal/di/loom_gen.go`",
-		"`internal/di/api_provider.go`",
 		"`internal/di/redis_provider.go`",
 		"Unused DB, Redis, mail and storage providers are pruned",
 		"HTTP server graph exists only",

@@ -197,114 +197,6 @@ func TestHTTPCapabilityOwnsTheServeCommand(t *testing.T) {
 	}
 }
 
-// TestAPICapabilityRequiresHTTP guards the API capability's contract: it needs
-// http, patches the go.mod dependency region, and depends on neither web nor any
-// database. It previously patched an httpserver routes region; the Loom server
-// graph now calls api.Register directly, so the capability owns no route seam.
-func TestAPICapabilityRequiresHTTP(t *testing.T) {
-	d := readDescriptor(t, "api")
-	if d.Kind != "add" {
-		t.Fatalf("api kind = %q, want add", d.Kind)
-	}
-	if len(d.Requires) != 1 || d.Requires[0] != "http" {
-		t.Fatalf("api requires = %v, want [http]", d.Requires)
-	}
-	for _, forbidden := range []string{"web", "db", "loom"} {
-		for _, required := range d.Requires {
-			if required == forbidden {
-				t.Errorf("api requires %q", forbidden)
-			}
-		}
-	}
-	paths := map[string]bool{}
-	for _, file := range d.Files {
-		paths[file.Path] = true
-	}
-	for _, want := range []string{
-		"internal/api/dto.go",
-		"internal/api/service.go",
-		"internal/api/handler.go",
-		"internal/api/api_test.go",
-		"internal/di/api_provider.go",
-	} {
-		if !paths[want] {
-			t.Errorf("api capability does not ship %s", want)
-		}
-	}
-	for pathName := range paths {
-		if strings.Contains(pathName, "openapi") {
-			t.Errorf("api capability still ships %s; the OpenAPI capability was removed", pathName)
-		}
-	}
-	// The api capability no longer carries its own configuration section: it has
-	// no OpenAPI gate and needs nothing from config beyond what http requires.
-	for _, patch := range d.Patches {
-		if strings.HasPrefix(patch.Path, "config") || strings.Contains(patch.Path, "config.go") {
-			t.Errorf("api still patches configuration: %+v", patch)
-		}
-	}
-	snippet, err := fs.ReadFile(FS(), "capabilities/api/files/go.mod.snippet")
-	if err != nil {
-		t.Fatalf("read api go.mod snippet: %v", err)
-	}
-	if strings.Contains(string(snippet), "kin-openapi") {
-		t.Error("api still depends on kin-openapi")
-	}
-	if !strings.Contains(string(snippet), "go-validate") {
-		t.Error("api no longer depends on go-validate")
-	}
-	for _, file := range d.Files {
-		if strings.Contains(file.Path, "httpserver") {
-			t.Errorf("api still ships an httpserver payload %q; the graph owns route composition", file.Path)
-		}
-	}
-	// The API provider file is created only once loom is also installed: when
-	// api is added after loom. It carries the loom guard so it is never written
-	// when loom is absent.
-	var providerSeam bool
-	for _, file := range d.Files {
-		if file.Path == "internal/di/api_provider.go" {
-			providerSeam = len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
-		}
-	}
-	if !providerSeam {
-		t.Errorf("api api_provider.go is not guarded by when: [loom]: %+v", d.Files)
-	}
-	var deps bool
-	for _, patch := range d.Patches {
-		switch {
-		case patch.Path == "go.mod" && patch.Marker == "deps":
-			deps = true
-		case patch.Path == "internal/httpserver/http.go":
-			t.Errorf("api still patches the removed routes extension point: %+v", patch)
-		}
-	}
-	if !deps {
-		t.Error("api does not patch the go.mod dependency region")
-	}
-
-	// The server graph registers the API routes when api is installed.
-	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
-	if err != nil {
-		t.Fatalf("read loom graph: %v", err)
-	}
-	if !strings.Contains(string(graph), `{{- if .Caps.Has "api"}}`) ||
-		!strings.Contains(string(graph), "api.Register(base.Group(httpserver.APIPrefix), service)") {
-		t.Error("the Loom graph does not call api.Register under an api guard")
-	}
-	if !strings.Contains(string(graph), "applyPolicies(httpx.NewRouter(mux), policies)") {
-		t.Error("the Loom graph does not apply the project's named policies")
-	}
-	// The policy list is a provider, so a policy can take injected dependencies and
-	// adding one never means editing the regenerated graph.
-	if !strings.Contains(string(graph), "loom.Provide(httpserver.Policies)") {
-		t.Error("the Loom graph does not provide the project's policy list")
-	}
-	if strings.Contains(string(graph), "OpenAPI") {
-		t.Error("the Loom graph still references OpenAPI")
-	}
-}
-
 // TestDBCapabilityRequiresLoomNeverHTTP guards the db capability's contract: it
 // adopts Loom (which brings config) but stays independent of the HTTP surface,
 // patches the go.mod dependency region and the Makefile db region, and ships the
@@ -748,7 +640,7 @@ func TestHTTPCapabilityDrivesTheGraph(t *testing.T) {
 // TestHTTPCapabilityShipsTheHelperToolkit guards the shared HTTP layer: the http
 // capability ships internal/httpx (envelope writers, JSON binding, middleware)
 // and the project-owned middleware configuration file, and the toolkit stays
-// free of go-validate, which remains a concern of the api capability.
+// free of go-validate, which stays a concern of the DTO's validator callback.
 func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 	d := readDescriptor(t, "http")
 	paths := map[string]string{}
@@ -863,9 +755,9 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 }
 
 // TestCapabilitiesShareTheResponseEnvelope guards the wire contract: the
-// built-in API and the generated business module both declare routes with the
-// httpx router helpers, so both write the shared {code,msg,data} envelope and
-// neither reimplements binding or a JSON writer.
+// generated business module declares routes with the httpx router helpers, so it
+// writes the shared {code,msg,data} envelope and does not reimplement binding or
+// a JSON writer.
 func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
 	read := func(pathName string) string {
 		raw, err := fs.ReadFile(FS(), pathName)
@@ -875,20 +767,6 @@ func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
 		return string(raw)
 	}
 
-	handler := read("capabilities/api/files/handler.go.tmpl")
-	for _, want := range []string{"httpx.NewRouter(", "httpx.Get(", "httpx.Post(", "httpx.WithStatus("} {
-		if !strings.Contains(handler, want) {
-			t.Errorf("api handler.go is missing %q", want)
-		}
-	}
-	if strings.Contains(handler, "writeJSON(") {
-		t.Error("api handler.go still hand-rolls its own JSON writer")
-	}
-	for _, forbidden := range []string{"openapi", "OpenAPI"} {
-		if strings.Contains(handler, forbidden) {
-			t.Errorf("api handler.go still references %q", forbidden)
-		}
-	}
 	module := read("modules/files/module.go.tmpl")
 	moduleHandler := read("modules/files/handler.go.tmpl")
 	// The module references the project's policy constant rather than repeating
@@ -1097,16 +975,10 @@ func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read di template: %v", err)
 	}
-	for _, want := range []string{`{{- if .Caps.Has "db"}}`, `{{- if .Caps.Has "api"}}`, "NewPool", "loom.Provide(NewAPIService)"} {
+	for _, want := range []string{`{{- if .Caps.Has "db"}}`, "NewPool", "loom.Provide(NewPool)"} {
 		if !strings.Contains(string(graph), want) {
 			t.Errorf("di template is missing %q", want)
 		}
-	}
-	// The provider is defined in the stable api_provider.go seam, not in the
-	// regenerated graph: a provider in di.go would be erased by the next
-	// capability install, taking the user's persistence wiring with it.
-	if strings.Contains(string(graph), "func NewAPIService") {
-		t.Error("di template defines NewAPIService; the provider must live in the stable api_provider.go")
 	}
 	if strings.Contains(string(graph), "repositoryService") {
 		t.Error("di template still auto-wires the repository into the API service")
@@ -1116,58 +988,11 @@ func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
 	}
 }
 
-// TestAPIProviderSeamIsOwnedByAPI guards the provider-ownership contract: the
-// capability that needs the binding owns the stable seam, the Loom graph only
-// references it, and loom never mirrors it.
-func TestAPIProviderSeamIsOwnedByAPI(t *testing.T) {
-	apiTemplate, err := fs.ReadFile(FS(), "capabilities/api/files/api_provider.go.tmpl")
-	if err != nil {
-		t.Fatalf("read api api_provider template: %v", err)
-	}
-	for _, want := range []string{
-		"func NewAPIService() api.Service",
-		"return api.NewService()",
-		"__module__/internal/api",
-	} {
-		if !strings.Contains(string(apiTemplate), want) {
-			t.Errorf("api_provider.go template is missing %q:\n%s", want, apiTemplate)
-		}
-	}
-
-	d := readDescriptor(t, "api")
-	var providerSeam bool
-	for _, file := range d.Files {
-		if file.Path != "internal/di/api_provider.go" {
-			continue
-		}
-		providerSeam = file.Source == "files/api_provider.go.tmpl" &&
-			len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
-	}
-	if !providerSeam {
-		t.Errorf("api api_provider.go is not declared with source files/api_provider.go.tmpl guarded by when: [loom]: %+v", d.Files)
-	}
-
-	// loom must not mirror the provider: the api capability owns it.
-	loom := readDescriptor(t, "loom")
-	for _, file := range loom.Files {
-		if file.Path == "internal/di/api_provider.go" {
-			t.Error("loom mirrors api_provider.go; the api capability owns it")
-		}
-	}
-	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
-	if err != nil {
-		t.Fatalf("read loom graph: %v", err)
-	}
-	if !strings.Contains(string(graph), "loom.Provide(NewAPIService)") {
-		t.Error("the Loom graph does not reference the api provider seam")
-	}
-}
-
 // TestEveryCapabilityExceptBaseAndConfigAdoptsLoom guards the single-mode
 // contract: base is a plain CLI and config is its pure-configuration
 // prerequisite, while every other capability is a Loom project, either
 // directly (db/redis/mail/storage/http require loom) or through http
-// (api/web/cron require http, which requires loom).
+// (web/cron require http, which requires loom).
 func TestEveryCapabilityExceptBaseAndConfigAdoptsLoom(t *testing.T) {
 	entries, err := fs.ReadDir(FS(), "capabilities")
 	if err != nil {

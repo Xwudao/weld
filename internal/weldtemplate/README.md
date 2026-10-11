@@ -43,11 +43,6 @@ capabilities/
     capability.json
     files/         web/ (React + TS + Vite), internal/web (SPA handler),
                    registered by the Loom server graph
-  api/             kind: add    -> JSON API, requires http
-    capability.json
-    files/         internal/api (DTOs with go-validate validation, typed routes
-                   registered with internal/httpx, httptest-driven tests),
-                   internal/di/api_provider.go (stable Loom seam)
   db/              kind: add    -> PostgreSQL, requires loom
     capability.json
     files/         db/migrations (goose), db/query, sqlc.yaml, db/tools (nested
@@ -130,19 +125,20 @@ See [Configuration](#configuration) below.
 
 `http` requires `loom` and owns the single `serve` command. Its `Serve` takes the
 injected `*slog.Logger`, and `serve` loads the listen address through the shared
-`config` loader and runs the Loom graph. `web` and `api` each require `http` and
+`config` loader and runs the Loom graph. `web` and each business module require
+`http` and
 register their handler on the Loom server graph, the only composition point, so
 either can be added first and both are served by the same `serve` path.
 
 `db` requires `loom` (and its `config`) but not `http`. It can be added to a
-CLI-only project, and it is independent of `http`, `web` and `api`: the
+CLI-only project, and it is independent of `http` and `web`: the
 repository speaks domain types,
-not sqlc rows, and the JSON DTOs stay in `internal/api`. It can therefore be
+not sqlc rows, and the HTTP DTOs never enter the persistence layer. It can therefore be
 added in any order relative to the HTTP capabilities, and adding it appends its
 `database` section to the local `config.yml`.
 
 `redis` is likewise independent: it requires `loom` but not `http`, so it can
-be added to a CLI-only project and composed with `http`/`db`/`api` in any order.
+be added to a CLI-only project and composed with `http`/`db` in any order.
 It installs an opt-in client, never a connection: `internal/redisclient` builds a
 lazy `go-redis` client from the typed `redis` configuration section (added to
 `config.yml` through the same extension point as `database`), and the caller owns
@@ -155,7 +151,7 @@ Redis into a service.
 a project is always either the base CLI or a Loom project. It renders
 `internal/di/di.go` against the installed capability set and generates
 `internal/di/loom_gen.go` with the real pinned generator, so the graph follows
-whatever of `http`, `db`, `api`, `redis`, `mail`, `storage` and `cron` is
+whatever of `http`, `db`, `redis`, `mail`, `storage` and `cron` is
 installed. It is the only capability whose payload is capability aware; every
 other capability stays Loom-free. The
 graph also provides the `*slog.Logger` (via `NewLogger`) that the managed HTTP
@@ -367,7 +363,7 @@ is enabled by default — add such middleware there. Because the chain is an
 explicit `func(http.Handler) http.Handler`, any third-party middleware composes
 with it.
 
-`internal/httpx` is the shared toolkit both the built-in API and the generated
+`internal/httpx` is the shared toolkit the generated
 business modules use: the `{code,msg,data}` JSON envelope (`JSON`, `Error`) and
 the raw writers for responses that must stay unwrapped (`RawJSON`, `RawText`,
 `Bytes`, `NoContent`); typed request binding (`DecodeJSON`, `QueryInt`) with a
@@ -377,37 +373,30 @@ router (`Router.Get`, `Router.Post`, ...), so a route built from a path constant
 never assembles a `"METHOD /path"` string by hand; and the
 composable middleware (`Chain`, `RequestID`, `AccessLog`, `Recover`). It depends
 only on the standard library — binding takes a validator callback, so `httpx`
-never imports `go-validate`, which stays a concern of `api`. The `AccessLog`
+never imports `go-validate` (a DTO that wants it wires it in through the
+callback). The `AccessLog`
 recorder forwards `Flush` and `Hijack`, so a streaming or SSE response and a
 WebSocket
 upgrade keep working.
 
-`web` and `api` register their handler on the Loom server graph's `newMux`
+`web` and each business module register their handler on the Loom server graph's `newMux`
 instead of a per-capability route file, so no Go import block has to be patched
-and no `init` performs route registration. `api` also adds the stable
-`internal/di/api_provider.go` seam, so both compose in either order.
+and no `init` performs route registration.
 
 `internal/web` mounts the SPA on `/` and reserves `/api/`: unknown API paths
 return 404 instead of the HTML shell, and only browser navigations fall back to
 `index.html`. It keeps that exclusion even though a more specific `/api/` route
 wins on the mux, because an uninstalled API must not answer with the SPA.
 
-## API contract
+## The shared response envelope
 
-`api` owns `internal/api`. Request and response DTOs carry JSON serialization
-tags only; the validation rules live in a single `Validate() error` per request
-DTO, built from `go-validate`'s `Spec`/`Constraint` constructors. The `httpx`
-typed helpers call `Validate()` automatically after binding, so the rules run at
+A DTO that implements `Validate() error` is validated automatically after
+binding, and the `httpx`
+typed helpers call it, so the rules run at
 runtime and there is no separate description to keep in sync. `Register`
 declares each route in one place — the method, the relative path, the binding and
 the handler together — so there is no route table beside the code, and the
 caller owns the mount prefix (see `internal/httpserver.APIPrefix`).
-
-Enums show the pattern: `ItemStatus` is a typed string alias with named
-constants, and `validate.Enum(itemStatusValues()...)` rejects an invalid value.
-If that boilerplate repeats across resources, a future `weld add enum` step (or
-go-enum code generation) is the right home; the API capability deliberately does
-not grow its own enum framework.
 
 The wire format is a default JSON envelope: responses are `{code, msg, data}`,
 where `code` repeats the HTTP transport status (200, 201, 400, 404, 500) instead
@@ -478,12 +467,6 @@ build it. A generated command file that already exists and was edited is
 refused rather than overwritten, so a non-destructive conflict is reported
 instead of a silent overwrite.
 
-## go-validate dependency
-
-`api` requires the published `github.com/Xwudao/go-validate v0.2.0`, which
-exposes the `Spec`/`Constraint` API. Generated projects build without a sibling
-checkout or local replacement; no local path is committed into the scaffold.
-
 ## Tests
 
 The test validates that every embedded descriptor parses, that each declared
@@ -491,8 +474,8 @@ payload exists, that `base` stays CLI-only and ships no configuration, that
 `config` needs only `base` and patches the git-ignore and `go.mod` dependency
 regions, that `http` owns the serve command, ships the `internal/httpx` toolkit
 and the project-owned middleware configuration, and appends its section to the
-`config` files, that `api` and the module payload write the shared response
-envelope, that `web` requires `http` and `api` requires `http` (not `web`) and patches the `go.mod` dependency extension
+`config` files, that the module payload writes the shared response
+envelope, that `web` requires `http` and patches the `go.mod` dependency extension
 point, and that `db` requires `loom` but not `http`, ships genuine sqlc output
 plus a pinned sqlc/goose tool module, and patches the `go.mod` dependency,
 Makefile `db` and both `config` extension points. It also proves the migration

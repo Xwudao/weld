@@ -38,7 +38,7 @@ func (e *DecodeError) Error() string { return e.Message }
 //
 // validate is optional (nil skips it). When set it is the code-first validator
 // callback: it runs after a successful decode and its error is returned as a
-// client-safe 400. This is how the API wires its go-validate Spec in without
+// client-safe 400. This is how a DTO wires its go-validate Spec in without
 // this package depending on go-validate.
 func DecodeJSON[T any](r *http.Request, maxBytes int64, validate func(T) error) (T, error) {
 	var value T

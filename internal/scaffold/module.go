@@ -14,12 +14,11 @@ import (
 // valid, lower-case Go identifier.
 var moduleNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*$`)
 
-// reservedModuleNames are the built-in API paths a module may not claim. They
-// are reserved whether or not the api capability is installed, so adding api
-// later can never collide with a module already on disk.
+// reservedModuleNames are the built-in names a business module may not claim.
+// They are reserved whether or not any capability is installed, so adding a
+// capability later can never collide with a module already on disk.
 var reservedModuleNames = map[string]string{
-	"api":   "the /api/ namespace is owned by the built-in api capability",
-	"items": "GET/POST /api/items is the built-in api capability's resource",
+	"api": "the /api/ namespace is the root of the module URL space",
 }
 
 // ValidateModuleName reports why a business-module name is unusable. A usable
