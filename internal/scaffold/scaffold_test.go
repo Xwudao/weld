@@ -1451,6 +1451,13 @@ func TestLoomInstalledByEveryAdd(t *testing.T) {
 			t.Errorf("capability %s does not require loom", name)
 		}
 	}
+	seed, err := catalog.Get("seed")
+	if err != nil {
+		t.Fatalf("Get seed: %v", err)
+	}
+	if len(seed.Requires) != 1 || seed.Requires[0] != "db" {
+		t.Errorf("seed requires %v, want [db]", seed.Requires)
+	}
 	for _, name := range []string{"web", "cron"} {
 		capability, err := catalog.Get(name)
 		if err != nil {
@@ -1990,6 +1997,9 @@ func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
 		{name: "base"},
 		{name: "http", caps: []string{"http"}},
 		{name: "db", caps: []string{"db"}},
+		{name: "seed", caps: []string{"seed"}},
+		{name: "db+seed", caps: []string{"db", "seed"}},
+		{name: "http+db+seed", caps: []string{"http", "db", "seed"}},
 		{name: "redis", caps: []string{"redis"}},
 		{name: "loom", caps: []string{"loom"}, needsLoom: true},
 		{name: "redis+loom", caps: []string{"redis", "loom"}, needsLoom: true},

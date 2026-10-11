@@ -11,7 +11,7 @@ func TestCatalogListsBaseAndWeb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Names: %v", err)
 	}
-	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "db": false, "loom": false, "redis": false, "mail": false, "storage": false, "cron": false}
+	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "db": false, "loom": false, "redis": false, "mail": false, "storage": false, "cron": false, "seed": false}
 	for _, name := range names {
 		if _, ok := want[name]; ok {
 			want[name] = true
@@ -356,6 +356,54 @@ func TestStorageCapabilityLoads(t *testing.T) {
 	}
 }
 
+// TestSeedCapabilityLoads pins the seed capability's shape: it is additive,
+// requires db, ships the seeder package, the seed command and its guarded Loom
+// provider seam, and patches the Makefile db region.
+func TestSeedCapabilityLoads(t *testing.T) {
+	capability, err := Load().Get("seed")
+	if err != nil {
+		t.Fatalf("Get seed: %v", err)
+	}
+	if capability.Kind != KindAdd {
+		t.Errorf("kind = %q, want %q", capability.Kind, KindAdd)
+	}
+	if got, want := strings.Join(capability.Requires, ","), "db"; got != want {
+		t.Errorf("requires = %v, want %q", capability.Requires, want)
+	}
+	paths := map[string]bool{}
+	for _, file := range capability.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/data/seeder/seeder.go",
+		"internal/data/seeder/register.go",
+		"internal/app/seed.go",
+		"internal/di/seed_providers.go",
+	} {
+		if !paths[want] {
+			t.Errorf("seed capability does not ship %s", want)
+		}
+	}
+	var providerSeam bool
+	for _, file := range capability.Files {
+		if file.Path == "internal/di/seed_providers.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom"
+		}
+	}
+	if !providerSeam {
+		t.Errorf("seed seed_providers.go is not guarded by when: [loom]: %+v", capability.Files)
+	}
+	var makefile bool
+	for _, patch := range capability.Patches {
+		if patch.Path == "Makefile" && patch.Marker == "db" {
+			makefile = true
+		}
+	}
+	if !makefile {
+		t.Errorf("seed does not patch the Makefile db region: %+v", capability.Patches)
+	}
+}
+
 func TestUnknownCapabilityErrors(t *testing.T) {
 	if _, err := Load().Get("nope"); err == nil {
 		t.Fatal("expected error for unknown capability")
@@ -563,6 +611,28 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	}
 	if strings.Contains(string(withCron), "func NewScheduler") {
 		t.Errorf("cron graph defines NewScheduler in di.go; the provider must live in cron_provider.go:\n%s", withCron)
+	}
+
+	// Installing seed adds a dedicated seeding graph whose root consumes the pool,
+	// so the pool is constructed for the seed command alone and no long-running
+	// graph needs a database credential.
+	vars.Caps["seed"] = true
+	withSeed, err := capability.RenderDIGraph(vars)
+	if err != nil {
+		t.Fatalf("RenderDIGraph(seed): %v", err)
+	}
+	for _, want := range []string{
+		"var seedGraph = loom.Graph[*seeder.Runner](",
+		"loom.Provide(NewSeedDeps)",
+		"loom.Provide(NewSeedRunner)",
+		"example.com/demo/internal/data/seeder",
+	} {
+		if !strings.Contains(string(withSeed), want) {
+			t.Errorf("seed graph is missing %q:\n%s", want, withSeed)
+		}
+	}
+	if strings.Contains(string(withSeed), "func NewSeedDeps") {
+		t.Errorf("seed graph defines NewSeedDeps in di.go; the provider must live in seed_providers.go:\n%s", withSeed)
 	}
 }
 

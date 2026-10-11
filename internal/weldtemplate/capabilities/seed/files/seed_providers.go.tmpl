@@ -1,0 +1,46 @@
+package di
+
+import (
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"__module__/internal/data"
+	"__module__/internal/data/seeder"
+)
+
+// NewSeedDeps constructs the seeder dependency bundle the seed graph binds, and
+// this file is the stable seam for wiring repositories into the seeders.
+//
+// weld writes this file once, when the seed capability is installed, and never
+// rewrites it while it regenerates the graph (di.go, loom_gen.go): edits below
+// survive every later `weld add`.
+//
+// Each field on seeder.Deps is a repository a seeder writes through. The shipped
+// example consumes data.Repository (the items table `weld add db` creates);
+// register your own the same way:
+//
+//	func NewSeedDeps(pool *pgxpool.Pool) *seeder.Deps {
+//		return &seeder.Deps{
+//			Items:   data.NewRepository(pool),
+//			APIKeys: data.NewAPIKeyRepo(pool),
+//		}
+//	}
+//
+// The pool is a deliberate dependency: Loom resolves it only because this
+// provider consumes it, so the pool and the database settings are constructed
+// for the seed command alone and no long-running command needs a credential. To
+// consume a repository registered in repositoryModule instead, change the
+// parameter to that repository's type (repository_providers.go).
+func NewSeedDeps(pool *pgxpool.Pool) *seeder.Deps {
+	return &seeder.Deps{
+		Items: data.NewRepository(pool),
+	}
+}
+
+// NewSeedRunner builds the seeder runner the graph root returns: it creates the
+// registry, installs the project's seeders from the stable register.go, and
+// binds the injected dependencies.
+func NewSeedRunner(deps *seeder.Deps) *seeder.Runner {
+	registry := seeder.NewRegistry()
+	seeder.Register(registry)
+	return seeder.NewRunner(registry, deps)
+}

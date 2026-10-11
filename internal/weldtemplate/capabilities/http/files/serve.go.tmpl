@@ -31,9 +31,13 @@ func init() {
 
 // registerServeFlags adds the serve flags to the root command as persistent
 // flags, so a subcommand inherits them and a bare invocation (whose default
-// action serves) parses the same set.
+// action serves) parses the same set. The seed capability's seed command shares
+// --config, so it is registered only when absent: the two capabilities may be
+// installed in either order.
 func registerServeFlags(root *cobra.Command) {
-	root.PersistentFlags().String(configFlag, "", "path to config.yml (default ./config.yml)")
+	if root.PersistentFlags().Lookup(configFlag) == nil {
+		root.PersistentFlags().String(configFlag, "", "path to config.yml (default ./config.yml)")
+	}
 	root.PersistentFlags().String(addrFlag, "", "address to listen on (overrides config and environment)")
 }
 

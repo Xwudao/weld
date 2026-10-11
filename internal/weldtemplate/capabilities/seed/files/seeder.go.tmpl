@@ -1,0 +1,117 @@
+// Package seeder runs __name__'s database seeders.
+//
+// A seeder is a named function that writes development or reference data
+// through the repositories the seed graph injects (Deps). Seeders run in
+// registration order from the short `seed` command (`make seed`) and stop at
+// the first error. They must be idempotent: seed keeps no ledger, so running it
+// twice re-runs every seeder, and a seeder that inserts unconditionally would
+// fail on the second run.
+//
+// The package has no HTTP dependency and holds no database handle of its own:
+// internal/di/seed_providers.go constructs Deps from the Loom graph, so the seed
+// command is the only entry point that needs a database.
+package seeder
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"__module__/internal/data"
+)
+
+// Deps is the dependency bundle a seeder receives.
+//
+// Add a field per repository your seeders need. The shipped example uses Items,
+// the data.Repository over the items table db/migrations/000001_create_items.sql
+// creates; internal/di/seed_providers.go constructs this struct, so wire a new
+// repository there rather than here.
+type Deps struct {
+	Items data.Repository
+}
+
+// Seeder writes seed data. It receives the injected dependencies and must be
+// idempotent, because seed keeps no record of what it already wrote.
+type Seeder func(ctx context.Context, deps *Deps) error
+
+// named is a seeder together with the name it is registered and selected by.
+type named struct {
+	name string
+	fn   Seeder
+}
+
+// Registry holds the seeders in registration order. It is explicit wiring, not
+// a service locator: internal/data/seeder/register.go fills it once and the seed
+// graph binds the runner over it.
+type Registry struct {
+	seeders []named
+}
+
+// NewRegistry returns an empty registry.
+func NewRegistry() *Registry { return &Registry{} }
+
+// Register adds fn under name. It panics on a blank name, a nil seeder or a
+// duplicate name, so a broken registration fails when the seed command starts
+// rather than silently dropping or shadowing a seeder.
+func (r *Registry) Register(name string, fn Seeder) {
+	if strings.TrimSpace(name) == "" {
+		panic("seeder: seeder name must not be blank")
+	}
+	if fn == nil {
+		panic("seeder: seeder " + name + " must not be nil")
+	}
+	for _, existing := range r.seeders {
+		if existing.name == name {
+			panic("seeder: duplicate seeder " + name)
+		}
+	}
+	r.seeders = append(r.seeders, named{name: name, fn: fn})
+}
+
+// Names returns the registered seeder names in registration order.
+func (r *Registry) Names() []string {
+	names := make([]string, len(r.seeders))
+	for i, s := range r.seeders {
+		names[i] = s.name
+	}
+	return names
+}
+
+// run executes the named seeder, or every seeder in order when name is empty,
+// and stops at the first error.
+func (r *Registry) run(ctx context.Context, name string, deps *Deps) error {
+	if name != "" {
+		for _, s := range r.seeders {
+			if s.name == name {
+				return s.fn(ctx, deps)
+			}
+		}
+		return fmt.Errorf("seeder: unknown seeder %q (registered: %s)", name, strings.Join(r.Names(), ", "))
+	}
+	for _, s := range r.seeders {
+		if err := s.fn(ctx, deps); err != nil {
+			return fmt.Errorf("seeder %s: %w", s.name, err)
+		}
+	}
+	return nil
+}
+
+// Runner binds a registry to the injected dependencies and runs seeders.
+type Runner struct {
+	registry *Registry
+	deps     *Deps
+}
+
+// NewRunner returns a runner over registry and deps.
+func NewRunner(registry *Registry, deps *Deps) *Runner {
+	return &Runner{registry: registry, deps: deps}
+}
+
+// Run runs every registered seeder in order, or only the named one, stopping at
+// the first error. An unknown name is an error, never a silent no-op.
+func (r *Runner) Run(ctx context.Context, name string) error {
+	if r == nil || r.registry == nil {
+		return nil
+	}
+	return r.registry.run(ctx, name, r.deps)
+}

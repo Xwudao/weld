@@ -223,10 +223,11 @@ Capabilities:
   http   (add)      HTTP lifecycle, shared JSON/middleware toolkit and a serve
                     command
   web    (add)      React + TypeScript + Vite frontend (requires http)
-  api    (add)      JSON API: typed handlers, self-validating DTOs and the
-                    {code,msg,data} response envelope
   db     (add)      PostgreSQL: SQL migrations, sqlc queries, an injectable pool
                     and repository
+  seed   (add)      Opt-in database seeding: named, idempotent seeders over the
+                    repositories the Loom seed graph injects, run by a short
+                    seed command and make seed (requires db)
   redis  (add)      Opt-in Redis client with typed connection config; installing
                     it never connects Redis to a service (requires base, config)
   mail   (add)      Opt-in SMTP sender with typed, secret-redacted config;
@@ -237,9 +238,9 @@ Capabilities:
                     serve; installing it schedules nothing until you register
                     jobs in internal/cron/register.go
   loom   (add)      Loom dependency-injection graph wiring the HTTP server, the
-                    JSON API service, the database, Redis, mail, storage and
-                    the cron scheduler (requires http; opt-in, never installed
-                    by web, api, db, redis, mail, storage or cron)
+                    database, Redis, mail, storage and the cron scheduler
+                    (requires config; opt-in, never installed by web, db, seed,
+                    redis, mail, storage or cron)
 
 Modules:
   add module <name> generates internal/modules/<name>: a small HTTP business
@@ -277,13 +278,15 @@ Commands:
 http and db each install the config capability, so the first of them adds the
 shared typed configuration loader and generates a local, git-ignored config.yml
 from config.example.yml; adding the other only appends its section to that file.
-web and api are independent and both require http: each can be added first and
-both share the one serve command. db requires only base (and config), so it can
-be added to a CLI-only project and composes with the HTTP capabilities in any
-order. redis likewise requires only base (and config): it installs a lazy client
-the caller owns and never wires Redis into a service on its own. loom is
-opt-in: it requires http and regenerates its graph when web, api, db or redis is
-installed, and it raises the project's Go floor to 1.25.
+web requires http and shares the one serve command. db requires only base (and
+config), so it can be added to a CLI-only project and composes with the HTTP
+capabilities in any order. seed requires db and adds a short seed command over
+the repositories you wire in internal/di/seed_providers.go; it seeds nothing
+until you register a seeder. redis likewise requires only base (and config): it
+installs a lazy client the caller owns and never wires Redis into a service on
+its own. loom is installed automatically for every capability beyond the bare
+CLI, requires config, regenerates its graph when any capability it feeds is
+installed, and raises the project's Go floor to 1.25.
 
 Every file a capability writes is recorded in the project manifest (weld.json)
 with the capability and version that produced it. The skills command writes

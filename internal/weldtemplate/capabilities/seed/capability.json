@@ -1,0 +1,18 @@
+{
+  "name": "seed",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "Opt-in database seeding: named, idempotent seeders over the repositories the Loom seed graph injects, run by a short `seed` command and `make seed`. Installing it seeds nothing on its own; the shipped example writes the items table and internal/data/seeder/register.go is the stable registration file.",
+  "requires": ["db"],
+  "files": [
+    { "path": "internal/data/seeder/seeder.go", "source": "files/seeder.go.tmpl" },
+    { "path": "internal/data/seeder/register.go", "source": "files/register.go.tmpl" },
+    { "path": "internal/data/seeder/seeder_test.go", "source": "files/seeder_test.go.tmpl" },
+    { "path": "internal/data/seeder/README.md", "source": "files/README.md" },
+    { "path": "internal/app/seed.go", "source": "files/seed.go.tmpl" },
+    { "path": "internal/di/seed_providers.go", "source": "files/seed_providers.go.tmpl", "when": ["loom"] }
+  ],
+  "patches": [
+    { "path": "Makefile", "marker": "db", "source": "files/Makefile.snippet" }
+  ]
+}

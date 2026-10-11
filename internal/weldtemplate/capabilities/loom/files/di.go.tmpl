@@ -85,6 +85,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"__module__/internal/data"
 {{- end}}
+{{- if .Caps.Has "seed"}}
+	"__module__/internal/data/seeder"
+{{- end}}
 )
 
 // commonModule groups the providers every graph shares: the configuration
@@ -260,6 +263,24 @@ func NewRepository(pool *pgxpool.Pool) *data.PostgresRepository {
 	return data.NewRepository(pool)
 }
 {{end}}
+{{- if .Caps.Has "seed"}}
+
+// seedGraph is the database seeding graph: the shared providers plus the
+// project-owned seeder dependencies. Only the short seed command initializes
+// it, so no long-running graph constructs the pool and serving still needs no
+// database credential.
+var seedGraph = loom.Graph[*seeder.Runner](
+	loom.Name("InitSeed"),
+	loom.WithContext(),
+	// commonModule declares NewPool; Loom constructs it only because
+	// NewSeedDeps consumes it. This is the one graph that needs a database.
+	commonModule,
+	// The project-owned seam (seed_providers.go): add a repository to
+	// seeder.Deps and consume it there rather than editing this regenerated graph.
+	loom.Provide(NewSeedDeps),
+	loom.Provide(NewSeedRunner),
+)
+{{- end}}
 {{- if .Caps.Has "http"}}
 
 type addrKey struct{}

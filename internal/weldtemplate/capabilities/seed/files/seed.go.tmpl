@@ -1,0 +1,84 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"__module__/internal/di"
+)
+
+// seedConfigFlag is the shared root configuration flag. The http capability's
+// serve command registers the same flag; whichever ConfigureRoot runs first
+// registers it and the other leaves it in place, so seed works whether or not
+// serve is installed.
+const seedConfigFlag = "config"
+
+// seedStopTimeout bounds the seed graph's teardown (closing the pool) after the
+// seeders return.
+const seedStopTimeout = 10 * time.Second
+
+func init() {
+	RegisterCommand(newSeedCommand)
+	ConfigureRoot(registerSeedFlags)
+}
+
+// registerSeedFlags adds the shared --config flag unless the http capability has
+// already registered it.
+func registerSeedFlags(root *cobra.Command) {
+	if root.PersistentFlags().Lookup(seedConfigFlag) != nil {
+		return
+	}
+	root.PersistentFlags().String(seedConfigFlag, "", "path to config.yml (default ./config.yml)")
+}
+
+// newSeedCommand builds the seed command backed by the generated Loom graph.
+func newSeedCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "seed [name]",
+		Short: "populate the database with the registered seeders",
+		Long: "seed runs every seeder registered in internal/data/seeder/register.go,\n" +
+			"in registration order, or only the named one. Seeders write through the\n" +
+			"repositories internal/di/seed_providers.go injects and are idempotent, so\n" +
+			"running seed twice is safe.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: runSeed,
+	}
+}
+
+// runSeed resolves the seed graph and runs the requested seeder(s).
+//
+// The graph is initialized only here, inside RunE, so building the command tree,
+// showing help or running any other command never opens the pool. The pool is
+// lazy: constructing it validates the database settings but does not connect,
+// and the first statement connects.
+func runSeed(cmd *cobra.Command, args []string) (err error) {
+	configPath, err := cmd.Flags().GetString(seedConfigFlag)
+	if err != nil {
+		return err
+	}
+	ctx := di.WithConfigPath(cmd.Context(), configPath)
+
+	runner, lifecycle, err := di.InitSeed(ctx)
+	if err != nil {
+		return err
+	}
+	if err := lifecycle.Start(ctx); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), seedStopTimeout)
+		defer cancel()
+		return errors.Join(err, lifecycle.Stop(stopCtx))
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), seedStopTimeout)
+		defer cancel()
+		err = errors.Join(err, lifecycle.Stop(stopCtx))
+	}()
+
+	name := ""
+	if len(args) == 1 {
+		name = args[0]
+	}
+	return runner.Run(ctx, name)
+}

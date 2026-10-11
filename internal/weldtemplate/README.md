@@ -48,6 +48,12 @@ capabilities/
     files/         db/migrations (goose), db/query, sqlc.yaml, db/tools (nested
                    module pinning sqlc and goose), internal/data (Repository +
                    pool), generated internal/data/sqlc, snippets
+  seed/            kind: add    -> database seeding, requires db
+    capability.json
+    files/         internal/data/seeder (registry, Runner, stable register.go
+                   seeder seam), internal/app/seed.go (the short seed command),
+                   internal/di/seed_providers.go (stable Loom repository seam),
+                   Makefile seed target (db region), README
   redis/           kind: add    -> opt-in Redis client, requires loom
     capability.json
     files/         internal/redisclient (lazy go-redis client, caller owns the
@@ -59,7 +65,7 @@ capabilities/
     files/         internal/di/di.go.tmpl (capability-aware graph source),
                    tools/loom (nested module pinning the Loom generator),
                    README; the stable provider seams are contributed by the
-                   capabilities that need them (api, redis, mail, storage, cron)
+                   capabilities that need them (seed, redis, mail, storage, cron)
   cron/            kind: add    -> in-process scheduler, requires http
     capability.json
     files/         internal/cron (registry + stable register.go job seam),
@@ -137,6 +143,15 @@ not sqlc rows, and the HTTP DTOs never enter the persistence layer. It can there
 added in any order relative to the HTTP capabilities, and adding it appends its
 `database` section to the local `config.yml`.
 
+`seed` requires `db` (and therefore `loom`). It ships the seeding package
+(`internal/data/seeder`) with a stable, user-editable registration file
+(`internal/data/seeder/register.go`) that registers one idempotent example
+seeder over the `items` table, and the stable `internal/di/seed_providers.go`
+seam that wires the repositories the seeders receive. A short `seed` command
+resolves a dedicated Loom graph — the only graph that consumes `*pgxpool.Pool` —
+so serving still needs no database credential; installing seed seeds nothing
+until you register a seeder.
+
 `redis` is likewise independent: it requires `loom` but not `http`, so it can
 be added to a CLI-only project and composed with `http`/`db` in any order.
 It installs an opt-in client, never a connection: `internal/redisclient` builds a
@@ -151,7 +166,7 @@ Redis into a service.
 a project is always either the base CLI or a Loom project. It renders
 `internal/di/di.go` against the installed capability set and generates
 `internal/di/loom_gen.go` with the real pinned generator, so the graph follows
-whatever of `http`, `db`, `redis`, `mail`, `storage` and `cron` is
+whatever of `http`, `db`, `seed`, `redis`, `mail`, `storage` and `cron` is
 installed. It is the only capability whose payload is capability aware; every
 other capability stays Loom-free. The
 graph also provides the `*slog.Logger` (via `NewLogger`) that the managed HTTP

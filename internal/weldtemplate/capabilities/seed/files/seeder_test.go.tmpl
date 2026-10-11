@@ -1,0 +1,163 @@
+package seeder
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"__module__/internal/data"
+)
+
+func TestRegistryRunsSeedersInOrder(t *testing.T) {
+	var order []string
+	registry := NewRegistry()
+	registry.Register("first", func(context.Context, *Deps) error {
+		order = append(order, "first")
+		return nil
+	})
+	registry.Register("second", func(context.Context, *Deps) error {
+		order = append(order, "second")
+		return nil
+	})
+
+	if err := NewRunner(registry, &Deps{}).Run(context.Background(), ""); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := strings.Join(order, ","), "first,second"; got != want {
+		t.Fatalf("execution order = %q, want %q", got, want)
+	}
+}
+
+func TestRegistryStopsAtFirstError(t *testing.T) {
+	ran := false
+	registry := NewRegistry()
+	registry.Register("boom", func(context.Context, *Deps) error {
+		return errors.New("boom")
+	})
+	registry.Register("never", func(context.Context, *Deps) error {
+		ran = true
+		return nil
+	})
+
+	err := NewRunner(registry, &Deps{}).Run(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("Run error = %v, want the failing seeder's error", err)
+	}
+	if ran {
+		t.Fatal("a seeder after the failing one ran; seed must stop at the first error")
+	}
+}
+
+func TestRunnerRunsASingleSeeder(t *testing.T) {
+	ran := map[string]bool{}
+	registry := NewRegistry()
+	registry.Register("first", func(context.Context, *Deps) error {
+		ran["first"] = true
+		return nil
+	})
+	registry.Register("second", func(context.Context, *Deps) error {
+		ran["second"] = true
+		return nil
+	})
+
+	if err := NewRunner(registry, &Deps{}).Run(context.Background(), "second"); err != nil {
+		t.Fatalf("Run(second): %v", err)
+	}
+	if ran["first"] || !ran["second"] {
+		t.Fatalf("ran = %+v, want only second", ran)
+	}
+}
+
+func TestRunnerRejectsUnknownSeeder(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register("items", func(context.Context, *Deps) error { return nil })
+
+	err := NewRunner(registry, &Deps{}).Run(context.Background(), "missing")
+	if err == nil || !strings.Contains(err.Error(), "items") {
+		t.Fatalf("Run(missing) error = %v, want an error naming the registered seeders", err)
+	}
+}
+
+func TestRegisterRejectsBlankName(t *testing.T) {
+	assertPanics(t, func() {
+		NewRegistry().Register("  ", func(context.Context, *Deps) error { return nil })
+	})
+}
+
+func TestRegisterRejectsNilSeeder(t *testing.T) {
+	assertPanics(t, func() { NewRegistry().Register("items", nil) })
+}
+
+func TestRegisterRejectsDuplicate(t *testing.T) {
+	assertPanics(t, func() {
+		registry := NewRegistry()
+		registry.Register("items", func(context.Context, *Deps) error { return nil })
+		registry.Register("items", func(context.Context, *Deps) error { return nil })
+	})
+}
+
+func assertPanics(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected a panic")
+		}
+	}()
+	fn()
+}
+
+// TestSeedItemsIsIdempotent exercises the shipped example against an in-memory
+// repository: a second run must not insert duplicates.
+func TestSeedItemsIsIdempotent(t *testing.T) {
+	deps := &Deps{Items: newFakeRepository()}
+	for run := 1; run <= 2; run++ {
+		if err := seedItems(context.Background(), deps); err != nil {
+			t.Fatalf("seedItems run %d: %v", run, err)
+		}
+	}
+	items, err := deps.Items.ListItems(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ListItems: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("ListItems returned %d items after two seed runs, want 2", len(items))
+	}
+}
+
+// fakeRepository is an in-memory data.Repository for the tests; it only models
+// the methods the example seeder uses.
+type fakeRepository struct {
+	items map[string]data.Item
+}
+
+func newFakeRepository() *fakeRepository {
+	return &fakeRepository{items: map[string]data.Item{}}
+}
+
+func (f *fakeRepository) CreateItem(_ context.Context, item data.Item) (data.Item, error) {
+	if _, exists := f.items[item.ID]; exists {
+		return data.Item{}, errors.New("duplicate item")
+	}
+	f.items[item.ID] = item
+	return item, nil
+}
+
+func (f *fakeRepository) GetItem(_ context.Context, id string) (data.Item, error) {
+	item, ok := f.items[id]
+	if !ok {
+		return data.Item{}, data.ErrNotFound
+	}
+	return item, nil
+}
+
+func (f *fakeRepository) ListItems(_ context.Context, limit int) ([]data.Item, error) {
+	items := make([]data.Item, 0, len(f.items))
+	for _, item := range f.items {
+		if len(items) == limit {
+			break
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}

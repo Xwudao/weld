@@ -1,0 +1,8 @@
+# weld:seed:installed 0.1.0
+.PHONY: seed
+
+# seed runs the registered seeders against the database configured by config.yml
+# (or DATABASE_URL). Seeders are idempotent, so re-running is safe. Pass one
+# seeder name with ARGS, for example: make seed ARGS=items
+seed: ## Populate the database with the registered seeders
+	go run . seed $(ARGS)

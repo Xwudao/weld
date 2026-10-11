@@ -286,6 +286,7 @@ var curatedNotes = map[string]string{
 	"loom":    "compile-time dependency injection in `internal/di`, automatically installed for every capability and command beyond the bare CLI. All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage bindings. A command group resolves its graph lazily through the shared `internal/commandkit` seam, so a subcommand injects a dependency by adding a field to its `Deps` and a parameter to `NewDeps` (a provider already in `commonModule` needs no graph edit; a new one needs `loom.Provide(...)` in `internal/di/<name>_graph.go`). Loom raises the project's Go directive to 1.25.",
 	"redis":   "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
 	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs, unique names, overlap skipping, panic recovery and graceful stop. Cron installs HTTP and follows only the Loom `serve` lifecycle, never a short command. `internal/cron/register.go` is the stable job-registration file; installing cron schedules nothing.",
+	"seed":    "opt-in database seeding in `internal/data/seeder`: named, idempotent seeders run by the short `seed` command (`make seed`) over the repositories the Loom seed graph injects. Installing seed seeds nothing; `internal/data/seeder/register.go` registers the seeders and `internal/di/seed_providers.go` is the stable repository seam.",
 	"mail":    "opt-in SMTP sender in `internal/mailsender`: one connection per `Send` with an explicit TLS policy and header-injection guards. Nothing generated imports it, so serving sends no mail; `internal/di/mail_provider.go` is the stable Loom seam.",
 	"storage": "opt-in S3-compatible object storage in `internal/objectstore`: a streaming client with bounded presigned URLs. It never creates the bucket, and nothing generated imports it; `internal/di/storage_provider.go` is the stable Loom seam.",
 }
@@ -325,6 +326,13 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 		b.WriteString("- **cron** installs a scheduler but schedules nothing by itself: it starts and\n")
 		b.WriteString("  stops with `serve` and runs only the jobs you add in\n")
 		b.WriteString("  `internal/cron/register.go` (see `internal/cron/README.md`).\n")
+		wrote = true
+	}
+	if set["seed"] {
+		b.WriteString("- **seed** installs a seeding command but seeds nothing by itself: `seed`\n")
+		b.WriteString("  runs only the seeders you register in `internal/data/seeder/register.go`,\n")
+		b.WriteString("  through the repositories wired in `internal/di/seed_providers.go` (see\n")
+		b.WriteString("  `internal/data/seeder/README.md`).\n")
 		wrote = true
 	}
 	if set["loom"] {
@@ -420,6 +428,12 @@ func writeEditing(b *strings.Builder, set map[string]bool) {
 	}
 	if set["cron"] {
 		seams = append(seams, "`internal/cron/register.go`")
+	}
+	if set["seed"] && set["loom"] {
+		seams = append(seams, "`internal/di/seed_providers.go`")
+	}
+	if set["seed"] {
+		seams = append(seams, "`internal/data/seeder/register.go`")
 	}
 
 	if len(seams) > 0 {

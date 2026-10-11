@@ -108,6 +108,11 @@ Capabilities:
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository. Requires `loom` but not
   `http`: it adds a pruned binding and no server.
+- `seed` (add) — opt-in database seeding: named, idempotent seeders run by a
+  short `seed` command (`make seed`) over the repositories the Loom seed graph
+  injects. Requires `db`; installing it seeds nothing until you register a
+  seeder in `internal/data/seeder/register.go` and wire repositories in
+  `internal/di/seed_providers.go`.
 - `redis` (add) — an opt-in Redis client with typed connection configuration.
   Requires `loom` but not `http`; installing it never connects Redis to a
   service.
@@ -144,7 +149,9 @@ default.
 are served by the one
 `serve` command. `db`, `redis`, `mail` and `storage` require `loom` but not
 `http`: they add pruned bindings, so they can be added to a CLI-only project and
-compose with the HTTP capabilities in any order. `loom` is the foundation, not
+compose with the HTTP capabilities in any order. `seed` requires `db`: it adds a
+short `seed` command over the repositories you wire, and seeds nothing on its
+own. `loom` is the foundation, not
 opt-in: it declares `commonModule` for every project and the server graph once
 `http` is installed, and `weld add` regenerates its graph when a capability
 changes the installed set.
