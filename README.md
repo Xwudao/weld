@@ -565,6 +565,8 @@ func (v *Status) Scan(src any) error
 ```
 
 One enum is one pair of files: the definition file and its generated methods.
+`<name>` is lower_snake_case and the exported type is its CamelCase form
+(`config_key` -> `ConfigKey`), and the generated file is `<name>_gen.go`.
 The definition file is recorded in `weld.json` and never rewritten, so a repeat
 add is a no-op and your edits survive. Detection is by AST — the source of truth
 is the real `type ... string` and its constants, not a magic comment — so no

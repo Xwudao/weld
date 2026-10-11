@@ -216,6 +216,31 @@ func TestLoadDirMissingIsNil(t *testing.T) {
 	}
 }
 
+func TestLoadDirIgnoresTestsAndGenerated(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"status.go":      statusSource,
+		"status_gen.go":  "package enums\n\ntype Orphan string\n\nconst OrphanOne Orphan = \"one\"\n",
+		"status_test.go": "package enums_test\n\ntype Fixture string\n\nconst FixtureValue Fixture = \"fixture\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pkg, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	names := []string{}
+	for _, e := range pkg.Enums {
+		names = append(names, e.Name)
+	}
+	if got := strings.Join(names, ","); got != "Status" {
+		t.Fatalf("enums = %q, want only Status (generated and test files are skipped)", got)
+	}
+}
+
 func TestLoadDirOverlayUsesPlannedContent(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

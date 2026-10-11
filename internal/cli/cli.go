@@ -147,8 +147,9 @@ func addHelp() string {
 	b.WriteString("\nregisters it in the seed capability's register.go index.")
 	b.WriteString("\n\n`weld add enum <name> <value>...` writes internal/enums/<name>.go (the type and")
 	b.WriteString("\nits string constants, written once) and generates internal/enums/<name>_gen.go")
-	b.WriteString("\n(the derived methods). Run `weld gen enum` to refresh the generated file after")
-	b.WriteString("\nediting the constants.")
+	b.WriteString("\n(the derived methods). <name> is lower_snake_case and the exported type is its")
+	b.WriteString("\nCamelCase form (config_key -> ConfigKey). Run `weld gen enum` to refresh the")
+	b.WriteString("\ngenerated file after editing the constants.")
 	b.WriteString("\n\nRun `weld list` to see installed capabilities in this project.")
 	return b.String()
 }
@@ -579,9 +580,10 @@ Enums:
   enumeration (the type and its constants) that weld writes once and never
   rewrites, and immediately generates internal/enums/<name>_gen.go with the
   derived methods (String, the *Values/*Names slices, Parse<Name>, IsValid and
-  the JSON/YAML text and database/sql codecs). It requires no capability. Add a
-  value by editing the definition file, then run 'weld gen enum' to refresh the
-  generated methods.
+  the JSON/YAML text and database/sql codecs). <name> is lower_snake_case and
+  the exported type is its CamelCase form (config_key -> ConfigKey). It requires
+  no capability. Add a value by editing the definition file, then run
+  'weld gen enum' to refresh the generated methods.
 
 Generators:
   gen runs every generator that applies to the project. gen enum regenerates

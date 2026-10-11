@@ -125,7 +125,9 @@ func LoadDirOverlay(dir string, overlay map[string][]byte) (*Package, error) {
 // isSourceName reports whether name is a hand-written Go source file: a file
 // that ends in .go but is not generated output.
 func isSourceName(name string) bool {
-	return strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_gen.go")
+	return strings.HasSuffix(name, ".go") &&
+		!strings.HasSuffix(name, "_gen.go") &&
+		!strings.HasSuffix(name, "_test.go")
 }
 
 // Detect parses sources and returns the enums they declare.

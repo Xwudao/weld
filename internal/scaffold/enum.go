@@ -15,7 +15,6 @@ import (
 
 	"github.com/Xwudao/weld/internal/genenum"
 	"github.com/Xwudao/weld/internal/project"
-	"github.com/Xwudao/weld/internal/template"
 )
 
 // enumDir is the package directory enum definitions live in, relative to the
@@ -27,12 +26,12 @@ const enumDir = "internal/enums"
 // both a stable wire string and a constant-name fragment.
 var enumValuePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
 
-// ValidEnumName reports why an enum name is unusable. The name is the generated
-// file's base name and the lower-cased form of the exported type, so it must be
-// a valid, lower-case Go identifier that is not a keyword.
+// ValidateEnumName reports why an enum name is unusable. The name is the source
+// file's base name and, camel-cased, the exported type name (config_key ->
+// ConfigKey), so it must be lower_snake_case and not a Go keyword.
 func ValidateEnumName(name string) error {
-	if !moduleNamePattern.MatchString(name) {
-		return fmt.Errorf("invalid enum name %q: use lowercase letters and digits starting with a letter (a valid Go type name)", name)
+	if !enumValuePattern.MatchString(name) {
+		return fmt.Errorf("invalid enum name %q: use lower_snake_case (lowercase letters, digits and single underscores, starting with a letter)", name)
 	}
 	if token.IsKeyword(name) {
 		return fmt.Errorf("invalid enum name %q: it is a Go keyword", name)
@@ -88,8 +87,19 @@ func enumConsts(typeName string, values []string) ([]enumConst, error) {
 // enumConstName derives a constant identifier from a type and a value:
 // Status + in_progress -> StatusInProgress.
 func enumConstName(typeName, value string) string {
+	return typeName + camel(value)
+}
+
+// enumTypeName derives the exported type name from an enum name:
+// config_key -> ConfigKey.
+func enumTypeName(name string) string {
+	return camel(name)
+}
+
+// camel upper-cases the first letter of each underscore-separated word and
+// drops the underscores: in_progress -> InProgress, config_key -> ConfigKey.
+func camel(value string) string {
 	var b strings.Builder
-	b.WriteString(typeName)
 	upper := true
 	for _, r := range value {
 		if r == '_' {
@@ -140,7 +150,7 @@ func AddEnum(req Request, name string, values []string) (*Result, error) {
 	if len(values) == 0 {
 		return nil, fmt.Errorf("enum %q needs at least one value", name)
 	}
-	typeName := template.ExportName(name)
+	typeName := enumTypeName(name)
 	consts, err := enumConsts(typeName, values)
 	if err != nil {
 		return nil, err

@@ -24,14 +24,28 @@ func addEnum(t *testing.T, dir, name string, values ...string) *Result {
 
 func TestValidateEnumName(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"status", "orderstatus", "tier2"} {
+	for _, name := range []string{"status", "orderstatus", "tier2", "order_status", "config_key"} {
 		if err := ValidateEnumName(name); err != nil {
 			t.Errorf("ValidateEnumName(%q) = %v, want nil", name, err)
 		}
 	}
-	for _, name := range []string{"", "Status", "order-status", "1status", "status_1", "func"} {
+	for _, name := range []string{"", "Status", "order-status", "1status", "_status", "status_", "status__x", "func"} {
 		if err := ValidateEnumName(name); err == nil {
 			t.Errorf("ValidateEnumName(%q) = nil, want an error", name)
+		}
+	}
+}
+
+func TestEnumTypeName(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]string{
+		"status":       "Status",
+		"config_key":   "ConfigKey",
+		"order_status": "OrderStatus",
+		"tier2":        "Tier2",
+	} {
+		if got := enumTypeName(name); got != want {
+			t.Errorf("enumTypeName(%q) = %q, want %q", name, got, want)
 		}
 	}
 }
@@ -114,6 +128,34 @@ func TestAddEnumWritesDefinitionAndMethods(t *testing.T) {
 	}
 	if drift := manifest.Drift(dir); len(drift) != 0 {
 		t.Fatalf("drift after add enum: %+v", drift)
+	}
+	gofmtCheck(t, dir)
+}
+
+// TestAddEnumSnakeCaseName proves a two-word enum name yields the camel-cased
+// type and the matching generated file: config_key -> ConfigKey,
+// config_key_gen.go.
+func TestAddEnumSnakeCaseName(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+
+	addEnum(t, dir, "config_key", "register_config", "site_config")
+
+	definition := readFile(t, filepath.Join(dir, "internal/enums/config_key.go"))
+	for _, want := range []string{
+		"type ConfigKey string",
+		`ConfigKeyRegisterConfig ConfigKey = "register_config"`,
+		"ConfigKeySiteConfig",
+	} {
+		if !strings.Contains(definition, want) {
+			t.Errorf("config_key.go is missing %q:\n%s", want, definition)
+		}
+	}
+
+	generated := readFile(t, filepath.Join(dir, "internal/enums/config_key_gen.go"))
+	if !strings.Contains(generated, "func ParseConfigKey(raw string) (ConfigKey, error)") {
+		t.Errorf("config_key_gen.go lacks ParseConfigKey:\n%s", generated)
 	}
 	gofmtCheck(t, dir)
 }
