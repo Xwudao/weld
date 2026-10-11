@@ -17,10 +17,19 @@ With no capability installed a bare `__name__` prints the help, as does
 server instead, exactly as `__name__ serve` does.
 
 ```sh
-make build   # build bin/__name__
+weld dev     # run the backend and, with web, the pnpm dev server side by side
+weld build   # build the frontend and cross-compile the binary
+make build   # build bin/__name__ (the no-weld fallback)
 make run     # run the app (pass a subcommand with ARGS, e.g. make run ARGS=serve)
 make test    # run the Go tests
 ```
+
+`weld dev` and `weld build` read the optional, user-owned `weld.yml`. It is not
+the machine-owned `weld.json` manifest: `weld` never rewrites it and `weld add`
+never touches it, so your build and dev settings survive every later capability.
+Print a commented starter with `weld config example`. Every setting is optional;
+without the file, `weld dev` runs `go run .` plus `pnpm run dev` in `web/`, and
+`weld build` builds the host platform once into `bin/`.
 
 ## Extending the project
 

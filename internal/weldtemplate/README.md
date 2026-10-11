@@ -5,6 +5,13 @@ The CLI reads them from `weldtemplate.FS()`, an embedded `io/fs.FS` in this
 same Go module. A built `weld` binary therefore carries every capability; no
 separate template module, checkout or network access is needed at runtime.
 
+The CLI also drives the assembled project: `weld dev` runs the backend and
+frontend together, `weld build` builds the frontend and cross-compiles the
+binary, and both read the optional, user-owned `weld.yml`. `weld.yml` is not a
+payload here: it is created by the user (a starter is printed by
+`weld config example`), it is never shipped in a generated project and it is
+never recorded in `weld.json`, so `weld add` never rewrites it.
+
 ## Staged architecture
 
 Capabilities are one-way additive. A project is created from exactly one

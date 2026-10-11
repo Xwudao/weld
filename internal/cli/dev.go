@@ -1,0 +1,55 @@
+package cli
+
+import (
+	"github.com/spf13/cobra"
+
+	"github.com/Xwudao/weld/internal/dev"
+	"github.com/Xwudao/weld/internal/project"
+	"github.com/Xwudao/weld/internal/projectcfg"
+)
+
+// newDevCommand builds `weld dev`.
+func newDevCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "dev",
+		Short: "run the backend and frontend development servers together",
+		Long: `Run the backend and, when the web capability is installed, the frontend
+development server side by side.
+
+Settings come from the optional weld.yml (dev.backend, dev.frontend) with
+defaults derived from the installed capabilities: the backend runs ` + "`go run .`" + `
+(which serves once http is installed) and the frontend runs ` + "`pnpm run dev`" + ` in
+web/. Ctrl-C stops both. Control commands on stdin: rs backend|b,
+rs frontend|f, rs all|a, o (open), status|st, help|h, quit.`,
+		Args: cobra.NoArgs,
+		RunE: runDev,
+	}
+}
+
+// runDev runs a dev session.
+func runDev(cmd *cobra.Command, args []string) error {
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	cfg, err := projectcfg.LoadOptional(dir)
+	if err != nil {
+		return err
+	}
+
+	// The frontend only runs when the web capability is installed; a CLI-only
+	// project still gets its backend process.
+	frontendInstalled := false
+	if manifest, loadErr := project.Load(dir); loadErr == nil {
+		frontendInstalled = manifest.HasCapability("web")
+	}
+
+	return dev.Run(dev.Request{
+		Dir:               dir,
+		Config:            cfg,
+		FrontendInstalled: frontendInstalled,
+		Stdin:             cmd.InOrStdin(),
+		Stdout:            cmd.OutOrStdout(),
+		Stderr:            cmd.ErrOrStderr(),
+	})
+}

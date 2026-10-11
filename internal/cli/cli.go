@@ -23,15 +23,16 @@ import (
 
 const (
 	progName = "weld"
-	version  = "0.1.1"
+	version  = "0.2.0"
 )
 
 // Run executes a weld invocation and returns a non-nil error on failure. It
 // neither prints the error nor exits: main reports a returned error once and
 // sets the exit status, so the command tree stays silent here.
-func Run(args []string, stdout, stderr io.Writer) error {
+func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	root := newRootCommand()
 	root.SetArgs(args)
+	root.SetIn(stdin)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	return root.Execute()
@@ -73,6 +74,9 @@ func newRootCommand() *cobra.Command {
 		newAddCommand(),
 		newListCommand(),
 		newSkillsCommand(),
+		newBuildCommand(),
+		newDevCommand(),
+		newConfigCommand(),
 		newVersionCommand(),
 	)
 	return root
@@ -206,7 +210,10 @@ func newVersionCommand() *cobra.Command {
 // command list, so it explains the capability and module set rather than the
 // command names.
 const usageLong = `weld builds a minimal Go CLI and then extends that same project in
-place, one capability at a time.
+place, one capability at a time. It also drives the assembled project:
+weld dev runs the backend and frontend together and weld build builds the
+frontend and cross-compiles the binary, both configured by the optional,
+user-owned weld.yml.
 
 Capabilities:
   base   (scaffold) minimal Go CLI on a Cobra command tree with a log/slog
@@ -281,7 +288,14 @@ installed, and it raises the project's Go floor to 1.25.
 Every file a capability writes is recorded in the project manifest (weld.json)
 with the capability and version that produced it. The skills command writes
 .agents/skills/weld/SKILL.md from that manifest and refuses to overwrite the
-file once you edit it.`
+file once you edit it.
+
+weld.yml is user-owned: it configures weld build (cross-compilation targets,
+build tags, CGO_ENABLED, ldflags) and weld dev (the backend and frontend
+commands), and weld never rewrites it. It is not the machine-owned weld.json
+manifest, and weld add never touches it. weld config example prints a
+commented starter; every setting defaults from the installed capabilities and
+the host platform, so a project without weld.yml still builds and runs.`
 
 // runNew plans and applies `weld new`.
 func runNew(cmd *cobra.Command, args []string) error {

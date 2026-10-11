@@ -13,7 +13,7 @@ import (
 func run(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	var out, errBuf bytes.Buffer
-	err := Run(args, &out, &errBuf)
+	err := Run(args, strings.NewReader(""), &out, &errBuf)
 	return out.String(), err
 }
 
@@ -756,5 +756,41 @@ func TestAddModuleCommandDryRunWritesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "internal", "modules")); !os.IsNotExist(err) {
 		t.Fatal("dry run wrote the module")
+	}
+}
+
+func TestHelpListsBuildDevAndConfig(t *testing.T) {
+	out, err := run(t, "help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"build", "dev", "config"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("help omitted %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestConfigExample(t *testing.T) {
+	out, err := run(t, "config", "example")
+	if err != nil {
+		t.Fatalf("config example: %v", err)
+	}
+	for _, want := range []string{"weld.yml", "build:", "dev:", "targets:", "pnpm"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("config example omitted %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestBuildAndDevHelp(t *testing.T) {
+	for _, name := range []string{"build", "dev"} {
+		out, err := run(t, name, "--help")
+		if err != nil {
+			t.Fatalf("%s --help: %v", name, err)
+		}
+		if !strings.Contains(out, "weld.yml") {
+			t.Errorf("%s help does not mention weld.yml:\n%s", name, out)
+		}
 	}
 }

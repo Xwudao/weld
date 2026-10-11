@@ -239,7 +239,11 @@ func writeHeader(b *strings.Builder, manifest *project.Manifest) {
 	}
 	b.WriteString("`weld new` creates a minimal Go CLI and `weld add <capability>` extends that\n")
 	b.WriteString("same project one capability at a time. Capabilities are additive, resolved by\n")
-	b.WriteString("dependency, and never removed.\n\n")
+	b.WriteString("dependency, and never removed. `weld dev` runs the backend and (with the web\n")
+	b.WriteString("capability) the frontend together, and `weld build` builds the frontend and\n")
+	b.WriteString("cross-compiles the binary. Both read the user-owned `weld.yml` (not the\n")
+	b.WriteString("machine-owned `weld.json` manifest), which weld never rewrites; print a\n")
+	b.WriteString("starter with `weld config example`.\n\n")
 }
 
 // writeCapabilities lists every installed capability with a description. A

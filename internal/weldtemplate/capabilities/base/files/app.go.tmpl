@@ -7,8 +7,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Version is the application version.
-const Version = "__version__"
+// Version is the application version. It is a variable rather than a constant
+// so `weld build` can inject a release value with -ldflags -X
+// (for example -X <module>/internal/app.Version=v1.2.3); the scaffolded value is
+// the fallback for a plain `go build`.
+var Version = "__version__"
 
 // CommandFactory builds one top-level command.
 //

@@ -3,14 +3,16 @@
 `weld` is a progressive Go scaffold. Start with a minimal Go CLI, then add
 capabilities to the *same* project over time — `weld add web` modifies your
 existing project to gain a web frontend instead of generating a second
-template.
+template. It also drives the assembled project: `weld dev` runs the backend and
+frontend together, and `weld build` builds the frontend and cross-compiles the
+binary, both configured by the optional, user-owned `weld.yml`.
 
 Install the latest patch release with Go 1.23 or newer (the tool itself builds on Go
 1.23; a generated project that adds any capability installs Loom and raises its
 Go directive to `go 1.25.0`):
 
 ```bash
-go install github.com/Xwudao/weld/cmd/weld@v0.1.1
+go install github.com/Xwudao/weld/cmd/weld@v0.2.0
 ```
 
 ```bash
@@ -19,7 +21,10 @@ cd demo
 weld add web           # installs http, then the React + TS + Vite frontend
 weld add api           # JSON API: typed handlers, DTO validation, {code,msg,data}
 weld add db            # PostgreSQL: SQL migrations + sqlc, pool and repository
-make build             # builds the frontend, embeds it, builds the app
+weld config example    # print the optional, user-owned weld.yml starter
+weld dev               # backend + pnpm frontend dev servers, side by side
+weld build             # builds the frontend and cross-compiles the binary
+make build             # the Makefile stays as the no-weld fallback
 make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
 ```
 
@@ -38,11 +43,32 @@ weld new <name> [--module path] [--dir dir] [--dry-run]
 weld add <capability> [--dir dir] [--dry-run]
 weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
+weld dev [--dir dir]
+weld build [--dir dir]
+weld config example
 weld list [--dir dir]
 weld skills [--dir dir] [--dry-run]
 weld version
 weld help
 ```
+
+`weld dev` runs the project's backend and, when the web capability is
+installed, the frontend development server under one supervisor. Ctrl-C stops
+both; control commands on stdin restart or open either side
+(`rs backend|b`, `rs frontend|f`, `rs all|a`, `o`, `status|st`, `help|h`,
+`quit`).
+
+`weld build` builds the frontend first when the web capability is installed and
+then cross-compiles the Go binary for every configured target. It is the
+release path; `make build` stays available as the self-contained, no-weld
+fallback.
+
+Both commands read the optional, user-owned `weld.yml` (print a commented
+starter with `weld config example`). `weld.yml` is deliberately **not** the
+machine-owned `weld.json` manifest: `weld` never rewrites it and `weld add`
+never touches it, so your hand-edited build and dev settings survive every
+later capability. Every setting is optional and defaults from the installed
+capabilities and the host platform.
 
 Capabilities:
 
