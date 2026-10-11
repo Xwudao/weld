@@ -18,6 +18,7 @@ const shutdownTimeout = 10 * time.Second
 
 // configFlag and addrFlag are the persistent flags the root command shares
 // between `__name__ serve` and a bare `__name__`, so both read one definition.
+// The seed capability reads --config from here rather than registering its own.
 const (
 	configFlag = "config"
 	addrFlag   = "addr"
@@ -29,15 +30,10 @@ func init() {
 	SetDefaultRun(runServe)
 }
 
-// registerServeFlags adds the serve flags to the root command as persistent
-// flags, so a subcommand inherits them and a bare invocation (whose default
-// action serves) parses the same set. The seed capability's seed command shares
-// --config, so it is registered only when absent: the two capabilities may be
-// installed in either order.
+// registerServeFlags adds the flags the root command shares between serve and a
+// bare invocation, so both parse the same set.
 func registerServeFlags(root *cobra.Command) {
-	if root.PersistentFlags().Lookup(configFlag) == nil {
-		root.PersistentFlags().String(configFlag, "", "path to config.yml (default ./config.yml)")
-	}
+	root.PersistentFlags().String(configFlag, "", "path to config.yml (default ./config.yml)")
 	root.PersistentFlags().String(addrFlag, "", "address to listen on (overrides config and environment)")
 }
 

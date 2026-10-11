@@ -11,9 +11,8 @@ import (
 )
 
 // seedConfigFlag is the shared root configuration flag. The http capability's
-// serve command registers the same flag; whichever ConfigureRoot runs first
-// registers it and the other leaves it in place, so seed works whether or not
-// serve is installed.
+// serve command registers it as a root persistent flag; seed only reads it, so a
+// project without http falls back to the default config path.
 const seedConfigFlag = "config"
 
 // seedStopTimeout bounds the seed graph's teardown (closing the pool) after the
@@ -22,16 +21,6 @@ const seedStopTimeout = 10 * time.Second
 
 func init() {
 	RegisterCommand(newSeedCommand)
-	ConfigureRoot(registerSeedFlags)
-}
-
-// registerSeedFlags adds the shared --config flag unless the http capability has
-// already registered it.
-func registerSeedFlags(root *cobra.Command) {
-	if root.PersistentFlags().Lookup(seedConfigFlag) != nil {
-		return
-	}
-	root.PersistentFlags().String(seedConfigFlag, "", "path to config.yml (default ./config.yml)")
 }
 
 // newSeedCommand builds the seed command backed by the generated Loom graph.
@@ -55,9 +44,16 @@ func newSeedCommand() *cobra.Command {
 // lazy: constructing it validates the database settings but does not connect,
 // and the first statement connects.
 func runSeed(cmd *cobra.Command, args []string) (err error) {
-	configPath, err := cmd.Flags().GetString(seedConfigFlag)
-	if err != nil {
-		return err
+	// serve (installed with http) owns the persistent --config root flag; seed
+	// reads it when present and otherwise uses the default path, so it never
+	// defines a second root flag and works on a project without http.
+	configPath := ""
+	if cmd.Flags().Lookup(seedConfigFlag) != nil {
+		value, lookupErr := cmd.Flags().GetString(seedConfigFlag)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		configPath = value
 	}
 	ctx := di.WithConfigPath(cmd.Context(), configPath)
 
