@@ -75,9 +75,12 @@ capabilities and the host platform.
 
 Capabilities:
 
-- `base` (scaffold) — minimal Go CLI on a Cobra command tree with a `log/slog`
-  logging factory (`internal/logging`) whose sink is an injected `io.Writer`.
-  It ships no configuration and no server; the only dependency is Cobra itself.
+- `base` (scaffold) — minimal Go CLI on a Cobra command tree with a
+  `log/slog` factory (`internal/logging`) whose sink is an injected
+  `io.Writer`. Text records are colored by [`tint`](https://github.com/lmittmann/tint)
+  and JSON stays slog's handler; `NewFromEnv`, `ParseLevel` and the
+  `WithContext`/`FromContext` pair are built in. It ships no configuration and
+  no server; its only direct dependencies are Cobra and tint.
 - `config` (add) — the shared typed configuration capability: `config.yml` from
   the working directory, environment and flag overrides, and a redacting
   `Secret` type. `environment` (overridden by `APP_ENV`) is `local`,
@@ -601,8 +604,10 @@ Test conventions:
   the committed example in both add orders — with the example persisted, no local
   secret copied into it, and a missing or corrupt example failing actionably.
 - The base CLI logs a failed command through its injected `log/slog` logger, and
-  a generated `internal/logging` test covers text/JSON formatting, handler
-  level filtering and an error record against a fake writer. A scaffold matrix
+  a generated `internal/logging` test covers tint text records (color on and
+  off, the painted statement, the `time.DateTime` clock), JSON formatting,
+  handler-level filtering, `ParseLevel`, `OptionsFromEnv`/`NewFromEnv` and the
+  context helpers against a fake writer. A scaffold matrix
   test proves the logging wiring composes with `base`, `http`, `api`, `db` and
   `loom` (including `api+db` and `api+db+loom`): the factory is present, no
   generated file reaches for `slog.Default` or the `slog.Info`/`Error` globals,

@@ -101,12 +101,15 @@ commands/          per-name    -> `weld add command <name>` / `--command` payloa
 ```
 
 `base` is pure CLI: it never imports `net/http` and ships no configuration. It
-ships `internal/logging`, a small factory over `log/slog` (`New(w io.Writer,
-format Format, options *slog.HandlerOptions)`), so the process has one logging
-protocol with an injectable sink and no custom logger interface. The text format
-is its own handler — a `time.DateTime` record time, and a statement field painted
-for a terminal, neither of which slog's `TextHandler` can express — while JSON
-stays slog's.
+ships `internal/logging`: one `*slog.Logger`, built through an injected
+`io.Writer`, with no custom logger interface. Text records go through
+[`tint`](https://github.com/lmittmann/tint), a zero-dependency slog handler, so
+a console record is colored while the project keeps its `time.DateTime` clock
+and can paint a statement field; JSON stays slog's own handler for a log
+pipeline. `New` is the short form, `NewWithOptions` is the full one, and
+`NewFromEnv` reads `LOG_LEVEL`/`LOG_FORMAT`/`NO_COLOR` so an operator tunes
+logging without editing code. `ParseLevel`, `Err` and the
+`WithContext`/`FromContext` pair round out the factory.
 
 `config` is the shared configuration capability, required by `loom` and
 installed automatically with any added capability. It ships `internal/config`:

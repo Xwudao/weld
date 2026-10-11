@@ -2425,7 +2425,7 @@ func TestBaseGeneratedProjectLogsErrorsThroughSlog(t *testing.T) {
 		t.Fatalf("an unknown command unexpectedly succeeded:\n%s", out)
 	}
 	text := string(out)
-	if !strings.Contains(text, "level=ERROR") || !strings.Contains(text, "bogus") {
+	if !strings.Contains(text, "ERR") || !strings.Contains(text, "bogus") {
 		t.Fatalf("the failed command was not logged through slog:\n%s", text)
 	}
 	if strings.Contains(text, "error:") {

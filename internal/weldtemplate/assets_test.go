@@ -626,7 +626,11 @@ func TestBaseCapabilityShipsInjectedLogger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read logging.go: %v", err)
 	}
-	for _, want := range []string{"\"log/slog\"", "NewJSONHandler", "ReplaceAttr", "time.DateTime", "StatementKey", "ansiCyan"} {
+	for _, want := range []string{
+		"\"log/slog\"", "github.com/lmittmann/tint", "NewTextHandler", "NewJSONHandler",
+		"ReplaceAttr", "time.DateTime", "StatementKey", "tint.Attr",
+		"func ParseLevel(", "func OptionsFromEnv(", "func NewFromEnv(", "func WithContext(", "func FromContext(",
+	} {
 		if !strings.Contains(string(loggingGo), want) {
 			t.Errorf("logging.go is missing %q", want)
 		}
@@ -678,7 +682,7 @@ func TestBaseCapabilityShipsCobraCommandSeams(t *testing.T) {
 		t.Fatalf("read base go.mod: %v", err)
 	}
 	modText := string(mod)
-	for _, want := range []string{"require github.com/spf13/cobra v1.9.1", "github.com/spf13/pflag", "github.com/inconshreveable/mousetrap"} {
+	for _, want := range []string{"github.com/spf13/cobra v1.9.1", "github.com/lmittmann/tint v1.2.1", "github.com/spf13/pflag", "github.com/inconshreveable/mousetrap"} {
 		if !strings.Contains(modText, want) {
 			t.Errorf("base go.mod does not pin %q", want)
 		}

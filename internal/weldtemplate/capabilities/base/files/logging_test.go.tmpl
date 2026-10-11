@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -22,18 +23,41 @@ func (w *fakeWriter) Write(p []byte) (int, error) {
 	return w.Buffer.Write(p)
 }
 
+// plain returns a text logger with the colors off, so a test can read the record
+// without stripping escapes.
+func plain(w *fakeWriter) *slog.Logger {
+	return NewWithOptions(w, Options{Format: TextFormat, NoColor: true})
+}
+
 func TestNewWritesTextRecords(t *testing.T) {
 	w := &fakeWriter{}
 	logger := New(w, TextFormat, nil)
 	logger.Info("listening", "addr", ":8080")
 	out := w.String()
-	for _, want := range []string{"level=INFO", "msg=listening", "addr=:8080"} {
+	for _, want := range []string{"INF", "listening", "addr=", ":8080"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("text record is missing %q:\n%s", want, out)
+			t.Fatalf("text record is missing %q:\n%q", want, out)
 		}
+	}
+	if !strings.ContainsRune(out, 0x1b) {
+		t.Fatalf("the default text logger is not colored:\n%q", out)
 	}
 	if w.Writes == 0 {
 		t.Fatal("logger did not write to the injected writer")
+	}
+}
+
+// TestTextFormatCanBePlain proves NoColor turns off every escape, so a pipe or a
+// file gets plain text.
+func TestTextFormatCanBePlain(t *testing.T) {
+	w := &fakeWriter{}
+	plain(w).Info("listening", StatementKey, "SELECT 1")
+	out := w.String()
+	if strings.ContainsRune(out, 0x1b) {
+		t.Fatalf("NoColor still emitted an escape:\n%q", out)
+	}
+	if !strings.Contains(out, "sql=\"SELECT 1\"") {
+		t.Fatalf("the statement is missing:\n%q", out)
 	}
 }
 
@@ -54,8 +78,8 @@ func TestNewUnknownFormatFallsBackToText(t *testing.T) {
 	w := &fakeWriter{}
 	logger := New(w, Format("yaml"), nil)
 	logger.Info("hello")
-	if out := w.String(); !strings.Contains(out, "msg=hello") {
-		t.Fatalf("unknown format did not fall back to text:\n%s", out)
+	if out := w.String(); !strings.Contains(out, "hello") || !strings.Contains(out, "INF") {
+		t.Fatalf("unknown format did not fall back to text:\n%q", out)
 	}
 }
 
@@ -86,27 +110,42 @@ func TestNewLogsErrorAttribute(t *testing.T) {
 	}
 }
 
-// TestNewFormatsTextRecordTime pins the text record's time: time.DateTime, the
-// date and local wall clock to the second, written unquoted and with no zone
-// offset. slog's default carries the "T" separator and the offset, which this
-// drops.
-func TestNewFormatsTextRecordTime(t *testing.T) {
+// TestErrAttributeRendersInJSON proves the Err helper keeps the conventional
+// "error" key and still resolves to the message through a non-tint handler.
+func TestErrAttributeRendersInJSON(t *testing.T) {
 	w := &fakeWriter{}
-	New(w, TextFormat, nil).Info("hello")
+	New(w, JSONFormat, nil).Error("failed", Err(errors.New("boom")))
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(w.String())), &record); err != nil {
+		t.Fatalf("record is not JSON: %v\n%s", err, w.String())
+	}
+	if record["error"] != "boom" {
+		t.Fatalf("record = %v", record)
+	}
+}
+
+// TestTextRecordTimeLayout pins the text record's time: time.DateTime, the date
+// and local wall clock to the second, uncolored and with no zone offset.
+func TestTextRecordTimeLayout(t *testing.T) {
+	w := &fakeWriter{}
+	plain(w).Info("hello")
 	out := w.String()
-	rest, ok := strings.CutPrefix(out, "time=")
-	if !ok {
-		t.Fatalf("text record does not start with a time field:\n%s", out)
+	if len(out) < len(timeLayout) {
+		t.Fatalf("record is too short:\n%q", out)
 	}
-	got, _, ok := strings.Cut(rest, " level=")
-	if !ok {
-		t.Fatalf("the time is not followed by the level:\n%s", out)
+	if _, err := time.Parse(timeLayout, out[:len(timeLayout)]); err != nil {
+		t.Fatalf("record time %q does not match timeLayout: %v", out[:len(timeLayout)], err)
 	}
-	if strings.ContainsAny(got, `"TZ+`) {
-		t.Fatalf("time %q is quoted or carries the RFC 3339 separator or zone", got)
-	}
-	if _, err := time.Parse(timeLayout, got); err != nil {
-		t.Fatalf("time %q does not match timeLayout: %v", got, err)
+}
+
+// TestTimeFormatOverridesClock proves Options.TimeFormat replaces the clock
+// without touching the rest of the record.
+func TestTimeFormatOverridesClock(t *testing.T) {
+	w := &fakeWriter{}
+	NewWithOptions(w, Options{Format: TextFormat, NoColor: true, TimeFormat: time.TimeOnly}).Info("hi")
+	out := w.String()
+	if _, err := time.Parse(time.TimeOnly, out[:len(time.TimeOnly)]); err != nil {
+		t.Fatalf("record time %q does not match time.TimeOnly: %v", out[:len(time.TimeOnly)], err)
 	}
 }
 
@@ -125,8 +164,8 @@ func TestNewKeepsRFC3339TimeInJSON(t *testing.T) {
 	}
 }
 
-// TestNewTextHonoursCallerReplaceAttr proves the caller's ReplaceAttr runs first:
-// an attribute it drops is not resurrected, and New does not mutate the options it
+// TestNewTextHonoursCallerReplaceAttr proves the caller's ReplaceAttr runs: an
+// attribute it drops is not resurrected, and New does not mutate the options it
 // was handed.
 func TestNewTextHonoursCallerReplaceAttr(t *testing.T) {
 	w := &fakeWriter{}
@@ -138,48 +177,41 @@ func TestNewTextHonoursCallerReplaceAttr(t *testing.T) {
 	}}
 	New(w, TextFormat, options).Info("hello")
 	out := w.String()
-	if strings.Contains(out, "time=") {
-		t.Fatalf("caller's ReplaceAttr did not drop the time:\n%s", out)
+	if strings.Contains(out, time.Now().Format("2006-01-02")) {
+		t.Fatalf("caller's ReplaceAttr did not drop the time:\n%q", out)
 	}
-	if !strings.Contains(out, "msg=hello") {
-		t.Fatalf("record lost its message:\n%s", out)
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("record lost its message:\n%q", out)
 	}
 	if options.ReplaceAttr == nil {
 		t.Fatal("New mutated the caller's HandlerOptions")
 	}
 }
 
-// TestTextRecordPaintsTheStatement proves the statement field is painted and that
-// the record around it is written byte for byte, separators included: only the
-// colour is added.
+// TestTextRecordPaintsTheStatement proves the statement field is painted cyan
+// (tint's 2;36 faint color) while the rest of the record stays as it is.
 func TestTextRecordPaintsTheStatement(t *testing.T) {
 	w := &fakeWriter{}
 	New(w, TextFormat, nil).Info("query", StatementKey, "SELECT * FROM items WHERE id = $1", "rows", 1)
 	out := w.String()
-	want := `level=INFO msg=query ` + StatementKey + "=" + ansiCyan + `"SELECT * FROM items WHERE id = $1"` + ansiReset + " rows=1\n"
-	if !strings.HasSuffix(out, want) {
-		t.Fatalf("the painted record tail = %q, want %q", out, want)
+	if !strings.Contains(out, "\x1b[2;36m"+StatementKey+"=") {
+		t.Fatalf("the statement field is not painted:\n%q", out)
+	}
+	if !strings.Contains(out, `"SELECT * FROM items WHERE id = $1"`) {
+		t.Fatalf("the statement value is missing:\n%q", out)
+	}
+	if !strings.Contains(out, "rows=") {
+		t.Fatalf("the record lost a later attribute:\n%q", out)
 	}
 }
 
-// TestTextRecordWithoutAStatementIsPlain proves the colour is not paid for by
-// every record: a record with no statement field carries no escape byte, so a
-// production log stays plain text.
-func TestTextRecordWithoutAStatementIsPlain(t *testing.T) {
+// TestTextRecordWithoutAStatementHasNoSQLColor proves the statement color is not
+// paid for by every record: an ordinary record never carries the 2;36 sequence.
+func TestTextRecordWithoutAStatementHasNoSQLColor(t *testing.T) {
 	w := &fakeWriter{}
 	New(w, TextFormat, nil).Info("listening", "addr", ":8080")
-	if strings.ContainsRune(w.String(), 0x1b) {
-		t.Fatalf("a record without a statement emitted an escape:\n%q", w.String())
-	}
-}
-
-// TestTextRecordClosesTheStatementBeforeTheNewline proves the reset lands before
-// the record's newline, so the escape cannot open the next line.
-func TestTextRecordClosesTheStatementBeforeTheNewline(t *testing.T) {
-	w := &fakeWriter{}
-	New(w, TextFormat, nil).Info("query", StatementKey, "SELECT 1")
-	if out := w.String(); !strings.HasSuffix(out, ansiReset+"\n") {
-		t.Fatalf("the statement is not closed before the newline:\n%q", out)
+	if out := w.String(); strings.Contains(out, "\x1b[2;36m") {
+		t.Fatalf("a record without a statement is painted as one:\n%q", out)
 	}
 }
 
@@ -194,30 +226,31 @@ func TestJSONRecordIsNeverPainted(t *testing.T) {
 }
 
 // TestTextRecordQuotesAmbiguousValues proves a value is quoted when it would
-// otherwise break the key=value record.
+// otherwise break the key=value record. The message is written as text, not as a
+// key=value field, so it is never quoted.
 func TestTextRecordQuotesAmbiguousValues(t *testing.T) {
 	w := &fakeWriter{}
-	New(w, TextFormat, nil).Info("hello world", "note", "a=b c")
+	plain(w).Info("hello world", "note", "a=b c")
 	out := w.String()
-	for _, want := range []string{`msg="hello world"`, `note="a=b c"`} {
-		if !strings.Contains(out, want) {
-			t.Errorf("an ambiguous value is not quoted with %q:\n%s", want, out)
-		}
+	if !strings.Contains(out, "hello world") {
+		t.Errorf("the message is missing:\n%s", out)
+	}
+	if !strings.Contains(out, `note="a=b c"`) {
+		t.Errorf("an ambiguous value is not quoted:\n%s", out)
 	}
 }
 
 // TestTextRecordWritesTypedValues pins the kinds that need no quoting.
 func TestTextRecordWritesTypedValues(t *testing.T) {
 	w := &fakeWriter{}
-	New(w, TextFormat, nil).Info("m",
+	plain(w).Info("m",
 		"count", 3,
 		"ratio", 0.5,
 		"ok", true,
 		"elapsed", 1500*time.Millisecond,
-		"at", time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC),
 	)
 	out := w.String()
-	for _, want := range []string{"count=3", "ratio=0.5", "ok=true", "elapsed=1.5s", "at=2026-10-10 08:00:00"} {
+	for _, want := range []string{"count=3", "ratio=0.5", "ok=true", "elapsed=1.5s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("a typed value is missing %q:\n%s", want, out)
 		}
@@ -228,7 +261,7 @@ func TestTextRecordWritesTypedValues(t *testing.T) {
 // flatten into dotted keys the way slog flattens them.
 func TestTextRecordFlattensGroups(t *testing.T) {
 	w := &fakeWriter{}
-	New(w, TextFormat, nil).With("app", "weld").WithGroup("http").Info("m", "status", 200, slog.Group("req", "id", 7))
+	plain(w).With("app", "weld").WithGroup("http").Info("m", "status", 200, slog.Group("req", "id", 7))
 	out := w.String()
 	for _, want := range []string{"app=weld", "http.status=200", "http.req.id=7"} {
 		if !strings.Contains(out, want) {
@@ -241,7 +274,7 @@ func TestTextRecordFlattensGroups(t *testing.T) {
 // the group that was open when it was added, not to one opened later.
 func TestTextRecordKeepsAnAttributeInItsGroup(t *testing.T) {
 	w := &fakeWriter{}
-	New(w, TextFormat, nil).WithGroup("a").With("x", 1).WithGroup("b").Info("m", "y", 2)
+	plain(w).WithGroup("a").With("x", 1).WithGroup("b").Info("m", "y", 2)
 	out := w.String()
 	for _, want := range []string{"a.x=1", "a.b.y=2"} {
 		if !strings.Contains(out, want) {
@@ -254,8 +287,8 @@ func TestTextRecordKeepsAnAttributeInItsGroup(t *testing.T) {
 // its call site.
 func TestTextRecordWritesSource(t *testing.T) {
 	w := &fakeWriter{}
-	New(w, TextFormat, &slog.HandlerOptions{AddSource: true}).Info("m")
-	if out := w.String(); !strings.Contains(out, "source=") {
+	NewWithOptions(w, Options{Format: TextFormat, NoColor: true, AddSource: true}).Info("m")
+	if out := w.String(); !strings.Contains(out, "logging_test.go:") {
 		t.Fatalf("AddSource did not add a source field:\n%s", out)
 	}
 }
@@ -271,5 +304,83 @@ func TestTextRecordWritesOneWritePerRecord(t *testing.T) {
 	}
 	if w.Writes != 3 {
 		t.Fatalf("writes = %d, want one per record (3)", w.Writes)
+	}
+}
+
+func TestParseLevel(t *testing.T) {
+	cases := map[string]slog.Level{
+		"":        slog.LevelInfo,
+		"info":    slog.LevelInfo,
+		"INFO":    slog.LevelInfo,
+		" debug ": slog.LevelDebug,
+		"warn":    slog.LevelWarn,
+		"warning": slog.LevelWarn,
+		"error":   slog.LevelError,
+	}
+	for name, want := range cases {
+		got, err := ParseLevel(name)
+		if err != nil {
+			t.Errorf("ParseLevel(%q): %v", name, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("ParseLevel(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if _, err := ParseLevel("verbose"); err == nil {
+		t.Fatal("ParseLevel accepted an unknown level")
+	}
+}
+
+func TestOptionsFromEnv(t *testing.T) {
+	env := map[string]string{
+		"LOG_FORMAT": "json",
+		"LOG_LEVEL":  "debug",
+		"LOG_SOURCE": "true",
+		"NO_COLOR":   "1",
+	}
+	options := OptionsFromEnv(func(key string) string { return env[key] })
+	if options.Format != JSONFormat || options.Level != slog.LevelDebug || !options.AddSource || !options.NoColor {
+		t.Fatalf("OptionsFromEnv = %+v", options)
+	}
+}
+
+// TestOptionsFromEnvIgnoresBadValues proves a bad environment degrades to the
+// defaults instead of failing startup.
+func TestOptionsFromEnvIgnoresBadValues(t *testing.T) {
+	env := map[string]string{"LOG_FORMAT": "yaml", "LOG_LEVEL": "verbose", "LOG_SOURCE": "yes please"}
+	options := OptionsFromEnv(func(key string) string { return env[key] })
+	if options.Format != TextFormat || options.Level != slog.LevelInfo || options.AddSource || options.NoColor {
+		t.Fatalf("OptionsFromEnv = %+v", options)
+	}
+}
+
+func TestNewFromEnvReadsTheEnvironment(t *testing.T) {
+	t.Setenv("LOG_FORMAT", "json")
+	t.Setenv("LOG_LEVEL", "warn")
+	w := &fakeWriter{}
+	logger := NewFromEnv(w)
+	logger.Info("quiet")
+	logger.Warn("loud", "k", "v")
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(w.String())), &record); err != nil {
+		t.Fatalf("NewFromEnv did not build a JSON logger: %v\n%s", err, w.String())
+	}
+	if record["level"] != "WARN" {
+		t.Fatalf("record = %v", record)
+	}
+}
+
+func TestContextRoundTrip(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	ctx := WithContext(context.Background(), logger)
+	if got := FromContext(ctx); got != logger {
+		t.Fatalf("FromContext returned %p, want the stored logger %p", got, logger)
+	}
+	if got := FromContext(context.Background()); got == nil {
+		t.Fatal("FromContext returned nil for an empty context")
+	}
+	if got := WithContext(context.Background(), nil); got == nil {
+		t.Fatal("WithContext(nil) returned nil")
 	}
 }

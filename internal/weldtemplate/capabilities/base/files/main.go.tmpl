@@ -9,9 +9,9 @@ import (
 )
 
 func main() {
-	logger := logging.New(os.Stderr, logging.TextFormat, nil)
+	logger := logging.NewFromEnv(os.Stderr)
 	if err := app.Run(os.Args[1:]); err != nil {
-		logger.Error("__name__ failed", "error", err)
+		logger.Error("__name__ failed", logging.Err(err))
 		os.Exit(1)
 	}
 }

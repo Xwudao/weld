@@ -1,8 +1,8 @@
 {
   "name": "base",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "kind": "base",
-  "summary": "Minimal Go CLI on a Cobra command tree with a root-command contribution seam and a log/slog logger factory.",
+  "summary": "Minimal Go CLI on a Cobra command tree with a root-command contribution seam and a tint-backed log/slog logger factory.",
   "requires": [],
   "files": [
     { "path": "go.mod", "source": "files/go.mod.tmpl" },

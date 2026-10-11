@@ -205,9 +205,11 @@ func NewConfig(ctx context.Context, loader *config.Loader) (*config.Config, erro
 //
 // The logger is a graph dependency so every component that logs shares one
 // handler; nothing installs a process-wide default logger. It writes to stderr,
-// the sink a command-line program owns.
+// the sink a command-line program owns, and reads its level and format from the
+// environment (LOG_LEVEL, LOG_FORMAT, NO_COLOR), so an operator tunes logging
+// without editing code.
 func NewLogger() *slog.Logger {
-	return logging.New(os.Stderr, logging.TextFormat, nil)
+	return logging.NewFromEnv(os.Stderr)
 }
 {{- if .Caps.Has "db"}}
 

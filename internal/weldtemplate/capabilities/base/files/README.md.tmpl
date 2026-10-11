@@ -100,12 +100,38 @@ set), and `app.SetDefaultRun` sets what a bare invocation does. With no
 capability installed the CLI still builds and runs with `version` and `help`
 alone.
 
+## Logging
+
+`internal/logging` builds one `*slog.Logger` and the whole program depends on
+that type directly — there is no custom logger interface. It writes through an
+injected `io.Writer`, so a test captures records in a buffer and nothing reaches
+for `os.Stderr` or `slog.Default`.
+
+Two encoders are available. `TextFormat` (the default) is
+[tint](https://github.com/lmittmann/tint), one colored, human-readable line per
+record; `JSONFormat` is slog's own handler for a log pipeline. The text format
+keeps the project's `time.DateTime` clock and paints a `logging.StatementKey`
+value, so a SQL statement stands out in a stream of request records.
+
+```go
+logger := logging.NewFromEnv(os.Stderr)             // LOG_LEVEL, LOG_FORMAT, NO_COLOR
+logger = logging.NewWithOptions(w, logging.Options{ // full control
+	Format: logging.TextFormat,
+	Level:  slog.LevelDebug,
+})
+```
+
+`logging.ParseLevel` turns a level name into a `slog.Level`, `logging.Err`
+builds the conventional `error` attribute, and `logging.WithContext` /
+`logging.FromContext` carry a logger through a `context.Context`, so a function
+deep in a call chain needs no logger parameter.
+
 ## Layout
 
 ```
 main.go            command entry point; builds the logger and logs a failed command
 internal/app/      Cobra command tree, command registry and root-command seams
-internal/logging/  log/slog factory: New(w io.Writer, format, options)
+internal/logging/  tint + slog factory: New, NewFromEnv, ParseLevel, context helpers
 Makefile           build/run/test entry points
 weld.json          manifest of capability-managed files
 ```
