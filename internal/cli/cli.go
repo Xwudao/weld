@@ -108,12 +108,13 @@ func newAddCommand() *cobra.Command {
 		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("usage: %s add <capability> [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--dir dir] [--dry-run]\n       %s add command <name> [--dir dir] [--dry-run]", progName, progName, progName)
+				return fmt.Errorf("usage: %s add <capability> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]", progName, progName, progName)
 			}
 			return nil
 		},
 		RunE: runAdd,
 	}
+	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
 	cmd.AddCommand(newAddModuleCommand(), newAddCommandSubcommand())
 	return cmd
 }
@@ -135,7 +136,9 @@ func addHelp() string {
 		}
 		fmt.Fprintf(&b, "  %-9s %s\n", name, capability.Summary)
 	}
-	b.WriteString("\nRun `weld list` to see installed capabilities in this project.")
+	b.WriteString("\nA capability's required capabilities are not installed automatically: a")
+	b.WriteString("\nmissing requirement is an error unless --with-dependencies is given.")
+	b.WriteString("\n\nRun `weld list` to see installed capabilities in this project.")
 	return b.String()
 }
 
@@ -153,6 +156,7 @@ func newAddModuleCommand() *cobra.Command {
 		RunE: runAddModule,
 	}
 	cmd.Flags().Bool("command", false, "also add a root command group backed by the module's Service")
+	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
 	return cmd
 }
 
@@ -160,17 +164,19 @@ func newAddModuleCommand() *cobra.Command {
 // independent root command group with no HTTP, configuration or database
 // requirement.
 func newAddCommandSubcommand() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "command <name>",
 		Short: "add an independent root command group under internal/commands/<name>",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("usage: %s add command <name> [--dir dir] [--dry-run]", progName)
+				return fmt.Errorf("usage: %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]", progName)
 			}
 			return nil
 		},
 		RunE: runAddCommand,
 	}
+	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
+	return cmd
 }
 
 // newListCommand builds `weld list` (alias `ls`).
@@ -245,8 +251,9 @@ Capabilities:
 Modules:
   add module <name> generates internal/modules/<name>: a small HTTP business
   module (typed request/response, a Service seam and routes declared once with
-  the internal/httpx helpers) under /api/<name>. It installs http, loom and
-  config automatically when absent, validates the name, and records the module
+  the internal/httpx helpers) under /api/<name>. It requires http (and the loom
+  and config http requires); a missing requirement is an error unless
+  --with-dependencies is given. It validates the name and records the module
   in weld.json. The generated Loom server graph registers the module on the
   composed mux, whichever is installed first. Its files are written once and
   never regenerated, so your edits survive later adds.
@@ -275,18 +282,21 @@ Commands:
   A name may be a command or a module, never both: serve, help and version are
   reserved, and a name already used by a module is rejected.
 
-http and db each install the config capability, so the first of them adds the
-shared typed configuration loader and generates a local, git-ignored config.yml
-from config.example.yml; adding the other only appends its section to that file.
+Requirements are not installed silently: weld add <capability> fails when a
+required capability is missing and names it, and --with-dependencies installs
+the missing chain in the same plan. http and db each require the config
+capability, so the first of them installed adds the shared typed configuration
+loader and generates a local, git-ignored config.yml from config.example.yml;
+the other only appends its section to that file.
 web requires http and shares the one serve command. db requires only base (and
 config), so it can be added to a CLI-only project and composes with the HTTP
 capabilities in any order. seed requires db and adds a short seed command over
 the repositories you wire in internal/di/seed_providers.go; it seeds nothing
 until you register a seeder. redis likewise requires only base (and config): it
 installs a lazy client the caller owns and never wires Redis into a service on
-its own. loom is installed automatically for every capability beyond the bare
-CLI, requires config, regenerates its graph when any capability it feeds is
-installed, and raises the project's Go floor to 1.25.
+its own. loom is required by every capability beyond the bare CLI, requires
+config, regenerates its graph when any capability it feeds is installed, and
+raises the project's Go floor to 1.25.
 
 Every file a capability writes is recorded in the project manifest (weld.json)
 with the capability and version that produced it. The skills command writes
@@ -351,8 +361,12 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	withDependencies, err := cmd.Flags().GetBool("with-dependencies")
+	if err != nil {
+		return err
+	}
 
-	result, err := scaffold.Add(scaffold.Request{Dir: dir, Catalog: template.Load()}, args[0])
+	result, err := scaffold.Add(scaffold.Request{Dir: dir, Catalog: template.Load(), WithDependencies: withDependencies}, args[0])
 	if err != nil {
 		return err
 	}
@@ -375,8 +389,12 @@ func runAddModule(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	withDependencies, err := cmd.Flags().GetBool("with-dependencies")
+	if err != nil {
+		return err
+	}
 
-	result, err := scaffold.AddModule(scaffold.Request{Dir: dir, Catalog: template.Load(), Command: withCommand}, args[0])
+	result, err := scaffold.AddModule(scaffold.Request{Dir: dir, Catalog: template.Load(), Command: withCommand, WithDependencies: withDependencies}, args[0])
 	if err != nil {
 		return err
 	}
@@ -394,8 +412,12 @@ func runAddCommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	withDependencies, err := cmd.Flags().GetBool("with-dependencies")
+	if err != nil {
+		return err
+	}
 
-	result, err := scaffold.AddCommand(scaffold.Request{Dir: dir, Catalog: template.Load()}, args[0])
+	result, err := scaffold.AddCommand(scaffold.Request{Dir: dir, Catalog: template.Load(), WithDependencies: withDependencies}, args[0])
 	if err != nil {
 		return err
 	}

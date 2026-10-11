@@ -90,6 +90,9 @@ func AddCommand(req Request, name string) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
+		if len(order) > 0 && !req.WithDependencies {
+			return nil, &MissingRequirementsError{Subject: fmt.Sprintf("command %q", name), Missing: capabilityNames(order)}
+		}
 		for _, capability := range order {
 			result.Notes = append(result.Notes, fmt.Sprintf("installing required capability %q", capability.Name))
 			if err := p.installCapability(capability); err != nil {

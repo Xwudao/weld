@@ -13,7 +13,7 @@ import (
 // addCommand plans and applies `weld add command <name>`.
 func addCommand(t *testing.T, dir, name string) *Result {
 	t.Helper()
-	result, err := AddCommand(Request{Dir: dir, Catalog: newCatalog()}, name)
+	result, err := AddCommand(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, name)
 	if err != nil {
 		t.Fatalf("AddCommand %s: %v", name, err)
 	}
@@ -26,7 +26,7 @@ func addCommand(t *testing.T, dir, name string) *Result {
 // addModuleWithCommand plans and applies `weld add module <name> --command`.
 func addModuleWithCommand(t *testing.T, dir, name string) *Result {
 	t.Helper()
-	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), Command: true}, name)
+	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), Command: true, WithDependencies: true}, name)
 	if err != nil {
 		t.Fatalf("AddModule %s --command: %v", name, err)
 	}
@@ -122,7 +122,7 @@ func TestAddCommandIsIdempotent(t *testing.T) {
 	addCommand(t, dir, "orders")
 
 	before := readFile(t, filepath.Join(dir, "internal/commands/orders/command.go"))
-	result, err := AddCommand(Request{Dir: dir, Catalog: newCatalog()}, "orders")
+	result, err := AddCommand(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "orders")
 	if err != nil {
 		t.Fatalf("second AddCommand: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestAddCommandIsDryRunnable(t *testing.T) {
 	dir := create(t, root)
 
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
-	result, err := AddCommand(Request{Dir: dir, Catalog: newCatalog()}, "orders")
+	result, err := AddCommand(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "orders")
 	if err != nil {
 		t.Fatalf("AddCommand: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestAddCommandRejectsReservedNameBeforeWriting(t *testing.T) {
 
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
 	for _, name := range []string{"serve", "help", "version", "Orders"} {
-		if _, err := AddCommand(Request{Dir: dir, Catalog: newCatalog()}, name); err == nil {
+		if _, err := AddCommand(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, name); err == nil {
 			t.Errorf("AddCommand(%q) = nil, want an error", name)
 		}
 	}
@@ -188,7 +188,7 @@ func TestAddCommandRejectsModuleCollision(t *testing.T) {
 	dir := create(t, root)
 	addModule(t, dir, "widget")
 
-	if _, err := AddCommand(Request{Dir: dir, Catalog: newCatalog()}, "widget"); err == nil {
+	if _, err := AddCommand(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "widget"); err == nil {
 		t.Fatal("expected a conflict adding a command for an existing module name")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "internal", "commands", "widget")); !os.IsNotExist(err) {
@@ -197,7 +197,7 @@ func TestAddCommandRejectsModuleCollision(t *testing.T) {
 
 	other := create(t, t.TempDir())
 	addCommand(t, other, "reports")
-	if _, err := AddModule(Request{Dir: other, Catalog: newCatalog()}, "reports"); err == nil {
+	if _, err := AddModule(Request{Dir: other, Catalog: newCatalog(), WithDependencies: true}, "reports"); err == nil {
 		t.Fatal("expected a conflict adding a module for an existing command name")
 	}
 }
@@ -297,7 +297,7 @@ func TestAddModuleCommandIsIdempotent(t *testing.T) {
 	addModuleWithCommand(t, dir, "widget")
 
 	before := readFile(t, filepath.Join(dir, "internal/commands/widget/command.go"))
-	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), Command: true}, "widget")
+	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), Command: true, WithDependencies: true}, "widget")
 	if err != nil {
 		t.Fatalf("second AddModule --command: %v", err)
 	}

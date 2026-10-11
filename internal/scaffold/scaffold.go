@@ -29,6 +29,10 @@ type Request struct {
 	// Command requests the optional Cobra command group for `weld add module
 	// <name> --command`. It is ignored by `weld new` and `weld add <capability>`.
 	Command bool
+	// WithDependencies installs a request's missing requirements in the same plan.
+	// Without it a missing requirement is an error, so `weld add` never installs a
+	// capability the caller did not ask for silently.
+	WithDependencies bool
 }
 
 // Result is a planned scaffold action.
@@ -285,9 +289,10 @@ func (p *planner) finish() error {
 
 // Add plans installing an additive capability into an existing project.
 //
-// Missing requirements are resolved and installed first, so `weld add web`
-// installs the http capability it needs without the user adding it explicitly,
-// and capabilities can be installed in either order.
+// A missing requirement is an error by default, naming the capabilities that
+// would be installed; Request.WithDependencies opts into installing them in the
+// same plan. Capabilities already recorded in the manifest are excluded, so a
+// repeat add is a no-op that only refreshes the generated graph.
 func Add(req Request, name string) (*Result, error) {
 	manifest, err := project.Load(req.Dir)
 	if err != nil {
@@ -301,34 +306,22 @@ func Add(req Request, name string) (*Result, error) {
 		return nil, fmt.Errorf("capability %q is not an additive capability", name)
 	}
 
-	order, err := installOrder(req.Catalog, manifest, requested, map[string]bool{})
+	result := &Result{Dir: req.Dir, Capability: requested}
+	// An installed capability owns its files: a repeat add is a no-op that only
+	// refreshes the generated graph, and it never installs a requirement.
+	if manifest.HasCapability(name) {
+		result.Notes = alreadyInstalledNotes(req.Dir, manifest, requested)
+		return result, reconcileInstalled(req, manifest, result)
+	}
+
+	order, err := requiredCapabilities(req.Catalog, manifest, requested)
 	if err != nil {
 		return nil, err
 	}
-	// Every capability except the bare base CLI is developed on Loom: adding
-	// anything plans Loom (and the config it requires) unless it is already
-	// installed, so a project is always either the base CLI or a Loom project.
-	// http and the capabilities that require it pull Loom through the dependency
-	// graph; this covers config, the one leaf Loom itself requires.
-	if !manifest.HasCapability("loom") && !containsCapability(order, "loom") {
-		loomCapability, err := req.Catalog.Get("loom")
-		if err != nil {
-			return nil, err
-		}
-		loomOrder, err := installOrder(req.Catalog, manifest, loomCapability, selected(order))
-		if err != nil {
-			return nil, err
-		}
-		order = append(order, loomOrder...)
-	}
-	result := &Result{Dir: req.Dir, Capability: requested}
-	if len(order) == 0 {
-		result.Notes = alreadyInstalledNotes(req.Dir, manifest, requested)
-		// An installed set that did not grow can still be out of date: the
-		// generated graph follows the current templates, so re-adding an installed
-		// capability refreshes di.go and di_test.go for a project scaffolded by an
-		// older weld. Nothing is planned when the rendered graph already matches.
-		return result, reconcileInstalled(req, manifest, result)
+	// Dependencies are never installed silently: a missing requirement is an
+	// error unless the caller opted in with WithDependencies.
+	if missing := capabilityNamesExcept(order, name); len(missing) > 0 && !req.WithDependencies {
+		return nil, &MissingRequirementsError{Subject: fmt.Sprintf("capability %q", name), Missing: missing}
 	}
 	for _, capability := range order {
 		if capability.Name != requested.Name {

@@ -113,7 +113,7 @@ logging without editing code. `ParseLevel`, `Err` and the
 `WithContext`/`FromContext` pair round out the factory.
 
 `config` is the shared configuration capability, required by `loom` and
-installed automatically with any added capability. It ships `internal/config`:
+installed with any added capability's `--with-dependencies`. It ships `internal/config`:
 typed Go structs, a loader
 with injectable `readFile`/`lookupEnv` dependencies, and a redacting `Secret`
 type. Configuration is `config.yml`, read from the working directory by default
@@ -162,7 +162,8 @@ ordinary build, test or serve needs no Redis server; `weld add redis` never wire
 Redis into a service.
 
 `loom` requires `config` and is the foundation: every capability except the bare
-`base` CLI requires it directly or through `http`, so `weld add` installs it and
+`base` CLI requires it directly or through `http`, so
+`weld add <capability> --with-dependencies` installs it and
 a project is always either the base CLI or a Loom project. It renders
 `internal/di/di.go` against the installed capability set and generates
 `internal/di/loom_gen.go` with the real pinned generator, so the graph follows
@@ -198,8 +199,8 @@ its own seam once, so the install order does not matter.
 ## Configuration
 
 `config` is a first-class, shared capability: `loom` requires it and every added
-capability requires `loom`, so any `weld add` installs it and the user never adds
-it by hand. `base` stays a minimal CLI with no configuration and no `config.yml`.
+capability requires `loom`, so `--with-dependencies` installs it and the user
+never adds it by hand. `base` stays a minimal CLI with no configuration and no `config.yml`.
 
 `internal/config` holds typed Go structs (`Config`, `HTTP`, `Database`) with
 `yaml` tags for names only — there are no validation tags. `Loader.Load` reads
@@ -312,8 +313,9 @@ A capability descriptor is JSON:
   as `# weld:web:begin` / `# weld:web:end` that the owning capability places in
   a file. `weld` never performs arbitrary text replacement.
 - `requires` lists capabilities that must be installed first. `weld add`
-  resolves them automatically, so the order in which a user adds capabilities
-  does not matter.
+  reports a missing requirement as an error by default; `--with-dependencies`
+  installs the chain, so a user controls the install and the order in which they
+  add capabilities does not matter.
 
 Two optional fields let a payload vary with the installed set:
 
@@ -430,8 +432,8 @@ name into the paths and the package, the constructor names and the URL segment.
 The payload generates `internal/modules/<name>`: a typed request and response,
 a `Service` interface with a `NewService` seam and an always zero-argument
 `NewDemoService` fallback, a Go `net/http` handler, an `httptest`-driven test
-and a README. `weld add module` installs `http` (and the `loom` and `config` it
-requires), and the regenerated `internal/di` graph provides `<name>.NewService`
+and a README. `weld add module --with-dependencies` installs `http` (and the
+`loom` and `config` it requires), and the regenerated `internal/di` graph provides `<name>.NewService`
 and registers the module on the composed mux — no separate route file is
 written. Because the graph binds `NewService`, it may take a dependency (for
 example `NewService(repo data.Repository)` after `weld add db` and registering
@@ -456,7 +458,8 @@ command group in `internal/commands/<name>` plus one registration file in
 `internal/app/<name>_command.go`:
 
 - `generic` — the independent group written by `weld add command <name>`: no
-  HTTP or database dependency (it installs `loom` and `config`), showing help on
+  HTTP or database dependency (it requires `loom` and `config`; `--with-dependencies`
+  installs them), showing help on
   a bare invocation.
 - `module` — the group written by `weld add module <name> --command`: backed by
   the module package's `Service` interface and `NewService` constructor, so the

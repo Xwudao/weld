@@ -41,8 +41,9 @@ func ValidateModuleName(name string) error {
 // package with a typed request/response and a Service seam, registered on the
 // HTTP surface under /api/<name>.
 //
-// It installs http, and the config that http requires, automatically when
-// absent. With Loom installed the module is wired through the regenerated
+// It requires http (and the loom and config http requires). A missing
+// requirement is an error by default; Request.WithDependencies installs it in
+// the same plan. With Loom installed the module is wired through the regenerated
 // dependency graph; without Loom, through a httpserver route and the weld:routes
 // extension point. The module files are written once and recorded in the
 // manifest under module:<name>, so a later `weld add` never rewrites them.
@@ -96,6 +97,9 @@ func AddModule(req Request, name string) (*Result, error) {
 	order, err := installOrder(req.Catalog, manifest, httpCapability, map[string]bool{})
 	if err != nil {
 		return nil, err
+	}
+	if len(order) > 0 && !req.WithDependencies {
+		return nil, &MissingRequirementsError{Subject: fmt.Sprintf("module %q", name), Missing: capabilityNames(order)}
 	}
 	for _, capability := range order {
 		result.Notes = append(result.Notes, fmt.Sprintf("installing required capability %q", capability.Name))

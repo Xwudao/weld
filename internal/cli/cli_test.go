@@ -79,7 +79,7 @@ func TestNewAddListLifecycle(t *testing.T) {
 		t.Fatalf("list output = %q", listOut)
 	}
 
-	if _, err := run(t, "add", "web", "--dir", project); err != nil {
+	if _, err := run(t, "add", "web", "--with-dependencies", "--dir", project); err != nil {
 		t.Fatalf("add web: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(project, "web", "package.json")); err != nil {
@@ -91,7 +91,7 @@ func TestNewAddListLifecycle(t *testing.T) {
 	}
 
 	// Repeating add is a no-op that still succeeds.
-	out, err := run(t, "add", "web", "--dir", project)
+	out, err := run(t, "add", "web", "--with-dependencies", "--dir", project)
 	if err != nil {
 		t.Fatalf("repeat add: %v", err)
 	}
@@ -107,10 +107,10 @@ func TestAddHTTPThenWebInstallsEachOnce(t *testing.T) {
 	}
 	project := filepath.Join(root, "demo")
 
-	if _, err := run(t, "add", "http", "--dir", project); err != nil {
+	if _, err := run(t, "add", "http", "--with-dependencies", "--dir", project); err != nil {
 		t.Fatalf("add http: %v", err)
 	}
-	out, err := run(t, "add", "web", "--dir", project)
+	out, err := run(t, "add", "web", "--with-dependencies", "--dir", project)
 	if err != nil {
 		t.Fatalf("add web: %v", err)
 	}
@@ -129,6 +129,33 @@ func TestAddHTTPThenWebInstallsEachOnce(t *testing.T) {
 	}
 }
 
+func TestAddMissingDependenciesRequiresFlag(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err := run(t, "add", "web", "--dir", dir)
+	if err == nil {
+		t.Fatalf("add web without --with-dependencies succeeded: %q", out)
+	}
+	if !strings.Contains(err.Error(), "with-dependencies") {
+		t.Fatalf("error does not name the opt-in flag: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "internal", "httpserver")); !os.IsNotExist(statErr) {
+		t.Fatal("a failed add wrote the requirement's files")
+	}
+
+	out, err = run(t, "add", "web", "--with-dependencies", "--dir", dir)
+	if err != nil {
+		t.Fatalf("add web --with-dependencies: %v", err)
+	}
+	if !strings.Contains(out, "internal/httpserver/http.go") {
+		t.Fatalf("add web output = %q", out)
+	}
+}
+
 func TestAddDBInstallsWithoutHTTP(t *testing.T) {
 	root := t.TempDir()
 	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
@@ -136,7 +163,7 @@ func TestAddDBInstallsWithoutHTTP(t *testing.T) {
 	}
 	dir := filepath.Join(root, "demo")
 
-	out, err := run(t, "add", "db", "--dir", dir)
+	out, err := run(t, "add", "db", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("add db: %v", err)
 	}
@@ -154,7 +181,7 @@ func TestAddDBInstallsWithoutHTTP(t *testing.T) {
 	}
 
 	// Repeating add is a no-op that still succeeds.
-	out, err = run(t, "add", "db", "--dir", dir)
+	out, err = run(t, "add", "db", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("repeat add: %v", err)
 	}
@@ -178,7 +205,7 @@ func TestAddRedisInstallsConfigOnly(t *testing.T) {
 	}
 	dir := filepath.Join(root, "demo")
 
-	out, err := run(t, "add", "redis", "--dir", dir)
+	out, err := run(t, "add", "redis", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("add redis: %v", err)
 	}
@@ -212,7 +239,7 @@ func TestAddRedisInstallsConfigOnly(t *testing.T) {
 	}
 
 	// Repeating add is a no-op that still succeeds.
-	out, err = run(t, "add", "redis", "--dir", dir)
+	out, err = run(t, "add", "redis", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("repeat add: %v", err)
 	}
@@ -265,7 +292,7 @@ func TestSkillsFreshGenerationAndRepeat(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 	dir := filepath.Join(root, "demo")
-	if _, err := run(t, "add", "http", "--dir", dir); err != nil {
+	if _, err := run(t, "add", "http", "--with-dependencies", "--dir", dir); err != nil {
 		t.Fatalf("add http: %v", err)
 	}
 
@@ -379,7 +406,7 @@ func TestSkillsTracksCapabilityChanges(t *testing.T) {
 		t.Fatalf("base project claims db is installed:\n%s", before)
 	}
 
-	if _, err := run(t, "add", "db", "--dir", dir); err != nil {
+	if _, err := run(t, "add", "db", "--with-dependencies", "--dir", dir); err != nil {
 		t.Fatalf("add db: %v", err)
 	}
 	out, err := run(t, "skills", "--dir", dir)
@@ -411,7 +438,7 @@ func TestSkillsRefusesEditedFileAfterCapabilityAdd(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# user-owned\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run(t, "add", "http", "--dir", dir); err != nil {
+	if _, err := run(t, "add", "http", "--with-dependencies", "--dir", dir); err != nil {
 		t.Fatalf("add http: %v", err)
 	}
 	if _, err := run(t, "skills", "--dir", dir); err == nil {
@@ -425,7 +452,7 @@ func TestSkillsDoesNotLeakConfigSecrets(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 	dir := filepath.Join(root, "demo")
-	if _, err := run(t, "add", "http", "--dir", dir); err != nil {
+	if _, err := run(t, "add", "http", "--with-dependencies", "--dir", dir); err != nil {
 		t.Fatalf("add http: %v", err)
 	}
 	configPath := filepath.Join(dir, "config.yml")
@@ -463,7 +490,7 @@ func TestAddModuleCommand(t *testing.T) {
 	}
 	dir := filepath.Join(root, "demo")
 
-	out, err := run(t, "add", "module", "widget", "--dir", dir)
+	out, err := run(t, "add", "module", "widget", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("add module: %v", err)
 	}
@@ -479,7 +506,7 @@ func TestAddModuleCommand(t *testing.T) {
 	}
 
 	// Repeating add is a no-op that still succeeds.
-	out, err = run(t, "add", "module", "widget", "--dir", dir)
+	out, err = run(t, "add", "module", "widget", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("repeat add module: %v", err)
 	}
@@ -497,10 +524,10 @@ func TestAddModuleCommand(t *testing.T) {
 	}
 
 	// A bad name and a missing name are rejected.
-	if _, err := run(t, "add", "module", "api", "--dir", dir); err == nil {
+	if _, err := run(t, "add", "module", "api", "--with-dependencies", "--dir", dir); err == nil {
 		t.Fatal("expected add module api to fail")
 	}
-	if _, err := run(t, "add", "module", "--dir", dir); err == nil {
+	if _, err := run(t, "add", "module", "--with-dependencies", "--dir", dir); err == nil {
 		t.Fatal("expected add module without a name to fail")
 	}
 }
@@ -512,7 +539,7 @@ func TestAddModuleDryRunWritesNothing(t *testing.T) {
 	}
 	dir := filepath.Join(root, "demo")
 
-	out, err := run(t, "add", "module", "widget", "--dir", dir, "--dry-run")
+	out, err := run(t, "add", "module", "widget", "--with-dependencies", "--dir", dir, "--dry-run")
 	if err != nil {
 		t.Fatalf("add module --dry-run: %v", err)
 	}
@@ -662,7 +689,7 @@ func TestAddCommandSubcommand(t *testing.T) {
 	}
 	dir := filepath.Join(root, "demo")
 
-	out, err := run(t, "add", "command", "orders", "--dir", dir)
+	out, err := run(t, "add", "command", "orders", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("add command: %v", err)
 	}
@@ -678,7 +705,7 @@ func TestAddCommandSubcommand(t *testing.T) {
 	}
 
 	// Repeating add is a no-op that still succeeds.
-	out, err = run(t, "add", "command", "orders", "--dir", dir)
+	out, err = run(t, "add", "command", "orders", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("repeat add command: %v", err)
 	}
@@ -696,10 +723,10 @@ func TestAddCommandSubcommand(t *testing.T) {
 	}
 
 	// A reserved name and a missing name are rejected.
-	if _, err := run(t, "add", "command", "serve", "--dir", dir); err == nil {
+	if _, err := run(t, "add", "command", "serve", "--with-dependencies", "--dir", dir); err == nil {
 		t.Fatal("expected add command serve to fail")
 	}
-	if _, err := run(t, "add", "command", "--dir", dir); err == nil {
+	if _, err := run(t, "add", "command", "--with-dependencies", "--dir", dir); err == nil {
 		t.Fatal("expected add command without a name to fail")
 	}
 }
@@ -711,7 +738,7 @@ func TestAddModuleWithCommandFlag(t *testing.T) {
 	}
 	dir := filepath.Join(root, "demo")
 
-	out, err := run(t, "add", "module", "widget", "--command", "--dir", dir)
+	out, err := run(t, "add", "module", "widget", "--command", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("add module --command: %v", err)
 	}
@@ -725,7 +752,7 @@ func TestAddModuleWithCommandFlag(t *testing.T) {
 	}
 
 	// Repeating is a no-op.
-	out, err = run(t, "add", "module", "widget", "--command", "--dir", dir)
+	out, err = run(t, "add", "module", "widget", "--command", "--with-dependencies", "--dir", dir)
 	if err != nil {
 		t.Fatalf("repeat add module --command: %v", err)
 	}
@@ -741,7 +768,7 @@ func TestAddModuleCommandDryRunWritesNothing(t *testing.T) {
 	}
 	dir := filepath.Join(root, "demo")
 
-	out, err := run(t, "add", "module", "widget", "--command", "--dir", dir, "--dry-run")
+	out, err := run(t, "add", "module", "widget", "--command", "--with-dependencies", "--dir", dir, "--dry-run")
 	if err != nil {
 		t.Fatalf("add module --command --dry-run: %v", err)
 	}

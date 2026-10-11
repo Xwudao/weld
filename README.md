@@ -8,7 +8,7 @@ frontend together, and `weld build` builds the frontend and cross-compiles the
 binary, both configured by the optional, user-owned `weld.yml`.
 
 Install the latest patch release with Go 1.23 or newer (the tool itself builds on Go
-1.23; a generated project that adds any capability installs Loom and raises its
+1.23; a generated project that adds a capability installs Loom and raises its
 Go directive to `go 1.25.0`):
 
 ```bash
@@ -18,7 +18,7 @@ go install github.com/Xwudao/weld/cmd/weld@v0.2.1
 ```bash
 weld new demo          # minimal Go CLI: Cobra command tree, version + help
 cd demo
-weld add web           # installs http, then the React + TS + Vite frontend
+weld add web --with-dependencies  # installs http (and loom, config), then the frontend
 weld add module items  # JSON business module: typed handlers, DTO validation, {code,msg,data}
 weld add db            # PostgreSQL: SQL migrations + sqlc, pool and repository
 weld config example    # print the optional, user-owned weld.yml starter
@@ -86,8 +86,8 @@ Capabilities:
   `Secret` type. `environment` (overridden by `APP_ENV`) is `local`,
   `development`, `test` or `production`; it gates development conveniences only
   — currently logging the composed route table at startup — and carries no
-  security weight. Installed automatically with `loom`, which every added
-  capability requires.
+  security weight. Required by `loom`, which every added capability requires,
+  so `--with-dependencies` installs it too.
 - `http` (add) — HTTP server lifecycle, the shared `internal/httpx` toolkit, a
   composable handler builder, and the single `serve` command. Requires `loom`.
   The toolkit owns the `{code,msg,data}` response envelope, the `Router` with
@@ -130,12 +130,15 @@ Capabilities:
   configuration, the logger and the installed `db`/`redis`/`mail`/`storage`
   bindings; once `http` is installed it also declares the server graph (the HTTP
   server, the business modules and the cron scheduler)
-  with lifecycle start/stop. Requires `config` and is installed automatically:
-  every `weld add` produces a Loom project.
+  with lifecycle start/stop. Requires `config`, and every capability beyond the
+  bare CLI requires Loom, so `weld add <capability> --with-dependencies`
+  installs Loom and the shared loader with it.
 
-`loom` requires `config`, and every capability requires `loom`, so any
-`weld add` installs Loom and the shared loader together and the user never adds
-`config` by hand. On a fresh project it generates the local `config.yml`
+Requirements are never installed silently. `weld add <capability>` on a project
+that lacks one of its requirements fails and names the missing capabilities;
+`--with-dependencies` installs the whole chain in the same plan. `loom` requires
+`config`, and every capability requires `loom`, so the opt-in installs Loom and
+the shared loader together and the user never adds `config` by hand. On a fresh project it generates the local `config.yml`
 (git-ignored) from the committed `config.example.yml` and appends only the
 section the capability needs. Adding another capability later merges its section
 into the same file without clobbering the user's edits. On a fresh clone the
@@ -159,15 +162,17 @@ changes the installed set.
 `weld add module <name>` is separate from the capability set: it generates one
 HTTP business module under `internal/modules/<name>` and registers it under
 `/api/<name>` on the Loom server graph (see
-[`weld add module`](#weld-add-module-stage-5)). It installs `http` (and the
-`loom` and `config` it requires) automatically when absent. With `--command` it
+[`weld add module`](#weld-add-module-stage-5)). It requires `http` (and the
+`loom` and `config` it requires); a missing requirement is an error unless
+`--with-dependencies` is given. With `--command` it
 also generates a root command group backed by the module's own `Service` (see
 [`weld add command`](#weld-add-command-stage-2b)).
 
 `weld add command <name>` is likewise separate from the capability set: it
 generates an independent root command group under `internal/commands/<name>`,
 registered through the base app's `RegisterCommand` seam, with no HTTP or
-database requirement. It installs `loom` (and `config`) automatically and
+database requirement. It requires `loom` (and `config`, which Loom requires); a
+missing requirement is an error unless `--with-dependencies` is given, and it
 resolves the group's dependencies from its own Loom graph only when a real
 subcommand runs.
 
@@ -192,11 +197,13 @@ manifest's `modules`) without touching the capability list.
 
 Capabilities are also **independent and dependency-resolved**. `weld new`
 produces a bare CLI that builds and runs with no Loom, no configuration, no HTTP
-server, no database, no Redis and no frontend. Any `weld add` installs `loom` and
-`config`; `web` and a business module each require `http` (which requires
+server, no database, no Redis and no frontend. A capability's requirements are
+not installed silently: `weld add <capability>` reports the missing
+requirements and `--with-dependencies` installs the chain. `web` and a business
+module each require `http` (which requires
 `loom`), so
-`weld add web` or `weld add module <name>` installs the server stack first
-automatically
+`weld add web --with-dependencies` or
+`weld add module <name> --with-dependencies` installs the server stack first
 and the user never has to know the order. `web` and a module can be added in
 either
 order and share the one serve path. `db`, `redis`, `mail` and `storage` require
@@ -416,8 +423,9 @@ only in memory.
 - **Name validation.** `<name>` must be a canonical lower-case Go package name
   and URL segment. A Go keyword and the reserved name `api` (the root of the
   module URL space) are rejected, as is a module already installed.
-- **Dependency install.** It installs `http` (and the `loom` and `config` it
-  requires) automatically when absent, so it works on a fresh CLI project.
+- **Dependency install.** It requires `http` (and the `loom` and `config` it
+  requires); a missing requirement is an error unless `--with-dependencies` is
+  given, so it works on a fresh CLI project with that flag.
 - **Ownership.** Every module file is recorded in `weld.json` under
   `module:<name>`, and the module is recorded in the manifest's `modules` list.
   The files are written once and never regenerated, so your edits survive later
@@ -459,8 +467,9 @@ module's `Service` lazily through it (see
 non-business or multi-business commands:
 
 - **Independent.** It needs no HTTP server and no database, so it can be added
-  to a fresh CLI project; it installs `loom` (and `config`) and records a
-  command-specific graph. It starts no server and never starts the cron
+  to a fresh CLI project; it requires `loom` (and `config`, which Loom requires),
+  which `--with-dependencies` installs, and records a command-specific graph. It
+  starts no server and never starts the cron
   scheduler: a bare `__name__ <name>` shows the group's help.
 - **Ownership.** `internal/commands/<name>/command.go` and the registration file
   `internal/app/<name>_command.go` are written once and recorded in `weld.json`

@@ -162,7 +162,7 @@ func TestAddCommandOnBaseIsAtomicOnConflict(t *testing.T) {
 	}
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
 
-	_, err := AddCommand(Request{Dir: dir, Catalog: newCatalog()}, "orders")
+	_, err := AddCommand(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "orders")
 	if err == nil {
 		t.Fatal("expected a conflict for the unmanaged command file")
 	}

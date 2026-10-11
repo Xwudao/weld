@@ -42,7 +42,7 @@ func create(t *testing.T, root string) string {
 
 func add(t *testing.T, dir, name string) *Result {
 	t.Helper()
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, name)
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, name)
 	if err != nil {
 		t.Fatalf("Add %s: %v", name, err)
 	}
@@ -333,7 +333,7 @@ func TestAddWebIsIdempotent(t *testing.T) {
 	httpBefore := readFile(t, filepath.Join(dir, "internal/httpserver/http.go"))
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
 
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "web")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "web")
 	if err != nil {
 		t.Fatalf("second Add: %v", err)
 	}
@@ -365,8 +365,86 @@ func TestAddRejectsNonAdditiveCapability(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
-	if _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "base"); err == nil {
+	if _, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "base"); err == nil {
 		t.Fatal("expected error adding the base capability")
+	}
+}
+
+// TestAddMissingRequirementErrorsByDefault proves a missing requirement is an
+// error rather than an implicit install, and that the error names every
+// capability that would be installed and the opt-in flag. Nothing is written.
+func TestAddMissingRequirementErrorsByDefault(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+
+	makefileBefore := readFile(t, filepath.Join(dir, "Makefile"))
+	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
+
+	_, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "web")
+	missing, ok := err.(*MissingRequirementsError)
+	if !ok {
+		t.Fatalf("Add web error = %v, want *MissingRequirementsError", err)
+	}
+	if got, want := strings.Join(missing.Missing, ","), "config,loom,http"; got != want {
+		t.Fatalf("missing = %q, want %q", got, want)
+	}
+	if !strings.Contains(err.Error(), "--with-dependencies") {
+		t.Fatalf("error does not name the opt-in flag: %v", err)
+	}
+	if !strings.Contains(err.Error(), `"http"`) {
+		t.Fatalf("error does not name the missing capability: %v", err)
+	}
+	if readFile(t, filepath.Join(dir, "Makefile")) != makefileBefore {
+		t.Fatal("a failed add wrote the Makefile")
+	}
+	if readFile(t, filepath.Join(dir, project.ManifestName)) != manifestBefore {
+		t.Fatal("a failed add wrote the manifest")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "internal/httpserver")); !os.IsNotExist(statErr) {
+		t.Fatal("a failed add wrote a requirement's files")
+	}
+}
+
+// TestAddWithDependenciesInstallsRequirements proves the opt-in installs the
+// whole dependency chain in install order.
+func TestAddWithDependenciesInstallsRequirements(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "web")
+	if err != nil {
+		t.Fatalf("Add web --with-dependencies: %v", err)
+	}
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http,web"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, path := range []string{"internal/config/config.go", "internal/di/di.go", "internal/httpserver/http.go"} {
+		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
+			t.Errorf("expected %s: %v", path, err)
+		}
+	}
+}
+
+// TestAddInstalledRequirementSkipsTheCheck proves the check looks at the
+// installed set, not the capability declaration: once a requirement is
+// installed, the dependent capability adds without the flag.
+func TestAddInstalledRequirementSkipsTheCheck(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "http")
+
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "web")
+	if err != nil {
+		t.Fatalf("Add web with http installed: %v", err)
+	}
+	if got, want := strings.Join(result.Installed, ","), "web"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
 	}
 }
 
@@ -386,7 +464,7 @@ func TestAddWebRejectsUnmanagedFile(t *testing.T) {
 	makefileBefore := readFile(t, filepath.Join(dir, "Makefile"))
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
 
-	if _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "web"); err == nil {
+	if _, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "web"); err == nil {
 		t.Fatal("expected conflict for unmanaged file")
 	}
 
@@ -406,7 +484,7 @@ func TestAddWebRejectsUnmanagedFile(t *testing.T) {
 
 func TestAddRequiresWeldProject(t *testing.T) {
 	t.Parallel()
-	if _, err := Add(Request{Dir: t.TempDir(), Catalog: newCatalog()}, "web"); err == nil {
+	if _, err := Add(Request{Dir: t.TempDir(), Catalog: newCatalog(), WithDependencies: true}, "web"); err == nil {
 		t.Fatal("expected error for non-project directory")
 	}
 }
@@ -419,7 +497,7 @@ func TestAddIsDryRunnable(t *testing.T) {
 	makefileBefore := readFile(t, filepath.Join(dir, "Makefile"))
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
 
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "web")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "web")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -652,7 +730,7 @@ func TestAddDBIsIdempotent(t *testing.T) {
 	goModBefore := readFile(t, filepath.Join(dir, "go.mod"))
 	makefileBefore := readFile(t, filepath.Join(dir, "Makefile"))
 
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "db")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "db")
 	if err != nil {
 		t.Fatalf("second Add: %v", err)
 	}
@@ -694,7 +772,7 @@ func TestAddDBRejectsUnmanagedFile(t *testing.T) {
 	}
 
 	makefileBefore := readFile(t, filepath.Join(dir, "Makefile"))
-	if _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "db"); err == nil {
+	if _, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "db"); err == nil {
 		t.Fatal("expected conflict for unmanaged file")
 	}
 	if readFile(t, userFile) != "-- mine\n" {
@@ -716,7 +794,7 @@ func TestAddDBIsDryRunnable(t *testing.T) {
 	makefileBefore := readFile(t, filepath.Join(dir, "Makefile"))
 	goModBefore := readFile(t, filepath.Join(dir, "go.mod"))
 
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "db")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "db")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -1067,7 +1145,7 @@ func TestAddLoomIsIdempotent(t *testing.T) {
 	for _, path := range []string{"internal/di/di.go", "go.mod", project.ManifestName} {
 		before[path] = readFile(t, filepath.Join(dir, path))
 	}
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "loom")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "loom")
 	if err != nil {
 		t.Fatalf("second Add: %v", err)
 	}
@@ -1130,7 +1208,7 @@ func TestAddLoomReconcileRestoresMissingRepositoryProviderSeam(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "loom")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "loom")
 	if err != nil {
 		t.Fatalf("reconcile loom: %v", err)
 	}
@@ -1762,7 +1840,7 @@ func TestAddConfigRestoreReportsAMissingOrCorruptExample(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "http")
+			_, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "http")
 			if err == nil {
 				t.Fatal("expected an error when the tracked example cannot restore config.yml")
 			}
@@ -1800,7 +1878,7 @@ func TestAddDoesNotBootstrapUnmanagedConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, project.ManifestName), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err = Add(Request{Dir: dir, Catalog: newCatalog()}, "http")
+	_, err = Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "http")
 	if err == nil || !strings.Contains(err.Error(), "not managed by weld") {
 		t.Fatalf("Add(http) with unmanaged missing config error = %v", err)
 	}
@@ -2126,7 +2204,7 @@ func TestAddRedisIsIdempotent(t *testing.T) {
 	for _, path := range []string{"internal/config/config.go", "config.yml", "config.example.yml", "go.mod", project.ManifestName} {
 		before[path] = readFile(t, filepath.Join(dir, path))
 	}
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "redis")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "redis")
 	if err != nil {
 		t.Fatalf("second Add: %v", err)
 	}
@@ -2155,7 +2233,7 @@ func TestAddRedisIsDryRunnable(t *testing.T) {
 	examplePath := filepath.Join(dir, "config.example.yml")
 	goModBefore := readFile(t, filepath.Join(dir, "go.mod"))
 
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "redis")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "redis")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -2305,7 +2383,7 @@ func TestAddRedisRejectsConfigWithoutExtensionPoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "redis")
+	_, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "redis")
 	if err == nil {
 		t.Fatal("expected an error when the config extension point is missing")
 	}

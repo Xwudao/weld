@@ -12,7 +12,7 @@ import (
 // addModule plans and applies `weld add module <name>`.
 func addModule(t *testing.T, dir, name string) *Result {
 	t.Helper()
-	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, name)
+	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, name)
 	if err != nil {
 		t.Fatalf("AddModule %s: %v", name, err)
 	}
@@ -112,7 +112,7 @@ func TestAddModuleIsIdempotent(t *testing.T) {
 	for _, path := range []string{"internal/modules/widget/module.go", "internal/httpserver/http.go", project.ManifestName} {
 		before[path] = readFile(t, filepath.Join(dir, path))
 	}
-	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "widget")
+	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "widget")
 	if err != nil {
 		t.Fatalf("second AddModule: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestAddModuleIsDryRunnable(t *testing.T) {
 	dir := create(t, root)
 
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
-	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "widget")
+	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "widget")
 	if err != nil {
 		t.Fatalf("AddModule: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestAddModuleRejectsInvalidNameBeforeWriting(t *testing.T) {
 	dir := create(t, root)
 
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
-	if _, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "api"); err == nil {
+	if _, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "api"); err == nil {
 		t.Fatal("expected an error for a reserved module name")
 	}
 	if readFile(t, filepath.Join(dir, project.ManifestName)) != manifestBefore {
@@ -186,7 +186,7 @@ func TestAddModuleRefusesUnmanagedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "widget"); err == nil {
+	if _, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "widget"); err == nil {
 		t.Fatal("expected a conflict for an unmanaged module file")
 	}
 	if got := readFile(t, userFile); got != "package widget\n" {
