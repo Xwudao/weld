@@ -203,6 +203,28 @@ func (p *planner) planNewFile(path, capability string, content []byte) error {
 	return nil
 }
 
+// planMarker inserts a snippet into the named marker region of a managed file,
+// keyed by capability for idempotency. It is the dynamic counterpart of
+// applyPatch for a per-name addition that has no capability payload: the snippet
+// is built in code and recorded under owner.
+func (p *planner) planMarker(path, marker, capability, owner string, snippet []byte) error {
+	original, bootstrapped, err := patchTarget(p.req.Dir, template.Patch{Path: path, Marker: marker}, p.planned, p.manifest)
+	if err != nil {
+		return err
+	}
+	updated, already, err := project.PatchMarker(original, marker, capability, snippet)
+	if err != nil {
+		return &project.ConflictError{Path: path, Reason: err.Error()}
+	}
+	if already && !bootstrapped {
+		return nil
+	}
+	p.planned[path] = updated
+	p.upsert(project.Operation{Path: path, Content: updated, Overwrite: true})
+	p.manifest.SetFile(path, owner, updated)
+	return nil
+}
+
 // installCapability plans one capability's files and patches, then records it.
 func (p *planner) installCapability(capability *template.Capability) error {
 	p.present[capability.Name] = true

@@ -1,25 +1,26 @@
 package seeder
 
-import (
-	"context"
-	"errors"
-
-	"__module__/internal/data"
-)
-
 // Register installs __name__'s seeders on r. It is the stable, user-editable
 // seam: `weld add seed` writes this file once and never regenerates it, so the
 // seeders you add here survive every later `weld add`.
 //
-// Installing seed writes no data by itself: `seed` runs only what is registered
-// here. The shipped example seeds the items table `weld add db` creates, through
-// the data.Repository the seed graph injects. Add one seeder per repository you
-// consume:
+// Keep this file a short index. Each seeder lives in its own seed_<name>.go file
+// in this package and is registered here, so the run order is readable in one
+// place:
 //
+//	// internal/data/seeder/seed_users.go
+//	func seedUsers(ctx context.Context, deps *Deps) error { ... }
+//
+//	// internal/data/seeder/register.go
 //	func Register(r *Registry) {
 //		r.Register("items", seedItems)
 //		r.Register("users", seedUsers)
 //	}
+//
+// Seeders run in registration order and stop at the first error. Installing
+// seed writes no data by itself: `seed` runs only what is registered here. The
+// shipped example in seed_items.go seeds the items table `weld add db` creates,
+// through the data.Repository the seed graph injects.
 //
 // A seeder must be idempotent, because seed keeps no ledger and running it twice
 // re-runs every seeder. The example checks for an existing row before inserting;
@@ -27,25 +28,11 @@ import (
 // alternative. For generated fake data, use a third-party library such as
 // github.com/brianvoe/gofakeit/v7 — weld deliberately ships no faker dependency.
 func Register(r *Registry) {
+	// weld:seeders:begin
+	// Seeders are registered here, in run order. `weld add seed <name>` appends
+	// one registration below; edit or reorder them freely, weld only ever
+	// appends. Each function lives in its own seed_<name>.go file beside this
+	// one.
 	r.Register("items", seedItems)
-}
-
-// seedItems is the shipped example seeder. It is idempotent: it inserts each
-// item only when its id is absent, so `seed` and `make seed` can run repeatedly.
-func seedItems(ctx context.Context, deps *Deps) error {
-	items := []data.Item{
-		{ID: "seed-item-1", Name: "example item", Quantity: 1, Status: "active"},
-		{ID: "seed-item-2", Name: "sample item", Quantity: 2, Status: "active"},
-	}
-	for _, item := range items {
-		if _, err := deps.Items.GetItem(ctx, item.ID); err == nil {
-			continue
-		} else if !errors.Is(err, data.ErrNotFound) {
-			return err
-		}
-		if _, err := deps.Items.CreateItem(ctx, item); err != nil {
-			return err
-		}
-	}
-	return nil
+	// weld:seeders:end
 }

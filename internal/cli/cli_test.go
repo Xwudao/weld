@@ -129,6 +129,43 @@ func TestAddHTTPThenWebInstallsEachOnce(t *testing.T) {
 	}
 }
 
+func TestAddSeederSubcommand(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	// With no name the seed subcommand installs the capability and its chain.
+	if _, err := run(t, "add", "seed", "--with-dependencies", "--dir", dir); err != nil {
+		t.Fatalf("add seed: %v", err)
+	}
+
+	out, err := run(t, "add", "seed", "users", "--dir", dir)
+	if err != nil {
+		t.Fatalf("add seed users: %v", err)
+	}
+	if !strings.Contains(out, "internal/data/seeder/seed_users.go") {
+		t.Fatalf("add seed users output = %q", out)
+	}
+	register, err := os.ReadFile(filepath.Join(dir, "internal", "data", "seeder", "register.go"))
+	if err != nil {
+		t.Fatalf("read register.go: %v", err)
+	}
+	if !strings.Contains(string(register), `r.Register("users", seedUsers)`) {
+		t.Fatalf("register.go does not register users:\n%s", register)
+	}
+
+	// A repeat is a no-op.
+	out, err = run(t, "add", "seed", "users", "--dir", dir)
+	if err != nil {
+		t.Fatalf("repeat add seed users: %v", err)
+	}
+	if !strings.Contains(out, "already installed") {
+		t.Fatalf("repeat add seed users output = %q", out)
+	}
+}
+
 func TestAddMissingDependenciesRequiresFlag(t *testing.T) {
 	root := t.TempDir()
 	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {

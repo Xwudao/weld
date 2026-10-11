@@ -377,6 +377,7 @@ func TestSeedCapabilityLoads(t *testing.T) {
 	for _, want := range []string{
 		"internal/data/seeder/seeder.go",
 		"internal/data/seeder/register.go",
+		"internal/data/seeder/seed_items.go",
 		"internal/app/seed.go",
 		"internal/di/seed_providers.go",
 	} {

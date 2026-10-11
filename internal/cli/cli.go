@@ -108,14 +108,14 @@ func newAddCommand() *cobra.Command {
 		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("usage: %s add <capability> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]", progName, progName, progName)
+				return fmt.Errorf("usage: %s add <capability> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seed <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]", progName, progName, progName, progName)
 			}
 			return nil
 		},
 		RunE: runAdd,
 	}
 	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
-	cmd.AddCommand(newAddModuleCommand(), newAddCommandSubcommand())
+	cmd.AddCommand(newAddModuleCommand(), newAddCommandSubcommand(), newAddSeederCommand())
 	return cmd
 }
 
@@ -138,6 +138,9 @@ func addHelp() string {
 	}
 	b.WriteString("\nA capability's required capabilities are not installed automatically: a")
 	b.WriteString("\nmissing requirement is an error unless --with-dependencies is given.")
+	b.WriteString("\n\n`weld add seed <name>` writes internal/data/seeder/seed_<name>.go and")
+	b.WriteString("\nregisters it in the seed capability's register.go index; `weld add seed`")
+	b.WriteString("\nwith no name installs the seed capability itself.")
 	b.WriteString("\n\nRun `weld list` to see installed capabilities in this project.")
 	return b.String()
 }
@@ -177,6 +180,49 @@ func newAddCommandSubcommand() *cobra.Command {
 	}
 	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
 	return cmd
+}
+
+// newAddSeederCommand builds `weld add seed [name]`. With no name it installs
+// the seed capability; with a name it writes internal/data/seeder/seed_<name>.go
+// and registers it in the stable register.go index.
+func newAddSeederCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "seed [name]",
+		Short: "install the seed capability, or add a seeder file",
+		Long: "seed with no name installs the seed capability (its requirements still\n" +
+			"apply). seed with a name writes internal/data/seeder/seed_<name>.go and\n" +
+			"registers it in the stable register.go index.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: runAddSeed,
+	}
+	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
+	return cmd
+}
+
+// runAddSeed dispatches `weld add seed` to the capability install and
+// `weld add seed <name>` to the seeder generator.
+func runAddSeed(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return runAdd(cmd, []string{"seed"})
+	}
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+	withDependencies, err := cmd.Flags().GetBool("with-dependencies")
+	if err != nil {
+		return err
+	}
+	result, err := scaffold.AddSeeder(scaffold.Request{Dir: dir, Catalog: template.Load(), WithDependencies: withDependencies}, args[0])
+	if err != nil {
+		return err
+	}
+	return applyAddResult(stdout, result, dryRun)
 }
 
 // newListCommand builds `weld list` (alias `ls`).
@@ -281,6 +327,12 @@ Commands:
   NewDeps (a provider already in the shared module needs no graph edit).
   A name may be a command or a module, never both: serve, help and version are
   reserved, and a name already used by a module is rejected.
+
+Seeders:
+  add seed <name> writes internal/data/seeder/seed_<name>.go and registers it in
+  the seed capability's stable register.go index, so one seeder is one file and
+  the run order stays in one place. With no name, add seed installs the seed
+  capability itself; --with-dependencies installs its db/loom/config chain.
 
 Requirements are not installed silently: weld add <capability> fails when a
 required capability is missing and names it, and --with-dependencies installs

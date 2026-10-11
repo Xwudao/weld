@@ -19,9 +19,23 @@ serving still needs no database credential.
 
 ## Adding a seeder
 
+Seeds are split by file. Each seeder is a `seed_<name>.go` file in this package,
+and `register.go` is the short index that lists them in run order, so adding one
+never touches the others.
+
+Generate the file and its registration with:
+
+```sh
+weld add seed <name>                     # writes seed_<name>.go and registers it
+weld add seed <name> --with-dependencies # also installs db/loom/config/seed
+```
+
+The command validates the name and is idempotent (a repeated add is a no-op).
+Then wire the repository it needs and write the body:
+
 1. Add a repository field to `Deps` (`seeder.go`) if the shipped `Items` is not
-   the repository you need.
-2. Construct it in `internal/di/seed_providers.go`, the stable seam:
+   the repository you need, and construct it in `internal/di/seed_providers.go`,
+   the stable seam:
 
    ```go
    func NewSeedDeps(pool *pgxpool.Pool) *seeder.Deps {
@@ -32,7 +46,16 @@ serving still needs no database credential.
    }
    ```
 
-3. Register the seeder in `register.go` and write it.
+2. Edit the generated `seed_<name>.go` to write the data. Registering it is
+   already done; reorder the lines in `register.go` if the run order matters.
+
+To add one without the generator, copy `seed_items.go` to `seed_<name>.go` and
+add the `r.Register(<name>, seed<Name>)` line to `register.go` yourself.
+
+If a seeder grows enough to want its own package, put it under
+`internal/data/seeder/<name>/` and register a thin wrapper from `register.go`
+(`func seedUsers(ctx context.Context, deps *Deps) error { return users.Seed(ctx, deps) }`);
+the subpackage imports this one for `Deps` and stays testable on its own.
 
 Seeders **must be idempotent**: there is no `seed_runs` ledger, and running seed
 twice re-runs every seeder. Check for an existing row before inserting, or make
@@ -46,5 +69,6 @@ example `github.com/brianvoe/gofakeit/v7` — and call it inside a seeder.
 
 `internal/data/seeder/register.go` and `internal/di/seed_providers.go` are
 written once and never regenerated, so your edits survive every later
-`weld add`. `seeder.go` is also written once. `internal/di/di.go` and
+`weld add`. `seeder.go` and the example `seed_items.go` are also written once;
+add your own `seed_<name>.go` files beside them. `internal/di/di.go` and
 `internal/di/loom_gen.go` are regenerated and must not be edited.

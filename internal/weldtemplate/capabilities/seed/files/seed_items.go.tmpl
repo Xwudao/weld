@@ -1,0 +1,36 @@
+package seeder
+
+import (
+	"context"
+	"errors"
+
+	"__module__/internal/data"
+)
+
+// seedItems is the shipped example seeder, in its own file.
+//
+// Follow the same layout for your own seeders: add one seed_<name>.go file per
+// seeder in this package (for example seed_users.go), define the Seeder
+// function here, and register it in register.go. Splitting them keeps a large
+// seed set readable and lets each seeder be reviewed on its own; the run order
+// stays in one place in register.go.
+//
+// seedItems is idempotent: it inserts each item only when its id is absent, so
+// `seed` and `make seed` can run repeatedly.
+func seedItems(ctx context.Context, deps *Deps) error {
+	items := []data.Item{
+		{ID: "seed-item-1", Name: "example item", Quantity: 1, Status: "active"},
+		{ID: "seed-item-2", Name: "sample item", Quantity: 2, Status: "active"},
+	}
+	for _, item := range items {
+		if _, err := deps.Items.GetItem(ctx, item.ID); err == nil {
+			continue
+		} else if !errors.Is(err, data.ErrNotFound) {
+			return err
+		}
+		if _, err := deps.Items.CreateItem(ctx, item); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -111,7 +111,8 @@ Capabilities:
 - `seed` (add) — opt-in database seeding: named, idempotent seeders run by a
   short `seed` command (`make seed`) over the repositories the Loom seed graph
   injects. Requires `db`; installing it seeds nothing until you register a
-  seeder in `internal/data/seeder/register.go` and wire repositories in
+  seeder. `weld add seed <name>` writes one `seed_<name>.go` per seeder and adds
+  it to `internal/data/seeder/register.go`, and repositories are wired in
   `internal/di/seed_providers.go`.
 - `redis` (add) — an opt-in Redis client with typed connection configuration.
   Requires `loom` but not `http`; installing it never connects Redis to a
