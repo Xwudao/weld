@@ -967,7 +967,7 @@ func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
 	toolsText := string(toolsMod)
 	for _, want := range []string{
 		"tool github.com/Xwudao/loom/cmd/loom",
-		"github.com/Xwudao/loom v0.3.1",
+		"github.com/Xwudao/loom v0.3.2",
 		"__module__/tools/loom",
 	} {
 		if !strings.Contains(toolsText, want) {
@@ -988,7 +988,7 @@ func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read loom go.mod snippet: %v", err)
 	}
-	if !strings.Contains(string(deps), "require github.com/Xwudao/loom v0.3.1") {
+	if !strings.Contains(string(deps), "require github.com/Xwudao/loom v0.3.2") {
 		t.Errorf("loom go.mod snippet does not pin the runtime:\n%s", deps)
 	}
 	if strings.Contains(string(deps), "golang.org/x/tools") {

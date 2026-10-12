@@ -1037,7 +1037,7 @@ func loomToolAvailable(t *testing.T) bool {
 			return
 		}
 		defer os.RemoveAll(dir)
-		gomod := "module weld.test/tools\n\ngo 1.25.0\n\ntool github.com/Xwudao/loom/cmd/loom\n\nrequire github.com/Xwudao/loom v0.3.1\n"
+		gomod := "module weld.test/tools\n\ngo 1.25.0\n\ntool github.com/Xwudao/loom/cmd/loom\n\nrequire github.com/Xwudao/loom v0.3.2\n"
 		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
 			return
 		}
@@ -1121,7 +1121,7 @@ func TestAddLoomInstallsCLIOnlyGraph(t *testing.T) {
 	}
 	// The opt-in Go floor is raised and Loom is a direct dependency.
 	goMod := readFile(t, filepath.Join(dir, "go.mod"))
-	if !strings.Contains(goMod, "go 1.25.0") || !strings.Contains(goMod, "require github.com/Xwudao/loom v0.3.1") {
+	if !strings.Contains(goMod, "go 1.25.0") || !strings.Contains(goMod, "require github.com/Xwudao/loom v0.3.2") {
 		t.Errorf("go.mod is missing the Loom floor/dependency:\n%s", goMod)
 	}
 	manifest := mustLoad(t, dir)
