@@ -1,12 +1,36 @@
 package di
 
 import (
+	"context"
 	"log/slog"
+	"time"
+
+	"github.com/Xwudao/loom"
 
 	"__module__/internal/events"
 )
 
-// NewEventDispatcher is the Loom provider for the application event dispatcher,
+// asyncEvents selects how the application event publisher delivers events. It is
+// the one line to change to opt into asynchronous delivery:
+//
+//   - false (the default) publishes synchronously: Publish runs every listener in
+//     the caller's goroutine and returns their joined errors.
+//   - true publishes through events.Async: Publish enqueues onto a bounded
+//     in-process channel and worker goroutines deliver the events, so a slow
+//     listener no longer slows the caller. Delivery is best effort — a process
+//     that exits drops whatever it has not delivered — and a full queue
+//     backpressures Publish (TryPublish reports events.ErrQueueFull).
+//
+// It is a var rather than a const so both branches stay reachable and the choice
+// survives a `go vet` clean build. Change it here, not in the generated graph,
+// which weld regenerates.
+var asyncEvents = false
+
+// eventShutdownTimeout bounds the asynchronous drain on shutdown. It matches the
+// HTTP server's shutdown timeout so a stuck listener can never hang the process.
+const eventShutdownTimeout = 10 * time.Second
+
+// NewEventDispatcher is the Loom provider for the application event publisher,
 // and this file is the stable integration seam for wiring events into the Loom
 // application.
 //
@@ -14,23 +38,45 @@ import (
 // installed, and never rewrites it while it regenerates the graph (di.go,
 // loom_gen.go): edits below survive every later `weld add`.
 //
-// The dispatcher is an available binding, not part of the default composition:
+// The publisher is an available binding, not part of the default composition:
 // the graph declares NewEventDispatcher, but nothing depends on
-// *events.Dispatcher or events.Publisher, so Loom prunes it and an application
-// that publishes nothing constructs no dispatcher. To use it, make a provider the
+// events.Publisher, so Loom prunes it and an application that publishes nothing
+// constructs no publisher and starts no worker. To use it, make a provider the
 // graph already consumes depend on events.Publisher — for example edit the
 // service.go of one of your business modules so its NewService takes
-// events.Publisher. Loom then constructs the dispatcher and runs
+// events.Publisher. Loom then constructs the publisher and runs
 // internal/events/register.go, so a listener that fails to register fails
 // startup rather than the first publish.
 //
-// Depend on the events.Publisher interface rather than the concrete type: that is
-// what lets a queue-backed publisher replace the synchronous one later without
-// touching a caller.
-func NewEventDispatcher(logger *slog.Logger) (*events.Dispatcher, error) {
+// The return type is the events.Publisher interface, so the graph binds the
+// interface whatever this returns: the synchronous *events.Dispatcher by
+// default, or the asynchronous *events.Async when asyncEvents is true. When the
+// asynchronous publisher is selected this also registers the Loom lifecycle hook
+// that starts the workers on Start and drains them on Stop, so the workers live
+// exactly as long as the application and a short command starts none.
+//
+// Depend on events.Publisher rather than a concrete type. A component that needs
+// the queue statistics can call events.StatsOf(publisher); it reports whether the
+// chosen publisher was asynchronous.
+func NewEventDispatcher(lc *loom.Lifecycle, logger *slog.Logger) (events.Publisher, error) {
 	dispatcher := events.New(logger)
 	if err := events.Register(dispatcher); err != nil {
 		return nil, err
 	}
-	return dispatcher, nil
+	if !asyncEvents {
+		return dispatcher, nil
+	}
+	publisher := events.NewAsync(dispatcher, logger, events.WithCapacity(256))
+	lc.Append(loom.Hook{
+		OnStart: func(ctx context.Context) error {
+			publisher.Start(ctx)
+			return nil
+		},
+		OnStop: func(context.Context) error {
+			ctx, cancel := context.WithTimeout(context.Background(), eventShutdownTimeout)
+			defer cancel()
+			return publisher.Stop(ctx)
+		},
+	})
+	return publisher, nil
 }

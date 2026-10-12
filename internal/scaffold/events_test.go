@@ -22,6 +22,8 @@ func TestAddEventsInstallsLoomAndDispatcher(t *testing.T) {
 	for _, path := range []string{
 		"internal/events/dispatcher.go",
 		"internal/events/dispatcher_test.go",
+		"internal/events/async.go",
+		"internal/events/async_test.go",
 		"internal/events/recorder.go",
 		"internal/events/register.go",
 		"internal/events/README.md",
@@ -39,7 +41,7 @@ func TestAddEventsInstallsLoomAndDispatcher(t *testing.T) {
 	}
 	graph := readFile(t, filepath.Join(dir, "internal/di/di.go"))
 	if !strings.Contains(graph, "loom.Provide(NewEventDispatcher)") {
-		t.Errorf("the Loom graph does not declare the event dispatcher:\n%s", graph)
+		t.Errorf("the Loom graph does not declare the event publisher:\n%s", graph)
 	}
 	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
 		t.Fatalf("drift after add: %+v", drift)

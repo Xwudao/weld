@@ -165,3 +165,28 @@ func TestEventsRegistrationSeamIsStableAndExplicit(t *testing.T) {
 		}
 	}
 }
+
+// TestEventsSeamWiresAsyncBehindASwitch guards the opt-in contract: the shipped
+// seam really constructs events.Async when enabled (it is not a doc-only example),
+// defaults to synchronous delivery, and returns the Publisher interface so the
+// graph binds the interface either way.
+func TestEventsSeamWiresAsyncBehindASwitch(t *testing.T) {
+	t.Parallel()
+	provider, err := fs.ReadFile(weldtemplate.FS(), "capabilities/events/files/events_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read provider payload: %v", err)
+	}
+	body := string(provider)
+	for _, want := range []string{
+		"var asyncEvents = false",
+		"events.NewAsync(",
+		"events.Publisher",
+		"loom.Hook{",
+		"publisher.Start(ctx)",
+		"publisher.Stop(ctx)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("events seam is missing %q:\n%s", want, body)
+		}
+	}
+}

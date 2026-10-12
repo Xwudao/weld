@@ -574,7 +574,7 @@ Because the generated initializer imports `github.com/Xwudao/loom`, installing
 `loom` raises the project's Go directive to `go 1.25.0`. The generator's
 `x/tools` dependency stays in `tools/loom`.
 
-## `weld add events` (synchronous, in-process)
+## `weld add events` (in-process, synchronous by default)
 
 `weld add events` adds an in-process event dispatcher: `events.On[E](d, listener)`
 registers a listener keyed on the event's concrete Go type, and `Publish` runs
@@ -587,29 +587,40 @@ What lands in the project:
   depends on), `Listener[T]`, `On[T]`, `Publish` and the concrete `*Dispatcher`.
   `Publish` joins the listeners' errors with `errors.Join`, recovers a panicking
   listener into a logged error, and never logs the event value.
+- `internal/events/async.go` — `Async`, an opt-in `Publisher` that enqueues
+  events onto a bounded in-process channel and delivers them through the same
+  dispatcher from worker goroutines. `Publish` blocks and applies backpressure;
+  `TryPublish` returns `events.ErrQueueFull`; `Stop(ctx)` drains within a
+  deadline; `Stats()` reports occupancy and counters. It is **best effort**: a
+  process that exits drops whatever it has not delivered.
 - `internal/events/recorder.go` — `Recorder`, a `Publisher` that records instead
   of delivering, so a test asserts what a handler published with no listener and
   no graph.
 - `internal/events/register.go` — the stable, user-editable registration file.
   `weld add events` writes it once and never regenerates it.
 - `internal/di/events_provider.go` — the stable Loom provider seam, written when
-  `loom` is installed.
+  `loom` is installed. It returns the `events.Publisher` interface and selects the
+  delivery mode from the `asyncEvents` switch at the top of the file (false by
+  default): synchronous or `events.Async`. Because the seam owns the choice, the
+  graph regenerates without knowing which was picked.
 
-Delivery is **synchronous**: `Publish` returns only after every listener
-returned, in the caller's goroutine. That is what makes a listener's failure
-visible to the caller and the behavior assertable in a test without a worker, a
-poll or a wait. It is also a real constraint, and the generated
+Delivery is **synchronous** by default: `Publish` returns only after every
+listener returned, in the caller's goroutine. That is what makes a listener's
+failure visible to the caller and the behavior assertable in a test without a
+worker, a poll or a wait. It is also a real constraint, and the generated
 `internal/events/README.md` says so: a slow listener slows the caller, an event
 published inside a database transaction is delivered before the commit, and a
-listener that panics is contained but the event is not retried. Moving slow work
-behind a durable queue is a queue capability's job; because callers depend on
-`events.Publisher` rather than the concrete dispatcher, that change stays in the
-wiring.
+listener that panics is contained but the event is not retried. Setting
+`asyncEvents = true` in the seam instead decouples a slow listener behind the
+bounded channel, but it is still in-process and best effort, so it is **not a
+durable queue**. Moving slow or unreliable work behind a durable queue is a queue
+capability's job; because callers depend on `events.Publisher` rather than the
+concrete type, that change stays in the wiring.
 
 Installing it dispatches nothing: `internal/events/register.go` registers no
-listener, and the Loom graph prunes the dispatcher until a provider the graph
+listener, and the Loom graph prunes the publisher until a provider the graph
 consumes depends on `events.Publisher` — for example by adding the parameter to a
-business module's `NewService`, after which the graph constructs the dispatcher
+business module's `NewService`, after which the graph constructs the publisher
 and runs `Register`. A listener that fails to register fails startup, not the
 first request.
 

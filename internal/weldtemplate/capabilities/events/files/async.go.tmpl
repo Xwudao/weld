@@ -1,0 +1,335 @@
+// This file adds the optional asynchronous, best-effort delivery mode of
+// internal/events. It is not a queue: events live in a bounded in-process
+// channel, so a process that exits or crashes drops whatever it has not
+// delivered. What it buys over the synchronous Dispatcher is decoupling: a slow
+// listener no longer slows the caller until the bounded buffer fills, and the
+// caller sees backpressure instead of listener latency.
+//
+// It wraps the synchronous Dispatcher rather than replacing it. A worker takes
+// an event off the channel and calls Dispatcher.Publish, so registration
+// (On), ordering within a worker, panic isolation and error logging are exactly
+// the ones the synchronous path already has. Only the delivery timing changes.
+package events
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"runtime/debug"
+	"sync"
+	"sync/atomic"
+)
+
+// Errors Async reports. Test them with errors.Is.
+var (
+	// ErrQueueFull reports that TryPublish found the bounded queue full. It is
+	// the caller's signal to apply backpressure: shed the event, retry later, or
+	// fall back to synchronous delivery. Publish never returns it; Publish
+	// waits for room instead.
+	ErrQueueFull = errors.New("events: async queue is full")
+	// ErrStopped reports a publish that arrived after Stop began. The queue no
+	// longer accepts events, so the caller must treat the event as dropped.
+	ErrStopped = errors.New("events: async dispatcher is stopped")
+)
+
+// defaultAsyncCapacity is the buffer size NewAsync uses when no WithCapacity is
+// given. It is deliberately modest: the buffer absorbs a burst, and a full
+// buffer is the backpressure signal, so making it huge only hides overload.
+const defaultAsyncCapacity = 256
+
+// Stats is a point-in-time snapshot of an Async's queue. Delivered counts the
+// events whose every listener returned nil; Failed counts the events where a
+// listener returned an error or panicked (the synchronous Dispatcher already
+// logged the details); Refused counts the TryPublish calls rejected with
+// ErrQueueFull; and Dropped counts the events still buffered when Stop's
+// deadline expired and they were abandoned. Dropped is best effort, because an
+// event can be in flight in a worker at that moment.
+type Stats struct {
+	Capacity  int
+	Workers   int
+	Queued    int
+	Published uint64
+	Delivered uint64
+	Failed    uint64
+	Refused   uint64
+	Dropped   uint64
+}
+
+// asyncSettings holds the options NewAsync resolves.
+type asyncSettings struct {
+	capacity int
+	workers  int
+}
+
+// AsyncOption configures an Async. It is separate from any future option type so
+// the two can never be confused.
+type AsyncOption func(*asyncSettings)
+
+// WithCapacity sets the bounded channel size. A capacity of zero or less panics
+// in NewAsync: an unbuffered channel would make TryPublish fail unless a worker
+// happened to be waiting, which is a trap rather than a policy.
+func WithCapacity(capacity int) AsyncOption {
+	return func(settings *asyncSettings) {
+		settings.capacity = capacity
+	}
+}
+
+// WithWorkers sets how many goroutines consume the queue. The default is one,
+// which preserves the synchronous dispatcher's guarantee that listeners run one
+// event at a time. More than one increases throughput for I/O-bound listeners
+// but drops that guarantee: events may be handed to listeners out of publication
+// order, and a listener must then be safe to run concurrently with itself.
+func WithWorkers(workers int) AsyncOption {
+	return func(settings *asyncSettings) {
+		settings.workers = workers
+	}
+}
+
+// Async is a Publisher that enqueues events and lets workers deliver them
+// through an inner Dispatcher. A nil *Async is safe and drops every event, so a
+// component handed no publisher keeps working, matching the Dispatcher and
+// Recorder.
+//
+// Async is not a queue: it holds the events in memory and loses whatever it has
+// not delivered when the process exits. It deliberately has no persistence, no
+// retry, no backoff and no cross-process delivery; a durable queue is a different
+// capability. It also does not dispatch before Stop: an event that is buffered
+// when Stop's deadline expires is dropped.
+type Async struct {
+	inner  *Dispatcher
+	logger *slog.Logger
+
+	capacity int
+	workers  int
+	queue    chan any
+
+	mu      sync.RWMutex
+	closed  bool
+	started bool
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+
+	published atomic.Uint64
+	delivered atomic.Uint64
+	failed    atomic.Uint64
+	refused   atomic.Uint64
+	dropped   atomic.Uint64
+}
+
+// NewAsync builds an Async around inner, which may be nil (then nothing is
+// delivered). Delivery does not begin until Start is called, so a value can be
+// constructed and passed around without spawning a goroutine.
+//
+// A nil logger silences the worker's own diagnostics; the inner Dispatcher still
+// logs listener failures through the logger it was built with. A non-positive
+// capacity or worker count panics, because both are programming errors rather
+// than runtime conditions.
+func NewAsync(inner *Dispatcher, logger *slog.Logger, options ...AsyncOption) *Async {
+	settings := asyncSettings{capacity: defaultAsyncCapacity, workers: 1}
+	for _, option := range options {
+		option(&settings)
+	}
+	if settings.capacity <= 0 {
+		panic("events: Async capacity must be greater than zero")
+	}
+	if settings.workers <= 0 {
+		panic("events: Async workers must be greater than zero")
+	}
+	return &Async{
+		inner:    inner,
+		logger:   logger,
+		capacity: settings.capacity,
+		workers:  settings.workers,
+		queue:    make(chan any, settings.capacity),
+	}
+}
+
+// Start spawns the worker goroutines. It is idempotent and a no-op after Stop,
+// which is what lets a Loom lifecycle call it from OnStart.
+//
+// ctx is the parent of the listener context: cancelling it, or calling Stop,
+// asks a running listener to return. It is deliberately not the publishing
+// request's context — a request context is cancelled as soon as the response is
+// written, which would fail every listener that used it.
+func (a *Async) Start(ctx context.Context) {
+	if a == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.mu.Lock()
+	if a.started || a.closed {
+		a.mu.Unlock()
+		return
+	}
+	base, cancel := context.WithCancel(ctx)
+	a.cancel = cancel
+	a.started = true
+	a.mu.Unlock()
+
+	a.wg.Add(a.workers)
+	for i := 0; i < a.workers; i++ {
+		go a.run(base)
+	}
+}
+
+// Stop stops accepting events, drains the buffered ones and waits for the
+// workers to exit, up to ctx's deadline.
+//
+// It returns nil once every buffered event has been delivered. If ctx expires
+// first it cancels the listeners' context (so a listener that respects it can
+// return), counts the still-buffered events as dropped and returns ctx.Err();
+// the workers keep draining in the background. The bounded wait is what keeps a
+// stuck listener from hanging shutdown.
+//
+// Stop is idempotent. Do not call it from a listener: the workers are waiting on
+// that listener, so the wait would deadlock.
+func (a *Async) Stop(ctx context.Context) error {
+	if a == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.mu.Lock()
+	if !a.closed {
+		a.closed = true
+		// Closing the queue can never race a send: a Publish holds the read lock
+		// across its send, and Stop holds the write lock here. Workers range over
+		// the channel, so closing it also makes them drain and exit.
+		close(a.queue)
+	}
+	a.mu.Unlock()
+
+	drained := make(chan struct{})
+	go func() {
+		a.wg.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		if a.cancel != nil {
+			a.cancel()
+		}
+		a.dropped.Add(uint64(len(a.queue)))
+		return ctx.Err()
+	}
+}
+
+// Publish enqueues event and returns once it is buffered, or ctx is done.
+//
+// It blocks while the queue is full, which is the intended backpressure: the
+// caller slows down instead of the buffer growing without bound. A nil Async or
+// nil event publishes nothing and is not an error, matching the synchronous
+// Dispatcher.
+//
+// Do not call Publish from a listener when the queue can be full: the listener
+// runs on a worker, so a full queue would have that worker waiting for itself.
+// A listener that publishes should use TryPublish.
+func (a *Async) Publish(ctx context.Context, event any) error {
+	if a == nil || event == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.closed {
+		return ErrStopped
+	}
+	select {
+	case a.queue <- event:
+		a.published.Add(1)
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// TryPublish enqueues event without waiting. It returns ErrQueueFull instead of
+// blocking, which is the right call for an optional event the caller can shed.
+// A nil Async or nil event is not an error, and ErrStopped reports a publish
+// after Stop.
+func (a *Async) TryPublish(event any) error {
+	if a == nil || event == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.closed {
+		return ErrStopped
+	}
+	select {
+	case a.queue <- event:
+		a.published.Add(1)
+		return nil
+	default:
+		a.refused.Add(1)
+		return ErrQueueFull
+	}
+}
+
+// Stats returns a snapshot of the queue. It never blocks and is safe to call
+// while the Async runs; Queued is the current buffer occupancy.
+func (a *Async) Stats() Stats {
+	if a == nil {
+		return Stats{}
+	}
+	return Stats{
+		Capacity:  a.capacity,
+		Workers:   a.workers,
+		Queued:    len(a.queue),
+		Published: a.published.Load(),
+		Delivered: a.delivered.Load(),
+		Failed:    a.failed.Load(),
+		Refused:   a.refused.Load(),
+		Dropped:   a.dropped.Load(),
+	}
+}
+
+// StatsOf returns the queue statistics behind p when p is an *Async, and false
+// for any other Publisher (the synchronous Dispatcher, a Recorder, or nil). It
+// lets a caller that depends only on the Publisher interface reach Stats
+// without a concrete binding.
+func StatsOf(p Publisher) (Stats, bool) {
+	async, ok := p.(*Async)
+	if !ok {
+		return Stats{}, false
+	}
+	return async.Stats(), true
+}
+
+// run consumes the queue until Stop closes it, then exits after draining.
+func (a *Async) run(ctx context.Context) {
+	defer a.wg.Done()
+	for event := range a.queue {
+		a.deliver(ctx, event)
+	}
+}
+
+// deliver hands one event to the synchronous dispatcher. That call already
+// recovers a panicking listener and logs each failure, so the recover here only
+// guards the worker loop itself.
+func (a *Async) deliver(ctx context.Context, event any) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			a.failed.Add(1)
+			if a.logger != nil {
+				a.logger.Error("event worker panicked",
+					"event", typeName(event),
+					"panic", recovered,
+					"stack", string(debug.Stack()),
+				)
+			}
+		}
+	}()
+	if a.inner.Publish(ctx, event) != nil {
+		a.failed.Add(1)
+		return
+	}
+	a.delivered.Add(1)
+}

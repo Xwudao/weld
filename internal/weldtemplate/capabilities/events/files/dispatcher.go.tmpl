@@ -27,9 +27,10 @@ import (
 
 // Publisher is the seam application code depends on.
 //
-// The Loom graph binds the concrete *Dispatcher; a test can bind a Recorder
+// The Loom graph binds this interface to the concrete *Dispatcher, or to *Async
+// when the stable seam selects asynchronous delivery; a test can bind a Recorder
 // instead. Depending on the interface rather than the concrete type is what lets
-// a queue-backed publisher replace the synchronous one later without touching a
+// a queue-backed publisher replace the in-process one later without touching a
 // caller.
 type Publisher interface {
 	Publish(ctx context.Context, event any) error

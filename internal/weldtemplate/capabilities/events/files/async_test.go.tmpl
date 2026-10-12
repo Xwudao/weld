@@ -1,0 +1,388 @@
+package events
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// waitFor polls until condition holds or the deadline passes. Delivery is
+// asynchronous, so a test synchronizes on the effect rather than on a sleep.
+func waitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition was never met")
+}
+
+func TestAsyncDeliversThroughTheDispatcher(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	var delivered atomic.Int64
+	On(inner, func(_ context.Context, event orderPaid) error {
+		if event.ID == "1" {
+			delivered.Add(1)
+		}
+		return nil
+	})
+	async := NewAsync(inner, nil)
+	async.Start(context.Background())
+	defer async.Stop(context.Background())
+
+	if err := async.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	waitFor(t, func() bool { return delivered.Load() == 1 })
+}
+
+// TestAsyncListenerContextIsNotThePublishContext proves the request context is
+// not propagated: the publish context is cancelled right after Publish returns,
+// and the listener must still observe a live context. A bare goroutine that
+// reused the request context would fail this.
+func TestAsyncListenerContextIsNotThePublishContext(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	observed := make(chan error, 1)
+	On(inner, func(ctx context.Context, _ orderPaid) error {
+		observed <- ctx.Err()
+		return nil
+	})
+	async := NewAsync(inner, nil)
+	async.Start(context.Background())
+	defer async.Stop(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := async.Publish(ctx, orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	cancel()
+
+	select {
+	case err := <-observed:
+		if err != nil {
+			t.Fatalf("the listener context was cancelled by the publish context: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the listener never ran")
+	}
+}
+
+func TestTryPublishReportsAFullQueue(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	blocked := make(chan struct{})
+	entered := make(chan struct{})
+	On(inner, func(context.Context, orderPaid) error {
+		close(entered)
+		<-blocked
+		return nil
+	})
+	async := NewAsync(inner, nil, WithCapacity(1))
+	async.Start(context.Background())
+	defer func() {
+		close(blocked)
+		async.Stop(context.Background())
+	}()
+
+	// First event occupies the worker, second fills the one-slot buffer.
+	if err := async.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	<-entered
+	if err := async.Publish(context.Background(), orderPaid{ID: "2"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if err := async.TryPublish(orderPaid{ID: "3"}); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("TryPublish = %v, want ErrQueueFull", err)
+	}
+}
+
+func TestPublishBlocksWhileFullAndUnblocksWhenDrained(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	release := make(chan struct{})
+	delivered := make(chan string, 3)
+	On(inner, func(_ context.Context, event orderPaid) error {
+		delivered <- event.ID
+		<-release
+		return nil
+	})
+	async := NewAsync(inner, nil, WithCapacity(1))
+	async.Start(context.Background())
+	defer async.Stop(context.Background())
+
+	if err := async.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	<-delivered // the worker is now inside the listener
+	if err := async.Publish(context.Background(), orderPaid{ID: "2"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	published := make(chan error, 1)
+	go func() { published <- async.Publish(context.Background(), orderPaid{ID: "3"}) }()
+	select {
+	case err := <-published:
+		t.Fatalf("Publish returned %v while the queue was full", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-published:
+		if err != nil {
+			t.Fatalf("Publish after drain: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish stayed blocked after the queue drained")
+	}
+}
+
+func TestPublishRespectsItsContextWhileFull(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	blocked := make(chan struct{})
+	entered := make(chan struct{})
+	On(inner, func(context.Context, orderPaid) error {
+		close(entered)
+		<-blocked
+		return nil
+	})
+	async := NewAsync(inner, nil, WithCapacity(1))
+	async.Start(context.Background())
+	defer func() {
+		close(blocked)
+		async.Stop(context.Background())
+	}()
+
+	if err := async.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	<-entered
+	if err := async.Publish(context.Background(), orderPaid{ID: "2"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := async.Publish(ctx, orderPaid{ID: "3"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Publish on a full queue = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestStopDrainsBufferedEvents(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	var delivered atomic.Int64
+	On(inner, func(context.Context, orderPaid) error {
+		delivered.Add(1)
+		return nil
+	})
+	async := NewAsync(inner, nil, WithCapacity(16))
+	async.Start(context.Background())
+
+	const total = 8
+	for i := 0; i < total; i++ {
+		if err := async.Publish(context.Background(), orderPaid{ID: "x"}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	if err := async.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if got := delivered.Load(); got != total {
+		t.Fatalf("delivered %d of %d events before Stop returned", got, total)
+	}
+}
+
+func TestStopReturnsWhenAListenerOverruns(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	On(inner, func(context.Context, orderPaid) error {
+		close(entered)
+		<-release
+		return nil
+	})
+	async := NewAsync(inner, nil, WithCapacity(1))
+	async.Start(context.Background())
+	if err := async.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := async.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop = %v, want context.DeadlineExceeded", err)
+	}
+
+	close(release)
+	if err := async.Stop(context.Background()); err != nil {
+		t.Fatalf("second Stop: %v", err)
+	}
+}
+
+func TestPublishAfterStopIsRejected(t *testing.T) {
+	t.Parallel()
+	async := NewAsync(New(nil), nil)
+	async.Start(context.Background())
+	if err := async.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := async.Publish(context.Background(), orderPaid{ID: "1"}); !errors.Is(err, ErrStopped) {
+		t.Fatalf("Publish after Stop = %v, want ErrStopped", err)
+	}
+	if err := async.TryPublish(orderPaid{ID: "1"}); !errors.Is(err, ErrStopped) {
+		t.Fatalf("TryPublish after Stop = %v, want ErrStopped", err)
+	}
+}
+
+func TestAsyncNilSafety(t *testing.T) {
+	t.Parallel()
+	var absent *Async
+	if err := absent.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("nil Async Publish: %v", err)
+	}
+	if err := absent.TryPublish(orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("nil Async TryPublish: %v", err)
+	}
+	absent.Start(context.Background())
+	if err := absent.Stop(context.Background()); err != nil {
+		t.Fatalf("nil Async Stop: %v", err)
+	}
+	if got := absent.Stats(); got.Capacity != 0 {
+		t.Fatalf("nil Async Stats = %+v", got)
+	}
+
+	async := NewAsync(New(nil), nil)
+	if err := async.Publish(context.Background(), nil); err != nil {
+		t.Fatalf("Publish(nil event): %v", err)
+	}
+	if err := async.TryPublish(nil); err != nil {
+		t.Fatalf("TryPublish(nil event): %v", err)
+	}
+}
+
+func TestNewAsyncRejectsNonPositiveCapacityAndWorkers(t *testing.T) {
+	t.Parallel()
+	for name, option := range map[string]AsyncOption{
+		"capacity": WithCapacity(0),
+		"workers":  WithWorkers(0),
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("NewAsync accepted %s of zero", name)
+				}
+			}()
+			NewAsync(New(nil), nil, option)
+		}()
+	}
+}
+
+func TestStatsReportDeliveryAndRefusal(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	blocked := make(chan struct{})
+	entered := make(chan struct{})
+	On(inner, func(context.Context, orderPaid) error {
+		close(entered)
+		<-blocked
+		return nil
+	})
+	async := NewAsync(inner, nil, WithCapacity(1))
+	async.Start(context.Background())
+	defer func() {
+		close(blocked)
+		async.Stop(context.Background())
+	}()
+
+	if err := async.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	<-entered
+	if err := async.Publish(context.Background(), orderPaid{ID: "2"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if err := async.TryPublish(orderPaid{ID: "3"}); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("TryPublish = %v, want ErrQueueFull", err)
+	}
+
+	stats := async.Stats()
+	if stats.Capacity != 1 || stats.Workers != 1 {
+		t.Fatalf("Stats capacity/workers = %d/%d", stats.Capacity, stats.Workers)
+	}
+	if stats.Published != 2 || stats.Refused != 1 {
+		t.Fatalf("Stats published/refused = %d/%d, want 2/1", stats.Published, stats.Refused)
+	}
+}
+
+// TestAsyncIsSafeUnderConcurrentUse exercises the documented guards with the
+// race detector: registrations, publishes, TryPublishes and stats at once.
+func TestAsyncIsSafeUnderConcurrentUse(t *testing.T) {
+	t.Parallel()
+	inner := New(nil)
+	On(inner, func(context.Context, orderPaid) error { return nil })
+	async := NewAsync(inner, nil, WithCapacity(4), WithWorkers(2))
+	async.Start(context.Background())
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = async.Publish(context.Background(), orderPaid{ID: "1"})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = async.TryPublish(orderPaid{ID: "2"})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = async.Stats()
+			}
+		}()
+	}
+	wg.Wait()
+	if err := async.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestAsyncSatisfiesPublisher(t *testing.T) {
+	t.Parallel()
+	var publisher Publisher = NewAsync(New(nil), nil)
+	if publisher == nil {
+		t.Fatal("an Async is not a Publisher")
+	}
+}
+
+func TestStatsOfReportsOnlyAsync(t *testing.T) {
+	t.Parallel()
+	async := NewAsync(New(nil), nil)
+	if stats, ok := StatsOf(async); !ok || stats.Capacity != defaultAsyncCapacity {
+		t.Fatalf("StatsOf(Async) = %+v, %v", stats, ok)
+	}
+	if _, ok := StatsOf(New(nil)); ok {
+		t.Fatal("StatsOf reported the synchronous dispatcher as async")
+	}
+	var absent Publisher
+	if _, ok := StatsOf(absent); ok {
+		t.Fatal("StatsOf reported a nil publisher as async")
+	}
+}

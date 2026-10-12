@@ -50,6 +50,43 @@ no polling and no waiting. It also means:
 - **The event value is never logged.** Log records name the event's type, not its
   value, which may carry personal data.
 
+## Optional asynchronous delivery
+
+`weld add events` also installs `*events.Async`, for when a listener is too slow
+to run in the caller's goroutine. It is opt-in and lives in the same package; the
+synchronous dispatcher stays the default. `Async` wraps a `*Dispatcher` and
+enqueues events onto a bounded channel, and worker goroutines call
+`Dispatcher.Publish`, so listeners, `On`, ordering within a worker, panic
+isolation and error logging are unchanged.
+
+- **`Publish` blocks and applies backpressure.** It returns once the event is
+  buffered, or when the caller's context ends. When the buffer is full it waits,
+  which slows the caller instead of growing memory; `TryPublish` never waits and
+  returns `events.ErrQueueFull` so the caller can shed the event.
+- **Delivery is best effort and in-process.** The queue is a channel, not a
+  broker: a process that exits or crashes drops whatever it has not delivered,
+  and `events.ErrStopped` reports a publish after `Stop`. There is no retry and
+  no cross-process delivery. A durable queue is a different capability.
+- **`Stop(ctx)` drains within a deadline.** It stops accepting events, delivers
+  what is buffered and waits for the workers, up to `ctx`. If the deadline
+  expires it cancels the listeners' context, drops what is left and returns
+  `ctx.Err()`.
+- **Listeners run with the worker's context, not the request's.** A request
+  context is cancelled when the response is written, so reusing it would fail
+  every listener. A listener that publishes should use `TryPublish`, because a
+  worker that blocks on a full queue waits for itself.
+- **One worker by default.** `events.WithWorkers(n)` raises throughput for
+  I/O-bound listeners but drops the one-event-at-a-time guarantee: events may be
+  handled out of order and a listener must be safe to run concurrently with
+  itself. `events.Stats()` reports capacity, occupancy and counts.
+- **The seam chooses.** `internal/di/events_provider.go` returns the
+  `events.Publisher` interface and picks the mode from its `asyncEvents` switch
+  (false by default). Set it to true to deliver asynchronously; the seam then
+  builds the `*events.Async` and registers the Loom lifecycle hook that starts
+  and drains the workers, so the switch alone is the opt-in. A component that
+  depends only on `events.Publisher` can call `events.StatsOf(publisher)` to read
+  the queue statistics.
+
 ## What it is not
 
 It is not a queue. There is no persistence, no retry, no backoff and no worker
@@ -62,17 +99,19 @@ nothing retries.
 It is also not a transaction. An event published inside a database transaction is
 delivered **before** the commit, so a listener can observe a change that is later
 rolled back, and a rollback cannot un-send an email. Publish after the commit when
-that matters. Moving slow or unreliable work behind a durable queue is the job of
-a queue capability; because callers depend on the `events.Publisher` interface
-rather than the concrete type, that change stays local to the wiring.
+that matters. The in-process asynchronous mode above decouples the caller but is
+still not durable, so it does not fix this. Moving slow or unreliable work behind
+a durable queue is the job of a queue capability; because callers depend on the
+`events.Publisher` interface rather than the concrete type, that change stays local
+to the wiring.
 
 ## How it is wired
 
 The dispatcher is an available Loom binding, not part of the default
 composition. `NewEventDispatcher` in the stable `internal/di/events_provider.go`
 seam builds it and runs `Register`, but nothing in the generated graph depends on
-`*events.Dispatcher` or `events.Publisher`, so Loom prunes it: an application that
-publishes nothing constructs no dispatcher.
+`events.Publisher`, so Loom prunes it: an application that publishes nothing
+constructs no publisher and starts no worker.
 
 To switch it on, make a provider the graph already consumes depend on
 `events.Publisher` — for example edit a business module's `service.go` so its
