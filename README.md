@@ -170,7 +170,9 @@ Capabilities:
 - `cron` (add) — an opt-in in-process scheduler that starts and stops with the
   `serve` command and never with a short command. Requires `http` (and therefore
   `loom`); installing it schedules nothing until you register jobs in
-  `internal/cron/register.go`.
+  `internal/cron/register.go`. Each job receives a `cron.Deps` bundle you extend
+  in `internal/cron/deps.go` and wire in `internal/di/cron_provider.go`, so a job
+  gets the application's dependencies without a service locator.
 - `loom` (add) — the compile-time [Loom](https://github.com/Xwudao/loom)
   dependency-injection foundation. Its `commonModule` always wires the
   configuration, the logger and the installed `db`/`redis`/`mail`/`storage`/`events`
@@ -548,8 +550,10 @@ What Loom binds, and why it is not ceremonial:
 - `*cron.Scheduler` (`cron`) — the graph root consumes the scheduler, so it is
   always constructed and its `loom.Hook` start/stop run with the server: the
   socket is bound before the scheduler starts and the scheduler stops before the
-  server. It starts no jobs until `internal/cron/register.go` registers them, and
-  it takes no database or Redis lock.
+  server. `NewCronDeps` builds the `cron.Deps` bundle every job receives; add a
+  job dependency there rather than to the regenerated graph. It starts no jobs
+  until `internal/cron/register.go` registers them, and it takes no database or
+  Redis lock.
 - `*redis.Client` (`redis`), `*mailsender.Sender` (`mail`) and
   `*objectstore.Store` (`storage`) — declared bindings the default graph never
   depends on, so Loom prunes them and an unrelated serve needs none of those
@@ -567,7 +571,8 @@ failure rolls the whole plan back so a project is never left with a graph that
 does not match `loom_gen.go`. Capabilities stay independent of the graph source:
 each contributes its own stable provider seam (`redis_provider.go`,
 `mail_provider.go`, `storage_provider.go`,
-`cron_provider.go`) and a `go.mod` go-directive extension point, while `di.go`
+`cron_provider.go` and the `cron.Deps` bundle in `internal/cron/deps.go`) and a
+`go.mod` go-directive extension point, while `di.go`
 and `loom_gen.go` alone are regenerated.
 
 Because the generated initializer imports `github.com/Xwudao/loom`, installing

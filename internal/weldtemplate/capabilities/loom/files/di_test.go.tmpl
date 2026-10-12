@@ -363,7 +363,7 @@ func TestSchedulerStartsAfterTheServerAndStopsFirst(t *testing.T) {
 		HTTP: config.HTTP{Addr: "127.0.0.1:0"},
 		Cron: config.Cron{Timezone: "UTC"},
 	}
-	if _, err := NewScheduler(lifecycle, cfg, logger, server); err != nil {
+	if _, err := NewScheduler(lifecycle, cfg, logger, server, nil); err != nil {
 		t.Fatalf("NewScheduler: %v", err)
 	}
 

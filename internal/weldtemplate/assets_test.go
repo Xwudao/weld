@@ -1237,6 +1237,7 @@ func TestCronCapabilityRequiresHTTP(t *testing.T) {
 	}
 	for _, want := range []string{
 		"internal/cron/cron.go",
+		"internal/cron/deps.go",
 		"internal/cron/register.go",
 		"internal/cron/README.md",
 		"internal/config/cron.go",
@@ -1294,7 +1295,7 @@ func TestCronCapabilityRequiresHTTP(t *testing.T) {
 		t.Fatalf("read cron provider: %v", err)
 	}
 	providerText := string(provider)
-	for _, want := range []string{"cron.New", "cron.Register", "scheduler.Start", "scheduler.Stop", "loom.Hook"} {
+	for _, want := range []string{"cron.New", "cron.Register", "cron.WithDeps", "NewCronDeps", "scheduler.Start", "scheduler.Stop", "loom.Hook"} {
 		if !strings.Contains(providerText, want) {
 			t.Errorf("cron provider is missing %q:\n%s", want, providerText)
 		}
@@ -1316,7 +1317,7 @@ func TestCronCapabilityRequiresHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read loom di template: %v", err)
 	}
-	for _, want := range []string{`{{- if .Caps.Has "cron"}}`, "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
+	for _, want := range []string{`{{- if .Caps.Has "cron"}}`, "loom.Provide(NewCronDeps)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
 		if !strings.Contains(string(graph), want) {
 			t.Errorf("loom di template is missing %q", want)
 		}
@@ -1335,7 +1336,7 @@ func TestCronProviderSeamIsOwnedByCron(t *testing.T) {
 		t.Fatalf("read cron provider template: %v", err)
 	}
 	for _, want := range []string{
-		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, server *Server) (*cron.Scheduler, error)",
+		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, server *Server, deps *cron.Deps) (*cron.Scheduler, error)",
 		"__module__/internal/cron",
 		"loom.Hook",
 	} {
@@ -1883,7 +1884,7 @@ func TestCommandGraphIsLoomAware(t *testing.T) {
 		// command graph: snapshotting them here would make a capability installed
 		// later unavailable to the command forever.
 		for _, forbidden := range []string{
-			"InitApp", "NewServer", "NewScheduler", "Scheduler",
+			"InitApp", "NewServer", "NewScheduler", "NewCronDeps", "Scheduler",
 			"NewConfigLoader", "NewConfig)", "NewLogger",
 			"NewPool", "NewRepository", "data.Repository",
 			"NewRedisClient", "NewMailSender", "NewObjectStore", "NewEventDispatcher",
@@ -2093,7 +2094,7 @@ func TestPayloadRolesAreDeclared(t *testing.T) {
 	seams := map[string][]string{
 		"base":    {"Makefile", ".gitignore"},
 		"config":  {"config.yml", "config.example.yml"},
-		"cron":    {"internal/cron/register.go", "internal/di/cron_provider.go"},
+		"cron":    {"internal/cron/deps.go", "internal/cron/register.go", "internal/di/cron_provider.go"},
 		"events":  {"internal/events/register.go", "internal/di/events_provider.go"},
 		"http":    {"internal/httpserver/middleware.go", "internal/httpserver/policy.go"},
 		"loom":    {"internal/di/repository_providers.go"},

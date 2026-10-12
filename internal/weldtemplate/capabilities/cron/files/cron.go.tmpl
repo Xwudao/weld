@@ -45,9 +45,11 @@ import (
 // Job is a unit of scheduled work.
 //
 // The context is cancelled when the scheduler stops, so a job that respects it
-// can return promptly during shutdown. A Job is an ordinary function, so a test
-// invokes it directly without a scheduler or a wall clock.
-type Job func(ctx context.Context)
+// can return promptly during shutdown. deps is the bundle the scheduler was
+// built with (WithDeps); the pointer is never nil, so a job that needs nothing
+// can ignore it. A Job is an ordinary function, so a test invokes it directly
+// without a scheduler or a wall clock.
+type Job func(ctx context.Context, deps *Deps)
 
 // Errors returned by the job registry. Test them with errors.Is.
 var (
@@ -61,6 +63,7 @@ var (
 type Scheduler struct {
 	logger *slog.Logger
 	runner *robfigcron.Cron
+	deps   *Deps
 
 	mu      sync.Mutex
 	entries map[string]entry
@@ -82,6 +85,7 @@ type Option func(*settings)
 
 type settings struct {
 	location *time.Location
+	deps     *Deps
 }
 
 // WithLocation sets the timezone schedules are interpreted in. A nil location
@@ -90,6 +94,17 @@ func WithLocation(location *time.Location) Option {
 	return func(s *settings) {
 		if location != nil {
 			s.location = location
+		}
+	}
+}
+
+// WithDeps sets the dependency bundle handed to every job. A nil bundle keeps
+// the empty default, so a scheduler built without a graph still runs jobs that
+// need nothing.
+func WithDeps(deps *Deps) Option {
+	return func(s *settings) {
+		if deps != nil {
+			s.deps = deps
 		}
 	}
 }
@@ -105,7 +120,7 @@ func New(logger *slog.Logger, options ...Option) *Scheduler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	configured := settings{location: time.UTC}
+	configured := settings{location: time.UTC, deps: &Deps{}}
 	for _, option := range options {
 		option(&configured)
 	}
@@ -128,6 +143,7 @@ func New(logger *slog.Logger, options ...Option) *Scheduler {
 	return &Scheduler{
 		logger:  logger,
 		runner:  runner,
+		deps:    configured.deps,
 		entries: make(map[string]entry),
 		baseCtx: context.Background(),
 	}
@@ -252,14 +268,15 @@ func (s *Scheduler) Reschedule(name, spec string) error {
 }
 
 // wrap adapts a Job to robfig's func(), supplying the scheduler's current base
-// context. The context is read on each run so a restart after Stop hands the
-// jobs the new context.
+// context and dependency bundle. The context is read on each run so a restart
+// after Stop hands the jobs the new context; the bundle is fixed at construction.
 func (s *Scheduler) wrap(job Job) func() {
 	return func() {
 		s.mu.Lock()
 		ctx := s.baseCtx
+		deps := s.deps
 		s.mu.Unlock()
-		job(ctx)
+		job(ctx, deps)
 	}
 }
 

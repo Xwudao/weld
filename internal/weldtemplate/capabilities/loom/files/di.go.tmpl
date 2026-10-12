@@ -46,8 +46,9 @@
 // internal/redisclient/README.md, internal/mailsender/README.md and
 // internal/objectstore/README.md). Installing cron is different: the server
 // graph root consumes *cron.Scheduler, so the scheduler is constructed and its
-// start/stop hooks are registered, and the scheduler starts empty until
-// internal/cron/register.go registers jobs.
+// start/stop hooks are registered. NewCronDeps builds the bundle every job
+// receives; extend cron.Deps and NewCronDeps rather than this graph. The
+// scheduler starts empty until internal/cron/register.go registers jobs.
 package di
 
 import (
@@ -322,9 +323,12 @@ var appGraph = loom.Graph[*App](
 	// The scheduler is different from the bindings above: the graph root consumes
 	// it, so Loom constructs it and registers its start/stop hooks. It takes the
 	// server, so the socket is bound before the scheduler starts and the scheduler
-	// stops before the server. It is defined in cron_provider.go, the stable
-	// wiring seam, and starts no jobs until internal/cron/register.go registers
-	// them.
+	// stops before the server. NewCronDeps builds the bundle every job receives;
+	// add a job dependency to cron.Deps and consume it there, not in this
+	// regenerated graph. Both providers are defined in cron_provider.go, the
+	// stable wiring seam, and start no jobs until internal/cron/register.go
+	// registers them.
+	loom.Provide(NewCronDeps),
 	loom.Provide(NewScheduler),
 {{- end}}
 	// The administrator guard is a provider, not a direct call: the graph mounts

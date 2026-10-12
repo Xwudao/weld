@@ -138,8 +138,8 @@ capabilities/
                    storage, cron)
   cron/            kind: add    -> in-process scheduler, requires http
     capability.json
-    files/         internal/cron (registry + stable register.go job seam),
-                   internal/config/cron.go,
+    files/         internal/cron (registry + stable deps.go and register.go job
+                   seams), internal/config/cron.go,
                    internal/di/cron_provider.go (stable Loom seam), snippets, README
   mail/            kind: add    -> opt-in SMTP sender, requires loom
     capability.json
@@ -255,9 +255,13 @@ is bound before it starts and it stops before the server).
 `cron` requires `http` (and therefore `loom`). It ships an in-process
 scheduler (`internal/cron`) with a stable, user-editable registration file
 (`internal/cron/register.go`) that declares no jobs, so installing the capability
-schedules nothing. The stable `internal/di/cron_provider.go` seam builds the
-scheduler, and because the Loom server graph root consumes it the scheduler is
-constructed and its start/stop hooks run with `serve` — after the socket is bound
+schedules nothing. Each job receives a `cron.Deps` bundle: `internal/cron/deps.go`
+is the stable seam to add a field, and `NewCronDeps` in the stable
+`internal/di/cron_provider.go` constructs it, so a job gets the application's
+dependencies without a signature change or a service locator. The stable
+`cron_provider.go` seam also builds the scheduler, and because the Loom server
+graph root consumes it the scheduler is constructed and its start/stop hooks run
+with `serve` — after the socket is bound
 and stopped before the server; `help`, `version` and every short command never
 reach it. The scheduler takes no database or Redis lock.
 

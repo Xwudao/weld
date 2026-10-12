@@ -12,8 +12,14 @@ package cron
 // long-running serve process has started the scheduler, and its context is
 // canceled when the process stops.
 //
+// A job receives a *Deps bundle as its second parameter, so it works with the
+// application's dependencies instead of a global. The bundle is defined in
+// deps.go and built by NewCronDeps in internal/di/cron_provider.go; add a field
+// to Deps and consume it there when a job needs another dependency:
+//
 //	func Register(s *Scheduler) error {
-//		return s.Register("nightly-report", "0 3 * * *", func(ctx context.Context) {
+//		return s.Register("nightly-report", "0 3 * * *", func(ctx context.Context, deps *Deps) {
+//			deps.Logger.Info("nightly report started")
 //			// do the work; return promptly when ctx is canceled
 //		})
 //	}

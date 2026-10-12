@@ -2794,7 +2794,7 @@ func TestAddCronWithLoomWiresScheduler(t *testing.T) {
 			}
 
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-			for _, want := range []string{"loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
+			for _, want := range []string{"loom.Provide(NewCronDeps)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
 				if !strings.Contains(di, want) {
 					t.Errorf("di.go is missing %q:\n%s", want, di)
 				}
@@ -2918,10 +2918,15 @@ func TestAddCronProviderSeamSurvivesLaterAdd(t *testing.T) {
 			}
 
 			registerPath := filepath.Join(dir, "internal/cron/register.go")
+			depsPath := filepath.Join(dir, "internal/cron/deps.go")
 			providerPath := filepath.Join(dir, "internal/di/cron_provider.go")
 			registerEdit := readFile(t, registerPath) + "\n// user job, must survive a later add\n"
+			depsEdit := readFile(t, depsPath) + "\n// user deps, must survive a later add\n"
 			providerEdit := readFile(t, providerPath) + "\n// user wiring, must survive a later add\n"
 			if err := os.WriteFile(registerPath, []byte(registerEdit), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(depsPath, []byte(depsEdit), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(providerPath, []byte(providerEdit), 0o644); err != nil {
@@ -2933,6 +2938,9 @@ func TestAddCronProviderSeamSurvivesLaterAdd(t *testing.T) {
 			if got := readFile(t, registerPath); got != registerEdit {
 				t.Fatalf("the later add rewrote the user's register.go:\n%s", got)
 			}
+			if got := readFile(t, depsPath); got != depsEdit {
+				t.Fatalf("the later add rewrote the user's deps.go:\n%s", got)
+			}
 			if got := readFile(t, providerPath); got != providerEdit {
 				t.Fatalf("the later add rewrote the user's cron_provider.go:\n%s", got)
 			}
@@ -2943,6 +2951,52 @@ func TestAddCronProviderSeamSurvivesLaterAdd(t *testing.T) {
 				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 			}
 		})
+	}
+}
+
+// TestAddCronDepsExtensionSurvivesLaterAdd is the regression for the Deps seam:
+// cron ships a job dependency bundle and the seam to extend it, so adding a
+// field never changes NewScheduler's signature. A later add regenerates di.go
+// and the generated di_test.go, which calls NewScheduler with the fixed argument
+// list; the extended bundle must still compile and test.
+func TestAddCronDepsExtensionSurvivesLaterAdd(t *testing.T) {
+	t.Parallel()
+	loomToolAvailable(t)
+	root := t.TempDir()
+	dir := create(t, root)
+	for _, capability := range []string{"http", "cron", "loom"} {
+		add(t, dir, capability)
+	}
+
+	depsPath := filepath.Join(dir, "internal/cron/deps.go")
+	deps := readFile(t, depsPath)
+	depsEdit := strings.Replace(deps, "type Deps struct {", "type Deps struct {\n\tNote string", 1)
+	if depsEdit == deps {
+		t.Fatalf("deps.go does not declare the Deps struct:\n%s", deps)
+	}
+	if err := os.WriteFile(depsPath, []byte(depsEdit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	providerPath := filepath.Join(dir, "internal/di/cron_provider.go")
+	provider := readFile(t, providerPath)
+	providerEdit := strings.Replace(provider, "return &cron.Deps{Logger: logger}", "return &cron.Deps{Logger: logger, Note: \"extended\"}", 1)
+	if providerEdit == provider {
+		t.Fatalf("cron_provider.go does not construct the Deps bundle:\n%s", provider)
+	}
+	if err := os.WriteFile(providerPath, []byte(providerEdit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later add regenerates di.go and di_test.go; the generated test's
+	// NewScheduler call must keep compiling against the extended bundle.
+	add(t, dir, "web")
+	generated := readFile(t, filepath.Join(dir, "internal/di/di_test.go"))
+	if !strings.Contains(generated, "NewScheduler(lifecycle, cfg, logger, server, nil)") {
+		t.Fatalf("the generated di_test.go no longer calls NewScheduler with the stable signature:\n%s", generated)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 	}
 }
 

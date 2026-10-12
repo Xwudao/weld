@@ -286,7 +286,7 @@ var curatedNotes = map[string]string{
 	"db":      "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
 	"loom":    "compile-time dependency injection in `internal/di`, required by every capability and command beyond the bare CLI (install it with `--with-dependencies`). All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage/events bindings. A command group resolves its graph lazily through the shared `internal/commandkit` seam, so a subcommand injects a dependency by adding a field to its `Deps` and a parameter to `NewDeps` (a provider already in `commonModule` needs no graph edit; a new one needs `loom.Provide(...)` in `internal/di/<name>_graph.go`). Loom raises the project's Go directive to 1.25.",
 	"redis":   "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
-	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs, unique names, overlap skipping, panic recovery and graceful stop. Cron installs HTTP and follows only the Loom `serve` lifecycle, never a short command. `internal/cron/register.go` is the stable job-registration file; installing cron schedules nothing.",
+	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs, unique names, overlap skipping, panic recovery and graceful stop. Cron installs HTTP and follows only the Loom `serve` lifecycle, never a short command. `internal/cron/deps.go` is the stable seam for the `Deps` bundle every job receives, wired in `internal/di/cron_provider.go`; `internal/cron/register.go` is the stable job-registration file. Installing cron schedules nothing.",
 	"seed":    "opt-in database seeding in `internal/data/seeder`: named, idempotent seeders run by the short `seed` command (`make seed`, `weld seed`) over the repositories the Loom seed graph injects. The seeders live behind the `seed` build tag (`//go:build seed`), so the production build (`go build`, `weld build`) compiles in neither the seed data nor any faker a seeder imports. Installing seed seeds nothing; `weld add seeder <name>` writes one `seed_<name>.go` per seeder and registers it in the stable `internal/data/seeder/register.go` index, and `internal/di/seed_providers.go` is the stable repository seam.",
 	"events":  "opt-in in-process event dispatcher in `internal/events`: `events.On[E](d, listener)` registers a listener keyed on the event's concrete Go type, and `Publish` runs every listener for that type synchronously, in registration order, joining their errors. A panicking listener is recovered and logged instead of taking the process down, and the event value is never logged. It is not a queue: no persistence, no retry, no cross-process delivery, and an event published inside a database transaction is delivered before the commit. The stable seam `internal/di/events_provider.go` selects delivery with its `asyncEvents` switch (false by default): synchronous, or the in-process, best-effort `events.Async` with a bounded channel and explicit backpressure (`Publish` blocks, `TryPublish` returns `events.ErrQueueFull`) that still loses buffered events on exit. Installing events dispatches nothing until you register a listener in the stable `internal/events/register.go`; the publisher is pruned until a provider depends on `events.Publisher`, `events.StatsOf` reads the async queue statistics, and `events.Recorder` is the test double.",
 	"mail":    "opt-in SMTP sender in `internal/mailsender`: one connection per `Send` with an explicit TLS policy and header-injection guards. Nothing generated imports it, so serving sends no mail; `internal/di/mail_provider.go` is the stable Loom seam.",
@@ -327,7 +327,9 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 	if set["cron"] {
 		b.WriteString("- **cron** installs a scheduler but schedules nothing by itself: it starts and\n")
 		b.WriteString("  stops with `serve` and runs only the jobs you add in\n")
-		b.WriteString("  `internal/cron/register.go` (see `internal/cron/README.md`).\n")
+		b.WriteString("  `internal/cron/register.go`; each job receives the `cron.Deps` bundle you\n")
+		b.WriteString("  extend in `internal/cron/deps.go` and wire in\n")
+		b.WriteString("  `internal/di/cron_provider.go` (see `internal/cron/README.md`).\n")
 		wrote = true
 	}
 	if set["seed"] {
@@ -442,7 +444,7 @@ func writeEditing(b *strings.Builder, set map[string]bool) {
 		seams = append(seams, "`internal/di/cron_provider.go`")
 	}
 	if set["cron"] {
-		seams = append(seams, "`internal/cron/register.go`")
+		seams = append(seams, "`internal/cron/deps.go`", "`internal/cron/register.go`")
 	}
 	if set["seed"] && set["loom"] {
 		seams = append(seams, "`internal/di/seed_providers.go`")

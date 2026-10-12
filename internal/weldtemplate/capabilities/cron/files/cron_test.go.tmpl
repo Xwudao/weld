@@ -28,12 +28,31 @@ func TestJobRunsDirectly(t *testing.T) {
 	type ctxKey struct{}
 	ctx := context.WithValue(context.Background(), ctxKey{}, "value")
 	var seen string
-	job := Job(func(got context.Context) {
+	job := Job(func(got context.Context, _ *Deps) {
 		seen, _ = got.Value(ctxKey{}).(string)
 	})
-	job(ctx)
+	job(ctx, nil)
 	if seen != "value" {
 		t.Fatalf("job saw %q, want the context value", seen)
+	}
+}
+
+// TestWithDepsIsHandedToJob proves the dependency bundle reaches the job, which
+// is the point of the Deps seam: a job reads what WithDeps supplied instead of a
+// global. A nil bundle keeps the empty default so the pointer is never nil.
+func TestWithDepsIsHandedToJob(t *testing.T) {
+	deps := &Deps{Logger: testLogger()}
+	s := New(testLogger(), WithDeps(deps))
+	var got *Deps
+	if err := s.Register("deps", "* * * * *", func(_ context.Context, d *Deps) { got = d }); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.entries["deps"].run()
+	if got != deps {
+		t.Fatalf("job saw %p, want %p", got, deps)
+	}
+	if got := New(testLogger(), WithDeps(nil)).deps; got == nil {
+		t.Fatal("WithDeps(nil) left a nil bundle")
 	}
 }
 
@@ -66,7 +85,7 @@ func TestWithLocationIsHonored(t *testing.T) {
 // six-field seconds form and the @descriptor shortcuts are rejected.
 func TestRegisterRejectsInvalidInput(t *testing.T) {
 	s := New(testLogger())
-	job := func(context.Context) {}
+	job := func(context.Context, *Deps) {}
 	cases := []struct {
 		name string
 		job  Job
@@ -93,7 +112,7 @@ func TestRegisterRejectsInvalidInput(t *testing.T) {
 // TestRegisterIsUnique pins the unique-name contract.
 func TestRegisterIsUnique(t *testing.T) {
 	s := New(testLogger())
-	job := func(context.Context) {}
+	job := func(context.Context, *Deps) {}
 	if err := s.Register("nightly", "* * * * *", job); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -110,7 +129,7 @@ func TestRegisterIsUnique(t *testing.T) {
 // an invalid reschedule leaves the current schedule untouched.
 func TestRemoveAndReschedule(t *testing.T) {
 	s := New(testLogger())
-	job := func(context.Context) {}
+	job := func(context.Context, *Deps) {}
 	if err := s.Register("nightly", "* * * * *", job); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -152,7 +171,7 @@ func TestRemoveAndReschedule(t *testing.T) {
 // removed after Start, not only before it.
 func TestDynamicChangesWhileRunning(t *testing.T) {
 	s := New(testLogger())
-	if err := s.Register("first", "0 0 1 1 *", func(context.Context) {}); err != nil {
+	if err := s.Register("first", "0 0 1 1 *", func(context.Context, *Deps) {}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	s.Start(context.Background())
@@ -165,7 +184,7 @@ func TestDynamicChangesWhileRunning(t *testing.T) {
 	if after := s.entries["first"]; after.id == before.id {
 		t.Fatal("Reschedule after Start did not replace the scheduled entry")
 	}
-	if err := s.Register("second", "0 0 1 1 *", func(context.Context) {}); err != nil {
+	if err := s.Register("second", "0 0 1 1 *", func(context.Context, *Deps) {}); err != nil {
 		t.Fatalf("Register after Start: %v", err)
 	}
 	if err := s.Remove("second"); err != nil {
@@ -182,7 +201,7 @@ func TestOverlapIsSkipped(t *testing.T) {
 	release := make(chan struct{})
 	var runs atomic.Int32
 	var once sync.Once
-	if err := s.Register("slow", "* * * * *", func(context.Context) {
+	if err := s.Register("slow", "* * * * *", func(context.Context, *Deps) {
 		runs.Add(1)
 		once.Do(func() { close(started) })
 		<-release
@@ -219,7 +238,7 @@ func TestOverlapIsSkipped(t *testing.T) {
 func TestPanicIsRecovered(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(slog.New(slog.NewTextHandler(&buf, nil)))
-	if err := s.Register("boom", "* * * * *", func(context.Context) { panic("kaboom") }); err != nil {
+	if err := s.Register("boom", "* * * * *", func(context.Context, *Deps) { panic("kaboom") }); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	wrapped := wrappedJob(s, "boom")
@@ -238,7 +257,7 @@ func TestPanicIsRecovered(t *testing.T) {
 func TestStopCancelsJobContext(t *testing.T) {
 	s := New(testLogger())
 	jobCtx := make(chan context.Context, 1)
-	if err := s.Register("wait", "* * * * *", func(ctx context.Context) { jobCtx <- ctx }); err != nil {
+	if err := s.Register("wait", "* * * * *", func(ctx context.Context, _ *Deps) { jobCtx <- ctx }); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	s.Start(context.Background())
@@ -275,7 +294,7 @@ func TestStartStopRunsNothingWithoutJobs(t *testing.T) {
 // TestStopBeforeStartIsSafe proves Stop is safe when the scheduler never ran.
 func TestStopBeforeStartIsSafe(t *testing.T) {
 	s := New(testLogger())
-	if err := s.Register("nightly", "0 0 * * *", func(context.Context) {}); err != nil {
+	if err := s.Register("nightly", "0 0 * * *", func(context.Context, *Deps) {}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	stopScheduler(t, s)
@@ -290,7 +309,7 @@ func TestConcurrentRegistration(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.Register("job-"+strconv.Itoa(i), "* * * * *", func(context.Context) {}); err != nil {
+			if err := s.Register("job-"+strconv.Itoa(i), "* * * * *", func(context.Context, *Deps) {}); err != nil {
 				t.Errorf("Register: %v", err)
 			}
 		}()

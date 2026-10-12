@@ -247,6 +247,7 @@ func TestCronCapabilityLoads(t *testing.T) {
 	}
 	for _, want := range []string{
 		"internal/cron/cron.go",
+		"internal/cron/deps.go",
 		"internal/cron/register.go",
 		"internal/config/cron.go",
 		"internal/di/cron_provider.go",
@@ -607,7 +608,7 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDIGraph(cron): %v", err)
 	}
-	for _, want := range []string{"loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler", "example.com/demo/internal/cron"} {
+	for _, want := range []string{"loom.Provide(NewCronDeps)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler", "example.com/demo/internal/cron"} {
 		if !strings.Contains(string(withCron), want) {
 			t.Errorf("cron graph is missing %q:\n%s", want, withCron)
 		}

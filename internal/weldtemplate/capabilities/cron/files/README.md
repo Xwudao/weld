@@ -12,7 +12,8 @@ and never regenerates, so the jobs you add there survive every later
 
 ```go
 func Register(s *cron.Scheduler) error {
-	return s.Register("nightly-report", "0 3 * * *", func(ctx context.Context) {
+	return s.Register("nightly-report", "0 3 * * *", func(ctx context.Context, deps *cron.Deps) {
+		deps.Logger.Info("nightly report started")
 		report(ctx) // ctx is canceled when the process stops
 	})
 }
@@ -20,6 +21,32 @@ func Register(s *cron.Scheduler) error {
 
 The default implementation registers nothing, which is why installing the
 capability schedules nothing by itself.
+
+## Where dependencies come from
+
+A job's second parameter is a `*cron.Deps` bundle, so a job reads the
+application's dependencies instead of a global. The shipped bundle holds the
+logger; add a field to `Deps` in `internal/cron/deps.go` (a stable seam) and
+construct it in `NewCronDeps` in `internal/di/cron_provider.go` (also stable):
+
+```go
+// internal/cron/deps.go
+type Deps struct {
+	Logger    *slog.Logger
+	Publisher events.Publisher
+}
+
+// internal/di/cron_provider.go
+func NewCronDeps(logger *slog.Logger, publisher events.Publisher) *cron.Deps {
+	return &cron.Deps{Logger: logger, Publisher: publisher}
+}
+```
+
+Loom resolves each parameter of `NewCronDeps` only because the provider consumes
+it, so making a job publish constructs the event dispatcher for the server graph
+and nothing else. Add the field, add the parameter, and `scheduler.Register`'s
+signature never changes — so adding a dependency touches neither the generated
+graph nor any generated test.
 
 ## How it follows serve
 

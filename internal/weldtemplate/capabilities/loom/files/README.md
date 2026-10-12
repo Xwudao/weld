@@ -36,7 +36,7 @@ var repositoryModule = loom.Module(
 | `*redis.Client` | `redis` | `redisclient.New` through `NewRedisClient`, defined in the stable `redis_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*redis.Client`. When a consumer asks for it, Loom validates the `redis` section, builds the lazy client (it is **not connected** at build, test or startup) and registers a cleanup that closes it exactly once |
 | `*cron.Scheduler` | `cron` | `mailsender.New` through `NewMailSender`, defined in the stable `mail_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*mailsender.Sender`. Construction never connects and never sends |
 | `*objectstore.Store` | `storage` | `objectstore.New` through `NewObjectStore`, defined in the stable `storage_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*objectstore.Store`. Construction never connects |
-| `*cron.Scheduler` | `cron` | `cron.New` through `NewScheduler`, defined in the stable `cron_provider.go` seam. Unlike the bindings above, the server graph root consumes it, so Loom always constructs it and its start/stop hooks run with the server. `NewScheduler` takes the server, so the socket is bound before the scheduler starts and the scheduler stops before the server. It starts no jobs until `internal/cron/register.go` registers them |
+| `*cron.Scheduler` | `cron` | `cron.New` through `NewScheduler`, defined in the stable `cron_provider.go` seam. Unlike the bindings above, the server graph root consumes it, so Loom always constructs it and its start/stop hooks run with the server. `NewScheduler` takes the server, so the socket is bound before the scheduler starts and the scheduler stops before the server. `NewCronDeps` builds the `cron.Deps` bundle every job receives; add a job dependency there, not to this regenerated graph. It starts no jobs until `internal/cron/register.go` registers them |
 | `*httpserver.Server` | `http` | the composed mux plus its `loom.Hook` start/stop lifecycle |
 | `*App` | `http` | the server graph root returned by `InitApp` |
 
@@ -99,9 +99,11 @@ never connect at construction. See
 so Loom constructs `NewScheduler` and registers its `loom.Hook` start/stop.
 `NewScheduler` takes the `*httpserver.Server`, and Loom constructs providers in
 dependency order and appends hooks as it constructs them, so the socket is bound
-before the scheduler starts and the scheduler stops before the server. The
-scheduler starts no jobs until `internal/cron/register.go` registers them. See
-`internal/cron/README.md`.
+before the scheduler starts and the scheduler stops before the server.
+`NewCronDeps` builds the `cron.Deps` bundle every job receives, so a job that
+needs the events publisher or a repository consumes it there rather than through
+a global or a signature change. The scheduler starts no jobs until
+`internal/cron/register.go` registers them. See `internal/cron/README.md`.
 
 Never wire providers into `di.go`: it is regenerated from the installed
 capability set, and an edit there is erased by the next capability install.
