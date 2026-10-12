@@ -10,13 +10,27 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/Xwudao/weld/internal/loomgen"
 	"github.com/Xwudao/weld/internal/project"
+	"github.com/Xwudao/weld/internal/semver"
 	"github.com/Xwudao/weld/internal/template"
+)
+
+// The Go module files are owned by the toolchain, not by weld: `go mod tidy`,
+// every build and `go get` rewrite them, and a project may add requirements
+// outside the weld:deps region on purpose (the region is regenerated, so
+// hand-written requirements have to live elsewhere). `weld upgrade` therefore
+// never rewrites them — it only extends them through a marker patch at install
+// time — and their recorded hash is refreshed after a generator may have touched
+// them, so toolchain churn is never reported as drift.
+const (
+	goModPath = "go.mod"
+	goSumPath = "go.sum"
 )
 
 // Request describes a scaffold action.
@@ -33,6 +47,11 @@ type Request struct {
 	// Without it a missing requirement is an error, so `weld add` never installs a
 	// capability the caller did not ask for silently.
 	WithDependencies bool
+	// Verify is the go command that checks the project after the plan is written,
+	// as a subcommand and its arguments (for example {"vet", "./..."}). An empty
+	// list writes the plan unchecked, which is the library default; the CLI sets
+	// it, so `weld upgrade` cannot leave a project that does not compile.
+	Verify []string
 }
 
 // Result is a planned scaffold action.
@@ -50,28 +69,43 @@ type Result struct {
 	GenerateLoom bool
 	// DIPackage is the package directory to regenerate, relative to Dir.
 	DIPackage string
+	// Verify is the post-apply check, copied from the request. When it is set,
+	// Apply runs it before and after the write: a project that already fails the
+	// check is written with a note (the check cannot attribute a failure to this
+	// plan), and a project that fails it afterwards is rolled back.
+	Verify []string
 }
 
 // Apply writes the planned result. When the plan changes the dependency graph it
-// also regenerates the Loom initializer; if generation fails the whole plan is
-// rolled back, so a project is never left with a graph that does not match its
-// generated code.
+// also regenerates the Loom initializer; if generation, the manifest refresh or
+// the post-apply check fails, the whole plan is rolled back, so a project is
+// never left with a graph that does not match its generated code, a manifest
+// that does not match the files, or code that does not build.
 func (r *Result) Apply() error {
 	if len(r.Operations) == 0 && !r.GenerateLoom {
 		return nil
 	}
-	if !r.GenerateLoom {
-		return project.Apply(r.Dir, r.Operations)
+	// The check decides whether a failure is this plan's fault, so the diagnostics
+	// that already exist before the plan is written are collected first: a project
+	// that does not build yet stays upgradable, and only a diagnostic this plan
+	// introduces is a failure.
+	var before []string
+	if len(r.Verify) > 0 {
+		if output, err := goCheck(r.Dir, r.Verify); err != nil {
+			before = diagnosticLines(output)
+			r.Notes = append(r.Notes, fmt.Sprintf(
+				"the project already fails `go %s` before this change; only a diagnostic this upgrade introduces is treated as a failure:\n%s",
+				strings.Join(r.Verify, " "), strings.TrimSpace(string(output))))
+		}
 	}
-	return r.applyAndGenerate()
-}
 
-func (r *Result) applyAndGenerate() error {
 	paths := make([]string, 0, len(r.Operations)+3)
 	for _, operation := range r.Operations {
 		paths = append(paths, operation.Path)
 	}
-	paths = append(paths, filepath.Join(r.DIPackage, "loom_gen.go"), "go.mod", "go.sum")
+	if r.GenerateLoom {
+		paths = append(paths, filepath.Join(r.DIPackage, "loom_gen.go"), goModPath, goSumPath)
+	}
 	snapshot, err := project.TakeSnapshot(r.Dir, paths)
 	if err != nil {
 		return err
@@ -79,21 +113,87 @@ func (r *Result) applyAndGenerate() error {
 	if err := project.Apply(r.Dir, r.Operations); err != nil {
 		return err
 	}
-	if err := loomgen.Generate(r.Dir, r.DIPackage); err != nil {
-		if restoreErr := snapshot.Restore(r.Dir); restoreErr != nil {
-			return fmt.Errorf("%w (rollback also failed: %v)", err, restoreErr)
+	var generated []string
+	if r.GenerateLoom {
+		if err := loomgen.Generate(r.Dir, r.DIPackage); err != nil {
+			return r.rollback(snapshot, err)
 		}
-		return fmt.Errorf("%w (changes rolled back)", err)
+		generated = append(generated, path.Join(r.DIPackage, "loom_gen.go"))
 	}
-	// The generator runs with -mod=mod, so it may rewrite go.mod as it resolves
-	// the module graph. Record what it wrote rather than reporting it as drift.
-	if err := project.RefreshManifest(r.Dir); err != nil {
-		if restoreErr := snapshot.Restore(r.Dir); restoreErr != nil {
-			return fmt.Errorf("refresh manifest: %w (rollback also failed: %v)", err, restoreErr)
+	if r.GenerateLoom || len(r.Verify) > 0 {
+		// The generator and the check both run with -mod=mod, so they may rewrite
+		// the module files as they resolve the module graph. Record what they
+		// wrote — and only what they wrote, because the recorded hash is the
+		// baseline `weld upgrade` trusts.
+		generated = append(generated, goModPath, goSumPath)
+	}
+	if len(r.Verify) > 0 {
+		output, err := goCheck(r.Dir, r.Verify)
+		if err != nil {
+			if introduced := newDiagnostics(before, output); len(introduced) > 0 {
+				return r.rollback(snapshot, fmt.Errorf("go %s: %w\n%s",
+					strings.Join(r.Verify, " "), err, strings.Join(introduced, "\n")))
+			}
+			r.Notes = append(r.Notes, fmt.Sprintf(
+				"`go %s` still fails after this change, with the same diagnostics as before it, so the upgrade was kept",
+				strings.Join(r.Verify, " ")))
 		}
-		return fmt.Errorf("refresh manifest: %w (changes rolled back)", err)
+	}
+	if err := project.RefreshManifest(r.Dir, generated...); err != nil {
+		return r.rollback(snapshot, fmt.Errorf("refresh manifest: %w", err))
 	}
 	return nil
+}
+
+// rollback restores the snapshot after a failed apply and reports the original
+// failure, saying so when the rollback itself failed.
+func (r *Result) rollback(snapshot *project.Snapshot, failure error) error {
+	if restoreErr := snapshot.Restore(r.Dir); restoreErr != nil {
+		return fmt.Errorf("%w (rollback also failed: %v)", failure, restoreErr)
+	}
+	return fmt.Errorf("%w (changes rolled back)", failure)
+}
+
+// diagnosticLines returns the non-empty, trimmed lines of a check's output, which
+// is the unit a before/after comparison works on.
+func diagnosticLines(output []byte) []string {
+	var lines []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	return lines
+}
+
+// newDiagnostics returns the lines of output that did not appear in before, in
+// order. It is what turns "does the check pass?" into "did this plan break
+// something?", so a project that was already failing is not held hostage by it.
+func newDiagnostics(before []string, output []byte) []string {
+	known := make(map[string]bool, len(before))
+	for _, line := range before {
+		known[line] = true
+	}
+	var introduced []string
+	for _, line := range diagnosticLines(output) {
+		if !known[line] {
+			introduced = append(introduced, line)
+		}
+	}
+	return introduced
+}
+
+// goCheck runs a go subcommand inside the project. It mirrors the generator's
+// environment: the project's own nested tool modules and any workspace file must
+// not change what the check resolves.
+func goCheck(dir string, args []string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	cmd := exec.Command("go", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=-mod=mod")
+	return cmd.CombinedOutput()
 }
 
 // Create plans a new project from the base capability.
@@ -132,7 +232,7 @@ func Create(req Request) (*Result, error) {
 		}
 		rendered := template.Render(content, vars)
 		operations = append(operations, project.Operation{Path: file.Path, Content: rendered})
-		manifest.SetFile(file.Path, base.Name, rendered)
+		manifest.SetFile(file.Path, base.Name, base.RoleOf(file.Path), rendered)
 	}
 
 	encoded, err := manifest.Encode()
@@ -188,7 +288,7 @@ func (p *planner) upsert(operation project.Operation) {
 // planNewFile plans a file that must not already exist. A path planned twice by
 // two payloads, and a path that exists without weld owning it, are both
 // conflicts, so a user file is never overwritten.
-func (p *planner) planNewFile(path, capability string, content []byte) error {
+func (p *planner) planNewFile(path, capability string, role project.Role, content []byte) error {
 	if _, exists := p.planned[path]; exists {
 		return &project.ConflictError{Path: path, Reason: "planned by another capability"}
 	}
@@ -199,7 +299,7 @@ func (p *planner) planNewFile(path, capability string, content []byte) error {
 	}
 	p.planned[path] = content
 	p.upsert(project.Operation{Path: path, Content: content})
-	p.manifest.SetFile(path, capability, content)
+	p.manifest.SetFile(path, capability, role, content)
 	return nil
 }
 
@@ -207,7 +307,7 @@ func (p *planner) planNewFile(path, capability string, content []byte) error {
 // keyed by capability for idempotency. It is the dynamic counterpart of
 // applyPatch for a per-name addition that has no capability payload: the snippet
 // is built in code and recorded under owner.
-func (p *planner) planMarker(path, marker, capability, owner string, snippet []byte) error {
+func (p *planner) planMarker(path, marker, capability, owner string, role project.Role, snippet []byte) error {
 	original, bootstrapped, err := patchTarget(p.req.Dir, template.Patch{Path: path, Marker: marker}, p.planned, p.manifest)
 	if err != nil {
 		return err
@@ -221,7 +321,7 @@ func (p *planner) planMarker(path, marker, capability, owner string, snippet []b
 	}
 	p.planned[path] = updated
 	p.upsert(project.Operation{Path: path, Content: updated, Overwrite: true})
-	p.manifest.SetFile(path, owner, updated)
+	p.manifest.SetFile(path, owner, role, updated)
 	return nil
 }
 
@@ -238,7 +338,11 @@ func (p *planner) installCapability(capability *template.Capability) error {
 			return err
 		}
 		rendered := template.Render(content, vars)
-		if err := p.planNewFile(file.Path, capability.Name, rendered); err != nil {
+		role := file.Role
+		if role == "" {
+			role = project.RolePayload
+		}
+		if err := p.planNewFile(file.Path, capability.Name, role, rendered); err != nil {
 			return err
 		}
 	}
@@ -284,8 +388,38 @@ func (p *planner) applyPatch(capability *template.Capability, patch template.Pat
 	}
 	p.planned[patch.Path] = updated
 	p.upsert(project.Operation{Path: patch.Path, Content: updated, Overwrite: true})
-	p.manifest.SetFile(patch.Path, capability.Name, updated)
+	// A patch extends a file another capability ships, so it records the new
+	// content without claiming ownership: the manifest keeps the shipping
+	// capability and its declared role, and only the hash moves.
+	p.manifest.SetPatchedFile(patch.Path, capability.Name, p.payloadRole(patch.Path), updated)
 	return nil
+}
+
+// payloadRole returns the role the capability that ships target declares for it,
+// so a marker patch records a shared file as its owner declares it (the Makefile
+// stays a seam) instead of flattening every patch target into RolePatched. A
+// target no installed capability ships is a patch-only file, which is patched.
+func (p *planner) payloadRole(target string) project.Role {
+	names, err := p.req.Catalog.Names()
+	if err != nil {
+		return project.RolePatched
+	}
+	for _, name := range names {
+		if !p.present[name] {
+			continue
+		}
+		capability, err := p.req.Catalog.Get(name)
+		if err != nil {
+			continue
+		}
+		if file, ok := capability.FileFor(target); ok {
+			if file.Role == "" {
+				return project.RolePayload
+			}
+			return file.Role
+		}
+	}
+	return project.RolePatched
 }
 
 // finish renders the dependency graph for the resulting installed set and
@@ -450,7 +584,11 @@ func (p *planner) restoreMissingDIFiles() error {
 				return err
 			}
 			vars := template.Vars{Name: p.manifest.Name, Module: p.manifest.Module, Version: capability.Version}
-			if err := p.planNewFile(file.Path, capability.Name, template.Render(content, vars)); err != nil {
+			role := file.Role
+			if role == "" {
+				role = project.RolePayload
+			}
+			if err := p.planNewFile(file.Path, capability.Name, role, template.Render(content, vars)); err != nil {
 				return err
 			}
 		}
@@ -583,7 +721,14 @@ func bootstrapContent(root, path string, patch template.Patch, manifest *project
 }
 
 func alreadyInstalledNotes(root string, manifest *project.Manifest, capability *template.Capability) []string {
-	notes := []string{fmt.Sprintf("%s %s is already installed", capability.Name, manifest.CapabilityVersion(capability.Name))}
+	recorded := manifest.CapabilityVersion(capability.Name)
+	notes := []string{fmt.Sprintf("%s %s is already installed", capability.Name, recorded)}
+	// A repeat add never upgrades: the payload that would move the project
+	// forward is `weld upgrade`, so point at it rather than leaving the newer
+	// version undiscovered.
+	if newer, err := semver.IsNewer(capability.Version, recorded); err == nil && newer {
+		notes = append(notes, fmt.Sprintf("this weld ships %s %s; run: weld upgrade %s", capability.Name, capability.Version, capability.Name))
+	}
 	drift := manifest.Drift(root)
 	if len(drift) == 0 {
 		return notes
@@ -698,7 +843,7 @@ func reconcileDI(req Request, manifest *project.Manifest, present map[string]boo
 			_, statErr := os.Stat(filepath.Join(req.Dir, source.path))
 			planned[source.path] = source.content
 			upsert(project.Operation{Path: source.path, Content: source.content, Overwrite: statErr == nil})
-			manifest.SetFile(source.path, capability.Name, source.content)
+			manifest.SetFile(source.path, capability.Name, project.RoleGenerated, source.content)
 			result.GenerateLoom = true
 			result.DIPackage = capability.DI.Dir
 		}

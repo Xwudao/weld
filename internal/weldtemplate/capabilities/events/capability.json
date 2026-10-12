@@ -1,0 +1,16 @@
+{
+  "name": "events",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "Opt-in in-process event dispatcher: typed Publish/On keyed on the event's concrete Go type, synchronous delivery in registration order, panic isolation and joined listener errors. Installing it dispatches nothing until a listener is registered in internal/events/register.go.",
+  "requires": ["loom"],
+  "files": [
+    { "path": "internal/events/dispatcher.go", "source": "files/dispatcher.go.tmpl" },
+    { "path": "internal/events/dispatcher_test.go", "source": "files/dispatcher_test.go.tmpl" },
+    { "path": "internal/events/recorder.go", "source": "files/recorder.go.tmpl" },
+    { "path": "internal/events/register.go", "source": "files/register.go.tmpl", "role": "seam" },
+    { "path": "internal/events/README.md", "source": "files/README.md" },
+    { "path": "internal/di/events_provider.go", "source": "files/events_provider.go.tmpl", "role": "seam", "when": ["loom"] }
+  ],
+  "patches": []
+}

@@ -1,0 +1,199 @@
+package events
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"strings"
+	"sync"
+	"testing"
+)
+
+type orderPaid struct{ ID string }
+
+type orderShipped struct{ ID string }
+
+func TestPublishRunsListenersInRegistrationOrder(t *testing.T) {
+	t.Parallel()
+	dispatcher := New(nil)
+	var calls []string
+	On(dispatcher, func(context.Context, orderPaid) error {
+		calls = append(calls, "first")
+		return nil
+	})
+	On(dispatcher, func(context.Context, orderPaid) error {
+		calls = append(calls, "second")
+		return nil
+	})
+
+	if err := dispatcher.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if got, want := strings.Join(calls, ","), "first,second"; got != want {
+		t.Fatalf("listeners ran in order %q, want %q", got, want)
+	}
+}
+
+func TestPublishKeysOnTheConcreteType(t *testing.T) {
+	t.Parallel()
+	dispatcher := New(nil)
+	paid, shipped, pointer := 0, 0, 0
+	On(dispatcher, func(context.Context, orderPaid) error { paid++; return nil })
+	On(dispatcher, func(context.Context, orderShipped) error { shipped++; return nil })
+	On(dispatcher, func(context.Context, *orderPaid) error { pointer++; return nil })
+
+	if err := dispatcher.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if err := dispatcher.Publish(context.Background(), &orderPaid{ID: "2"}); err != nil {
+		t.Fatalf("Publish pointer: %v", err)
+	}
+	if paid != 1 || pointer != 1 || shipped != 0 {
+		t.Fatalf("paid=%d pointer=%d shipped=%d, want 1/1/0", paid, pointer, shipped)
+	}
+}
+
+func TestPublishWithoutListenersIsNotAnError(t *testing.T) {
+	t.Parallel()
+	dispatcher := New(nil)
+	if err := dispatcher.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if err := dispatcher.Publish(context.Background(), nil); err != nil {
+		t.Fatalf("Publish(nil): %v", err)
+	}
+	var absent *Dispatcher
+	if err := absent.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("nil dispatcher Publish: %v", err)
+	}
+	On(absent, func(context.Context, orderPaid) error { return nil })
+	var nilListener Listener[orderPaid]
+	On(dispatcher, nilListener)
+	if err := dispatcher.Publish(context.Background(), orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("Publish after a nil listener: %v", err)
+	}
+}
+
+func TestPublishJoinsListenerErrorsAndKeepsGoing(t *testing.T) {
+	t.Parallel()
+	dispatcher := New(nil)
+	first := errors.New("first failed")
+	second := errors.New("second failed")
+	ran := false
+	On(dispatcher, func(context.Context, orderPaid) error { return first })
+	On(dispatcher, func(context.Context, orderPaid) error { return second })
+	On(dispatcher, func(context.Context, orderPaid) error { ran = true; return nil })
+
+	err := dispatcher.Publish(context.Background(), orderPaid{ID: "1"})
+	if !errors.Is(err, first) || !errors.Is(err, second) {
+		t.Fatalf("Publish error = %v, want both failures joined", err)
+	}
+	if !ran {
+		t.Fatal("a failing listener stopped the listeners after it")
+	}
+}
+
+func TestPublishRecoversAPanickingListener(t *testing.T) {
+	t.Parallel()
+	var sink bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&sink, nil))
+	dispatcher := New(logger)
+	ran := false
+	On(dispatcher, func(context.Context, orderPaid) error { panic("boom") })
+	On(dispatcher, func(context.Context, orderPaid) error { ran = true; return nil })
+
+	err := dispatcher.Publish(context.Background(), orderPaid{ID: "1"})
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("Publish error = %v, want a panic report", err)
+	}
+	if !ran {
+		t.Fatal("a panicking listener stopped the listeners after it")
+	}
+	logged := sink.String()
+	for _, want := range []string{"event listener failed", "panicked", "boom", "stack"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log record is missing %q:\n%s", want, logged)
+		}
+	}
+}
+
+func TestPublishNeverLogsTheEventValue(t *testing.T) {
+	t.Parallel()
+	var sink bytes.Buffer
+	dispatcher := New(slog.New(slog.NewTextHandler(&sink, nil)))
+	On(dispatcher, func(context.Context, orderPaid) error { return errors.New("nope") })
+
+	if err := dispatcher.Publish(context.Background(), orderPaid{ID: "secret-value"}); err == nil {
+		t.Fatal("Publish swallowed the failure")
+	}
+	if strings.Contains(sink.String(), "secret-value") {
+		t.Fatalf("the event value reached the log:\n%s", sink.String())
+	}
+	if !strings.Contains(sink.String(), "events.orderPaid") {
+		t.Errorf("the log does not name the event type:\n%s", sink.String())
+	}
+}
+
+func TestOnRejectsAnInterfaceEventType(t *testing.T) {
+	t.Parallel()
+	dispatcher := New(nil)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("On accepted an interface event type")
+		}
+	}()
+	On(dispatcher, func(context.Context, error) error { return nil })
+}
+
+func TestPublishIsSafeUnderConcurrentUse(t *testing.T) {
+	t.Parallel()
+	dispatcher := New(nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				On(dispatcher, func(context.Context, orderPaid) error { return nil })
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = dispatcher.Publish(context.Background(), orderPaid{ID: "1"})
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestRecorderSatisfiesPublisher(t *testing.T) {
+	t.Parallel()
+	var publisher Publisher = &Recorder{}
+	event := orderPaid{ID: "1"}
+	if err := publisher.Publish(context.Background(), event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	recorder := publisher.(*Recorder)
+	if got := recorder.Published(); len(got) != 1 || got[0] != event {
+		t.Fatalf("Published() = %v", got)
+	}
+	if !recorder.Contains(event) {
+		t.Error("Contains reported a recorded event as absent")
+	}
+	if recorder.Contains(orderPaid{ID: "other"}) {
+		t.Error("Contains accepted an event that was never published")
+	}
+	recorder.Reset()
+	if len(recorder.Published()) != 0 {
+		t.Fatal("Reset left records behind")
+	}
+	var absent *Recorder
+	if err := absent.Publish(context.Background(), event); err != nil {
+		t.Fatalf("nil recorder Publish: %v", err)
+	}
+	if absent.Published() != nil {
+		t.Fatal("nil recorder Published is not empty")
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"github.com/Xwudao/weld/internal/loomgen"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/scaffold"
+	"github.com/Xwudao/weld/internal/semver"
 	"github.com/Xwudao/weld/internal/skills"
 	"github.com/Xwudao/weld/internal/template"
 	weldtemplate "github.com/Xwudao/weld/internal/weldtemplate"
@@ -75,6 +76,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(
 		newNewCommand(),
 		newAddCommand(),
+		newUpgradeCommand(),
 		newGenCommand(),
 		newListCommand(),
 		newSkillsCommand(),
@@ -466,6 +468,232 @@ func genLoom(stdout io.Writer, dir string, dryRun bool) error {
 	return nil
 }
 
+// newUpgradeCommand builds `weld upgrade`.
+func newUpgradeCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "upgrade [capability...]",
+		Short: "move installed capabilities to this weld's template versions",
+		Long:  upgradeHelp(),
+		RunE:  runUpgrade,
+	}
+	cmd.Flags().Bool("check", false, "report what is out of date and fail instead of writing")
+	cmd.Flags().Bool("prune", false, "delete unmodified files a newer payload no longer ships")
+	cmd.Flags().String("verify", "vet", "check the project after writing: vet, build or none")
+	return cmd
+}
+
+// upgradeHelp explains what `weld upgrade` does and, just as importantly, what
+// it refuses to do.
+func upgradeHelp() string {
+	return `Move installed capabilities to the template versions this weld ships.
+
+A capability records the version that wrote its files in weld.json, and every
+managed file records the sha256 of what weld last wrote. Every file also has a
+role, and the role decides what an upgrade may do with it:
+
+  - a file weld owns outright is rewritten while the project has not changed it,
+    and reported with a unified diff when it has;
+  - a shared file (one that carries marker regions another capability extends,
+    for example internal/config/config.go) is moved forward by rendering the
+    newer payload and splicing the live marker regions into it, so a capability's
+    snippet and your own settings inside a region both survive;
+  - a project-owned seam is never written. internal/httpserver/middleware.go,
+    internal/httpserver/policy.go, the *_providers.go and register.go files, the
+    Makefile and config.yml are yours after weld writes them once, so a payload
+    change there is reported with a diff for you to fold in;
+  - the generated Loom graph is re-rendered from the installed capability set;
+  - go.mod and go.sum belong to the Go toolchain and are never rewritten.
+
+A file you deleted is reported, never resurrected. A file a newer payload no
+longer ships is reported, and deleted only with --prune, only when it is a plain
+payload file and only when it is unmodified.
+
+With no arguments every installed capability is considered. Naming capabilities
+limits the run, and a name that is not installed is an error.
+
+After writing the plan, ` + progName + ` runs a check inside the project and rolls
+the whole upgrade back if it fails, so an upgrade can never leave a project that
+does not build. --verify selects the check:
+
+  --verify=vet     go vet ./... (the default: it compiles the tests too)
+  --verify=build   go build ./...
+  --verify=none    write without checking
+
+The check compares diagnostics, not just the outcome, so a project that is already
+broken stays upgradable: only a diagnostic the upgrade introduces is a failure.
+That is what lets a manual seam migration happen while the payload has not moved.
+
+  ` + progName + ` upgrade                       upgrade everything that is behind
+  ` + progName + ` upgrade http                  upgrade one capability
+  ` + progName + ` upgrade --dry-run             print the plan, write nothing
+  ` + progName + ` upgrade --check               CI: fail when anything is out of date
+  ` + progName + ` upgrade --prune               also delete retired, unmodified files
+  ` + progName + ` upgrade --verify=build        check with a build instead of vet`
+}
+
+// upgradeVerify turns the --verify flag into the go command Apply runs. An empty
+// result writes the plan unchecked.
+func upgradeVerify(mode string) ([]string, error) {
+	switch mode {
+	case "vet":
+		return []string{"vet", "./..."}, nil
+	case "build":
+		return []string{"build", "./..."}, nil
+	case "none", "":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unknown --verify mode %q: use vet, build or none", mode)
+	}
+}
+
+// runUpgrade plans and, unless it is a check or a dry run, applies an upgrade.
+func runUpgrade(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+	check, err := cmd.Flags().GetBool("check")
+	if err != nil {
+		return err
+	}
+	prune, err := cmd.Flags().GetBool("prune")
+	if err != nil {
+		return err
+	}
+	verifyMode, err := cmd.Flags().GetString("verify")
+	if err != nil {
+		return err
+	}
+	verify, err := upgradeVerify(verifyMode)
+	if err != nil {
+		return err
+	}
+
+	result, err := scaffold.Upgrade(scaffold.Request{Dir: dir, Catalog: template.Load(), Verify: verify}, args, prune)
+	if err != nil {
+		return err
+	}
+
+	// A check never writes: it fails when weld would change anything at all,
+	// including a generated file that drifted, so CI catches staleness rather
+	// than only a version gap.
+	if check {
+		if len(result.Upgraded) == 0 && len(result.Operations) == 0 && len(result.Advisories) == 0 {
+			fmt.Fprintln(stdout, "Every installed capability is already at this weld's version.")
+			return nil
+		}
+		printUpgradeResult(stdout, result, upgradeCheck)
+		return fmt.Errorf("the project is not up to date with this weld; run: %s upgrade", progName)
+	}
+
+	if dryRun {
+		printUpgradeResult(stdout, result, upgradeDryRun)
+		return nil
+	}
+	if err := result.Apply(); err != nil {
+		return err
+	}
+	printUpgradeResult(stdout, result, upgradeApplied)
+	return nil
+}
+
+// printUpgradeResult reports an upgrade: the capabilities that moved, the files
+// weld writes, and the changes left for the user.
+func printUpgradeResult(stdout io.Writer, result *scaffold.UpgradeResult, mode upgradeMode) {
+	printNotes(stdout, result.Result)
+	if len(result.Upgraded) > 0 {
+		verb := "Upgraded"
+		noun := "capabilities"
+		if mode != upgradeApplied {
+			verb = "Would upgrade"
+		}
+		if len(result.Upgraded) == 1 {
+			noun = "capability"
+		}
+		fmt.Fprintf(stdout, "%s %d %s:\n", verb, len(result.Upgraded), noun)
+		for _, delta := range result.Upgraded {
+			fmt.Fprintf(stdout, "  %-8s %s -> %s\n", delta.Name, delta.From, delta.To)
+			for _, path := range delta.Files {
+				fmt.Fprintf(stdout, "      %s\n", path)
+			}
+		}
+	}
+	switch mode {
+	case upgradeApplied:
+		printOperations(stdout, result.Result, false)
+	default:
+		printOperationsFor(stdout, result.Result, "Plan (%d change(s), "+string(mode)+"):")
+	}
+	if len(result.Upgraded) == 0 && len(result.Operations) == 0 {
+		fmt.Fprintln(stdout, "Every installed capability is already at this weld's version.")
+	}
+	printAdvisories(stdout, result.Advisories)
+}
+
+// upgradeMode is how an upgrade reports itself: it applied the plan, or it is
+// previewing it as a dry run or a check.
+type upgradeMode string
+
+const (
+	upgradeApplied upgradeMode = "applied"
+	upgradeDryRun  upgradeMode = "dry run"
+	upgradeCheck   upgradeMode = "check"
+)
+
+// printOperationsFor prints the planned operations under a caller-supplied
+// header format, so an upgrade can say "dry run" or "check" where an add says
+// "Applied".
+func printOperationsFor(stdout io.Writer, result *scaffold.Result, header string) {
+	if len(result.Operations) == 0 {
+		if len(result.Notes) == 0 {
+			fmt.Fprintln(stdout, "No changes.")
+		}
+		return
+	}
+	fmt.Fprintf(stdout, header+"\n", len(result.Operations))
+	for _, operation := range result.Operations {
+		action := "add"
+		switch {
+		case operation.Delete:
+			action = "remove"
+		case operation.Overwrite:
+			action = "update"
+		}
+		fmt.Fprintf(stdout, "  %s %s\n", action, operation.Path)
+	}
+}
+
+// printAdvisories prints the files weld refused to write on its own, each with
+// the reason and, where one exists, the unified diff of what the newer payload
+// implies.
+func printAdvisories(stdout io.Writer, advisories []scaffold.Advisory) {
+	if len(advisories) == 0 {
+		return
+	}
+	noun := "files need"
+	if len(advisories) == 1 {
+		noun = "file needs"
+	}
+	fmt.Fprintf(stdout, "\n%d %s your attention (weld did not write these files):\n", len(advisories), noun)
+	for _, advisory := range advisories {
+		fmt.Fprintf(stdout, "  %s (%s, %s)\n", advisory.Path, advisory.Capability, advisory.Reason)
+		if advisory.Detail != "" {
+			fmt.Fprintf(stdout, "    %s\n", advisory.Detail)
+		}
+		if advisory.Diff == "" {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(advisory.Diff, "\n"), "\n") {
+			fmt.Fprintf(stdout, "    %s\n", line)
+		}
+	}
+}
+
 // newListCommand builds `weld list` (alias `ls`).
 func newListCommand() *cobra.Command {
 	return &cobra.Command{
@@ -523,6 +751,11 @@ Capabilities:
   seed   (add)      Opt-in database seeding: named, idempotent seeders over the
                     repositories the Loom seed graph injects, run by a short
                     seed command and make seed (requires db)
+  events (add)      Opt-in in-process event dispatcher: typed Publish/On keyed
+                    on the event's concrete Go type, synchronous delivery in
+                    registration order, panic isolation and joined listener
+                    errors; installing it dispatches nothing until you register
+                    a listener in internal/events/register.go (requires loom)
   redis  (add)      Opt-in Redis client with typed connection config; installing
                     it never connects Redis to a service (requires base, config)
   mail   (add)      Opt-in SMTP sender with typed, secret-redacted config;
@@ -533,9 +766,9 @@ Capabilities:
                     serve; installing it schedules nothing until you register
                     jobs in internal/cron/register.go
   loom   (add)      Loom dependency-injection graph wiring the HTTP server, the
-                    database, Redis, mail, storage and the cron scheduler
-                    (requires config; opt-in, never installed by web, db, seed,
-                    redis, mail, storage or cron)
+                    database, Redis, mail, storage and event bindings and the
+                    cron scheduler (requires config; opt-in, never installed by
+                    web, db, seed, redis, mail, storage, events or cron)
 
 Modules:
   add module <name> generates internal/modules/<name>: a small HTTP business
@@ -595,6 +828,25 @@ Generators:
   rebuilds internal/di/loom_gen.go with the pinned tools/loom generator (the
   same generator make generate runs, without the make fallback).
 
+Upgrades:
+  upgrade moves installed capabilities to the template versions this weld
+  ships. Every file a capability ships has a role: a file weld owns is rewritten
+  while it still matches weld.json; a shared file (internal/config/config.go)
+  keeps its live marker regions while the newer payload supplies the skeleton; a
+  project-owned seam is never rewritten and is reported with a unified diff;
+  the generated Loom graph is re-rendered; and go.mod/go.sum stay with the Go
+  toolchain. A file you changed or deleted is reported, never overwritten and
+  never resurrected; a file the payload no longer ships is deleted only with
+  --prune, only when it is a plain payload file and only when it is unmodified.
+  After writing, upgrade runs go vet ./... and rolls the whole change back if it
+  introduces a diagnostic, so an upgrade can never leave the project broken;
+  --verify=build|none selects the check. --dry-run prints the plan without
+  writing and --check reports what is out of date for CI. Naming capabilities
+  limits the run; a name that is not installed is an error. Every file a
+  capability writes is recorded in the project manifest (weld.json) with the
+  capability, role and version that produced it, and that record is what makes
+  the upgrade safe.
+
 Requirements are not installed silently: weld add <capability> fails when a
 required capability is missing and names it, and --with-dependencies installs
 the missing chain in the same plan. http and db each require the config
@@ -607,14 +859,17 @@ capabilities in any order. seed requires db and adds a short seed command over
 the repositories you wire in internal/di/seed_providers.go; it seeds nothing
 until you register a seeder. redis likewise requires only base (and config): it
 installs a lazy client the caller owns and never wires Redis into a service on
-its own. loom is required by every capability beyond the bare CLI, requires
+its own. events requires loom and installs a dispatcher that publishes nothing
+until you register a listener in internal/events/register.go. loom is required
+by every capability beyond the bare CLI, requires
 config, regenerates its graph when any capability it feeds is installed, and
 raises the project's Go floor to 1.25.
 
 Every file a capability writes is recorded in the project manifest (weld.json)
-with the capability and version that produced it. The skills command writes
-.agents/skills/weld/SKILL.md from that manifest and refuses to overwrite the
-file once you edit it.
+with the capability, the role and the version that produced it. That record is
+what lets weld upgrade move a capability to a newer payload without touching a
+file you changed or a seam the project owns. The skills command writes .agents/skills/weld/SKILL.md from that
+manifest and refuses to overwrite the file once you edit it.
 
 weld.yml is user-owned: it configures weld build (cross-compilation targets,
 build tags, CGO_ENABLED, ldflags), weld dev (the backend and frontend commands),
@@ -786,9 +1041,18 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	fmt.Fprintf(stdout, "\nInstalled in %s:\n", manifest.Name)
-	fmt.Fprintf(stdout, "  * base   v%s\n", manifest.Base.Version)
+	behind := false
+	baseHint := upgradeHint(catalog, manifest.Base.Name, manifest.Base.Version)
+	if baseHint != "" {
+		behind = true
+	}
+	fmt.Fprintf(stdout, "  * base   v%s%s\n", manifest.Base.Version, baseHint)
 	for _, capability := range manifest.Capabilities {
-		fmt.Fprintf(stdout, "  * %-6s v%s (applied %s)\n", capability.Name, capability.Version, capability.AppliedAt)
+		hint := upgradeHint(catalog, capability.Name, capability.Version)
+		if hint != "" {
+			behind = true
+		}
+		fmt.Fprintf(stdout, "  * %-6s v%s%s (applied %s)\n", capability.Name, capability.Version, hint, capability.AppliedAt)
 	}
 	if len(manifest.Modules) > 0 {
 		fmt.Fprintf(stdout, "\nModules in %s:\n", manifest.Name)
@@ -812,7 +1076,25 @@ func runList(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(stdout, "  %s (%s)\n", item.Path, item.Reason)
 		}
 	}
+	if behind {
+		fmt.Fprintf(stdout, "\nThis weld ships a newer payload for an installed capability (run: %s upgrade)\n", progName)
+	}
 	return nil
+}
+
+// upgradeHint renders the "(vX available)" suffix for an installed capability
+// this weld build ships a newer version of. It is silent for a capability this
+// weld does not ship, or one whose recorded version cannot be compared.
+func upgradeHint(catalog *template.Catalog, name, installed string) string {
+	capability, err := catalog.Get(name)
+	if err != nil {
+		return ""
+	}
+	newer, err := semver.IsNewer(capability.Version, installed)
+	if err != nil || !newer {
+		return ""
+	}
+	return fmt.Sprintf(" (v%s available)", capability.Version)
 }
 
 // runSkills generates or refreshes the project's agent skill file.
@@ -855,9 +1137,20 @@ func runSkills(cmd *cobra.Command, args []string) error {
 }
 
 func printResult(stdout io.Writer, result *scaffold.Result, dryRun bool) {
+	printNotes(stdout, result)
+	printOperations(stdout, result, dryRun)
+}
+
+// printNotes prints the plan's human-readable observations.
+func printNotes(stdout io.Writer, result *scaffold.Result) {
 	for _, note := range result.Notes {
 		fmt.Fprintln(stdout, note)
 	}
+}
+
+// printOperations prints the planned file operations. An empty plan says "No
+// changes." unless a note already explained the state.
+func printOperations(stdout io.Writer, result *scaffold.Result, dryRun bool) {
 	if len(result.Operations) == 0 {
 		if len(result.Notes) == 0 {
 			fmt.Fprintln(stdout, "No changes.")

@@ -20,7 +20,7 @@ require). The group resolves its dependencies from the command-specific graph in
 `internal/di/__modname___graph.go`. That graph binds `__modname__.NewService`
 (the same factory the HTTP server graph binds) and includes `commonModule`, the
 shared provider set `di.go` declares (configuration, logger and the installed
-db/redis/mail/storage bindings); Loom prunes every provider a subcommand does not
+db/redis/mail/storage/events bindings); Loom prunes every provider a subcommand does not
 consume, so the group never constructs the HTTP server, the scheduler or a
 database pool. A capability installed after this command still reaches it,
 because the shared providers live in `commonModule` rather than in this stable

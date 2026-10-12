@@ -91,7 +91,7 @@ import (
 )
 
 // commonModule groups the providers every graph shares: the configuration
-// loader, the configuration, the logger and the installed db/redis/mail/storage
+// loader, the configuration, the logger and the installed db/redis/mail/storage/events
 // bindings.
 //
 // It lives in this regenerated file rather than being copied into each graph, so
@@ -113,6 +113,15 @@ var commonModule = loom.Module(
 	// repository there, and Loom prunes every provider a root does not depend on,
 	// so including it costs a command nothing.
 	repositoryModule,
+{{- if .Caps.Has "events"}}
+	// The event dispatcher is a declared binding, not part of the default
+	// composition: nothing in the default graph depends on *events.Dispatcher or
+	// events.Publisher, so Loom prunes it and an application that publishes
+	// nothing constructs no dispatcher. It is defined in events_provider.go, the
+	// stable wiring seam; make a provider the graph already consumes depend on
+	// events.Publisher to switch it on.
+	loom.Provide(NewEventDispatcher),
+{{- end}}
 {{- if .Caps.Has "db"}}
 	// The pool is a declared binding, not part of the default composition:
 	// nothing in the default graph depends on it, so Loom prunes it and an

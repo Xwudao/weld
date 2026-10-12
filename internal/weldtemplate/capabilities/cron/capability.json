@@ -7,11 +7,11 @@
   "files": [
     { "path": "internal/cron/cron.go", "source": "files/cron.go.tmpl" },
     { "path": "internal/cron/cron_test.go", "source": "files/cron_test.go.tmpl" },
-    { "path": "internal/cron/register.go", "source": "files/register.go.tmpl" },
+    { "path": "internal/cron/register.go", "source": "files/register.go.tmpl", "role": "seam" },
     { "path": "internal/cron/README.md", "source": "files/README.md" },
     { "path": "internal/config/cron.go", "source": "files/cron_config.go.tmpl" },
     { "path": "internal/config/cron_test.go", "source": "files/cron_config_test.go.tmpl" },
-    { "path": "internal/di/cron_provider.go", "source": "files/cron_provider.go.tmpl", "when": ["loom"] }
+    { "path": "internal/di/cron_provider.go", "source": "files/cron_provider.go.tmpl", "role": "seam", "when": ["loom"] }
   ],
   "patches": [
     { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },

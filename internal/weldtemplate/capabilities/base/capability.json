@@ -11,9 +11,9 @@
     { "path": "internal/app/app.go", "source": "files/app.go.tmpl" },
     { "path": "internal/logging/logging.go", "source": "files/logging.go.tmpl" },
     { "path": "internal/logging/logging_test.go", "source": "files/logging_test.go.tmpl" },
-    { "path": "Makefile", "source": "files/Makefile.tmpl" },
+    { "path": "Makefile", "source": "files/Makefile.tmpl", "role": "seam" },
     { "path": "README.md", "source": "files/README.md.tmpl" },
-    { "path": ".gitignore", "source": "files/gitignore.txt" }
+    { "path": ".gitignore", "source": "files/gitignore.txt", "role": "seam" }
   ],
   "patches": []
 }

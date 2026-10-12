@@ -172,7 +172,7 @@ func AddEnum(req Request, name string, values []string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := p.planNewFile(humanPath, "enum:"+name, human); err != nil {
+	if err := p.planNewFile(humanPath, "enum:"+name, project.RoleSeam, human); err != nil {
 		return nil, err
 	}
 
@@ -331,7 +331,7 @@ func (p *planner) planGeneratedFile(target, owner string, content []byte) error 
 				return &project.ConflictError{Path: target, Reason: "exists but is not a weld-generated enum file (missing the DO NOT EDIT header)"}
 			}
 			if bytes.Equal(existing, content) {
-				p.manifest.SetFile(target, owner, content)
+				p.manifest.SetFile(target, owner, project.RoleGenerated, content)
 				return nil
 			}
 		case errors.Is(err, os.ErrNotExist):
@@ -341,7 +341,7 @@ func (p *planner) planGeneratedFile(target, owner string, content []byte) error 
 	}
 	p.planned[target] = content
 	p.upsert(project.Operation{Path: target, Content: content, Overwrite: existed})
-	p.manifest.SetFile(target, owner, content)
+	p.manifest.SetFile(target, owner, project.RoleGenerated, content)
 	return nil
 }
 

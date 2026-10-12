@@ -218,7 +218,7 @@ func Render(manifest *project.Manifest, catalog Catalog) ([]byte, error) {
 	writeCommands(&b, manifest)
 	writeEditing(&b, set)
 	writeFileIndex(&b, manifest)
-	writeRegenerate(&b)
+	writeRegenerate(&b, set)
 	return stamp([]byte(b.String())), nil
 }
 
@@ -284,10 +284,11 @@ var curatedNotes = map[string]string{
 	"http":    "HTTP server lifecycle in `internal/httpserver` and the `serve` command in `internal/app/serve.go`. Routes are composed explicitly with `httpx.NewRouter(mux)` and its typed helpers (`Get`, `Post`, `NoInput`, ...) or a raw `Router.Get`/`Router.HandleFunc`; there is no global route registry. The shared HTTP toolkit is `internal/httpx`: the `{code,msg,data}` JSON response envelope with raw writers for responses that must stay unwrapped, a router with grouping, per-group middleware and named route policies, typed handlers, query/path and JSON binding with a body limit, automatic `Validate() error` on a request DTO, `*HTTPError` status mapping, and the composable middleware (`RequestID`, `AccessLog`, `Recover`). A configuration-driven CORS policy (`httpx.CORS`) is installed outermost only when `config.yml`'s `cors` section enables it; it answers a preflight before the router, refuses a disallowed origin/method/header with a 403 envelope, echoes the origin instead of `*` when credentials are allowed, and is validated fail-closed at startup (an enabled section with no origin, a non-origin entry such as a trailing slash, and `*` with `allow_credentials` are all errors). `CORS_*` environment variables override the file. The global middleware stack and the named policies are declared in the stable, project-owned `internal/httpserver/middleware.go` and `internal/httpserver/policy.go`; `internal/httpserver.APIPrefix` is the mount prefix, so versioning is one line. The router records every route it registers (`Routes`, `LogRoutes`, `PrintRoutes`), and the generated composition logs the table with each route's policies at startup when `environment` is local or development, so the surface and its coverage are visible without a request. A route policy is only a name: the composition root resolves it into middleware with `httpx.Router.WithPolicy`, and the generated `AdminGuard` is a replaceable placeholder, so the project's real check (a JWT, a session or a database role lookup) is implemented there or in a package it delegates to. Once installed, a bare invocation runs the same serve lifecycle as `serve`, and `--config`/`--addr` are shared persistent root flags so both parse one definition.",
 	"web":     "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
 	"db":      "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself.",
-	"loom":    "compile-time dependency injection in `internal/di`, required by every capability and command beyond the bare CLI (install it with `--with-dependencies`). All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage bindings. A command group resolves its graph lazily through the shared `internal/commandkit` seam, so a subcommand injects a dependency by adding a field to its `Deps` and a parameter to `NewDeps` (a provider already in `commonModule` needs no graph edit; a new one needs `loom.Provide(...)` in `internal/di/<name>_graph.go`). Loom raises the project's Go directive to 1.25.",
+	"loom":    "compile-time dependency injection in `internal/di`, required by every capability and command beyond the bare CLI (install it with `--with-dependencies`). All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage/events bindings. A command group resolves its graph lazily through the shared `internal/commandkit` seam, so a subcommand injects a dependency by adding a field to its `Deps` and a parameter to `NewDeps` (a provider already in `commonModule` needs no graph edit; a new one needs `loom.Provide(...)` in `internal/di/<name>_graph.go`). Loom raises the project's Go directive to 1.25.",
 	"redis":   "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
 	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs, unique names, overlap skipping, panic recovery and graceful stop. Cron installs HTTP and follows only the Loom `serve` lifecycle, never a short command. `internal/cron/register.go` is the stable job-registration file; installing cron schedules nothing.",
 	"seed":    "opt-in database seeding in `internal/data/seeder`: named, idempotent seeders run by the short `seed` command (`make seed`, `weld seed`) over the repositories the Loom seed graph injects. The seeders live behind the `seed` build tag (`//go:build seed`), so the production build (`go build`, `weld build`) compiles in neither the seed data nor any faker a seeder imports. Installing seed seeds nothing; `weld add seeder <name>` writes one `seed_<name>.go` per seeder and registers it in the stable `internal/data/seeder/register.go` index, and `internal/di/seed_providers.go` is the stable repository seam.",
+	"events":  "opt-in in-process event dispatcher in `internal/events`: `events.On[E](d, listener)` registers a listener keyed on the event's concrete Go type, and `Publish` runs every listener for that type synchronously, in registration order, joining their errors. A panicking listener is recovered and logged instead of taking the process down, and the event value is never logged. It is not a queue: no persistence, no retry, no worker, and an event published inside a database transaction is delivered before the commit. Installing events dispatches nothing until you register a listener in the stable `internal/events/register.go`; `internal/di/events_provider.go` is the stable Loom seam, the dispatcher is pruned until a provider depends on `events.Publisher`, and `events.Recorder` is the test double.",
 	"mail":    "opt-in SMTP sender in `internal/mailsender`: one connection per `Send` with an explicit TLS policy and header-injection guards. Nothing generated imports it, so serving sends no mail; `internal/di/mail_provider.go` is the stable Loom seam.",
 	"storage": "opt-in S3-compatible object storage in `internal/objectstore`: a streaming client with bounded presigned URLs. It never creates the bucket, and nothing generated imports it; `internal/di/storage_provider.go` is the stable Loom seam.",
 }
@@ -338,11 +339,20 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 		b.WriteString("  `make seed` or `weld seed`.\n")
 		wrote = true
 	}
+	if set["events"] {
+		b.WriteString("- **events** installs a dispatcher but registers no listener and publishes\n")
+		b.WriteString("  nothing: delivery happens only where project code publishes, and only to\n")
+		b.WriteString("  the listeners you add in `internal/events/register.go` (see\n")
+		b.WriteString("  `internal/events/README.md`). The dispatcher is constructed only when a\n")
+		b.WriteString("  provider depends on `events.Publisher`, and delivery is synchronous — it\n")
+		b.WriteString("  is not a queue.\n")
+		wrote = true
+	}
 	if set["loom"] {
 		b.WriteString("- **loom** is installed with every non-base addition. Command graphs share\n")
 		b.WriteString("  available bindings through `commonModule`; the HTTP server graph exists only\n")
-		b.WriteString("  with **http**. Unused DB, Redis, mail and storage providers are pruned, and\n")
-		b.WriteString("  short commands never start HTTP or cron.\n")
+		b.WriteString("  with **http**. Unused DB, Redis, mail, storage and event providers are pruned,\n")
+		b.WriteString("  and short commands never start HTTP or cron.\n")
 		wrote = true
 	}
 	if wrote {
@@ -473,11 +483,28 @@ func writeFileIndex(b *strings.Builder, manifest *project.Manifest) {
 	b.WriteString("\n")
 }
 
-func writeRegenerate(b *strings.Builder) {
+func writeRegenerate(b *strings.Builder, caps map[string]bool) {
 	b.WriteString("## Regenerating this skill\n\n")
 	b.WriteString("This file is produced by `weld skills` from `weld.json`; re-run it after\n")
 	b.WriteString("adding a capability:\n\n")
 	b.WriteString("    weld skills [--dir .] [--dry-run]\n\n")
 	b.WriteString("weld refuses to overwrite the file once it differs from the generated content,\n")
 	b.WriteString("so your edits are safe. Delete or rename the file to regenerate from scratch.\n\n")
+	b.WriteString("Moving an installed capability to a newer scaffold payload is `weld upgrade`.\n")
+	b.WriteString("It decides per file from the file's declared role: a file weld owns is rewritten\n")
+	b.WriteString("while it still matches `weld.json`; a shared file such as\n")
+	b.WriteString("`internal/config/config.go` gets the newer payload skeleton with the live marker\n")
+	b.WriteString("regions spliced in; the generated Loom graph is re-rendered; and `go.mod` and\n")
+	b.WriteString("`go.sum` are left to the Go toolchain. A project-owned seam is never rewritten,\n")
+	b.WriteString("because the project owns it after weld writes it once: weld reports the diff\n")
+	b.WriteString("instead")
+	if caps["http"] {
+		b.WriteString(", which is how a change to `internal/httpserver/middleware.go` or\n`internal/httpserver/policy.go` reaches you")
+	}
+	b.WriteString(". The `*_providers.go` and `register.go` files, the `Makefile` and `config.yml`\n")
+	b.WriteString("are seams too. A file you changed is reported with a unified diff, and a file you\n")
+	b.WriteString("deleted is never resurrected. After writing, `weld upgrade` runs `go vet ./...`\n")
+	b.WriteString("and rolls the whole change back if the project no longer builds, so an upgrade\n")
+	b.WriteString("never leaves the project broken; `--verify=build|none` selects the check.\n")
+	b.WriteString("`weld upgrade --check` reports the same thing for CI.\n\n")
 }

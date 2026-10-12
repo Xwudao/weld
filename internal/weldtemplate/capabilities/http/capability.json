@@ -7,8 +7,8 @@
   "files": [
     { "path": "internal/httpserver/http.go", "source": "files/http.go.tmpl" },
     { "path": "internal/httpserver/server.go", "source": "files/server.go.tmpl" },
-    { "path": "internal/httpserver/middleware.go", "source": "files/middleware.go.tmpl" },
-    { "path": "internal/httpserver/policy.go", "source": "files/policy.go.tmpl" },
+    { "path": "internal/httpserver/middleware.go", "source": "files/middleware.go.tmpl", "role": "seam" },
+    { "path": "internal/httpserver/policy.go", "source": "files/policy.go.tmpl", "role": "seam" },
     { "path": "internal/httpserver/http_test.go", "source": "files/http_test.go.tmpl" },
     { "path": "internal/httpx/httpx.go", "source": "files/httpx/httpx.go.tmpl" },
     { "path": "internal/httpx/bind.go", "source": "files/httpx/bind.go.tmpl" },

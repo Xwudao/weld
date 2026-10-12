@@ -5,9 +5,11 @@ capabilities to the *same* project over time — `weld add web` modifies your
 existing project to gain a web frontend instead of generating a second
 template. It also drives the assembled project: `weld dev` runs the backend and
 frontend together, `weld build` builds the frontend and cross-compiles the
-binary, `weld seed` runs the project's database seeders, and `weld deploy`
-uploads the built binary to the configured host and runs its remote script —
-all configured by the optional, user-owned `weld.yml`.
+binary, `weld seed` runs the project's database seeders, `weld deploy`
+uploads the built binary to the configured host and runs its remote script, and
+`weld upgrade` moves an installed capability to the payload this weld ships
+without touching a file you changed — `weld dev`, `weld build`, `weld seed` and
+`weld deploy` are configured by the optional, user-owned `weld.yml`.
 
 Install the latest patch release with Go 1.23 or newer (the tool itself builds on Go
 1.23; a generated project that adds a capability installs Loom and raises its
@@ -24,6 +26,7 @@ weld add web --with-dependencies  # installs http (and loom, config), then the f
 weld add module items  # JSON business module: typed handlers, DTO validation, {code,msg,data}
 weld add enum status draft published  # typed string enum + generated methods
 weld add db            # PostgreSQL: SQL migrations + sqlc, pool and repository
+weld upgrade           # move installed capabilities to this weld's payloads
 weld config example    # print the optional, user-owned weld.yml starter
 weld dev               # backend + pnpm frontend dev servers, side by side
 weld build             # builds the frontend and cross-compiles the binary
@@ -49,6 +52,7 @@ weld add <capability> [--dir dir] [--dry-run]
 weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
+weld upgrade [capability...] [--check] [--prune] [--verify vet|build|none] [--dir dir] [--dry-run]
 weld gen [enum|loom] [--dir dir] [--dry-run]
 weld dev [--dir dir]
 weld build [--dir dir]
@@ -151,6 +155,13 @@ Capabilities:
 - `redis` (add) — an opt-in Redis client with typed connection configuration.
   Requires `loom` but not `http`; installing it never connects Redis to a
   service.
+- `events` (add) — an opt-in in-process event dispatcher: `events.On[E]`
+  registers a listener keyed on the event's concrete Go type and `Publish` runs
+  every listener for that type synchronously, in registration order, joining
+  their errors and isolating a panic. Requires `loom` but not `http`; installing
+  it dispatches nothing until you register a listener in
+  `internal/events/register.go`. It is not a queue (see
+  [`weld add events`](#weld-add-events)).
 - `mail` (add) — an opt-in SMTP sender with typed, secret-redacted
   configuration and an explicit TLS policy. Requires `loom` but not `http`;
   installing it never sends and never connects.
@@ -162,7 +173,7 @@ Capabilities:
   `internal/cron/register.go`.
 - `loom` (add) — the compile-time [Loom](https://github.com/Xwudao/loom)
   dependency-injection foundation. Its `commonModule` always wires the
-  configuration, the logger and the installed `db`/`redis`/`mail`/`storage`
+  configuration, the logger and the installed `db`/`redis`/`mail`/`storage`/`events`
   bindings; once `http` is installed it also declares the server graph (the HTTP
   server, the business modules and the cron scheduler)
   with lifecycle start/stop. Requires `config`, and every capability beyond the
@@ -302,6 +313,119 @@ the frontend never masquerades as an API that is not installed.
   marker region; every byte outside the region is left untouched, and all other
   writes are additive.
 
+## `weld upgrade`
+
+`weld upgrade` moves installed capabilities to the template versions the running
+`weld` ships. A capability records the version that wrote its files in
+`weld.json`, every managed file records the sha256 of what weld last wrote, and
+every file carries the **role** its capability declared for it. An upgrade decides
+from those three facts — what the payload ships, what weld wrote, what is on disk
+— instead of from a heuristic:
+
+```sh
+weld upgrade                      # every installed capability
+weld upgrade http                 # one capability
+weld upgrade --dry-run            # print the plan, write nothing
+weld upgrade --check              # CI: fail when anything is out of date
+weld upgrade --prune              # also delete retired, unmodified files
+weld upgrade --verify=build       # check with go build instead of go vet
+weld upgrade --verify=none        # write without checking
+```
+
+### Every file has a role
+
+A capability declares the role of each file it ships, and the role decides what an
+upgrade may do with it:
+
+| role | example | upgrade behaviour |
+|---|---|---|
+| `payload` (the default) | `internal/httpx/*.go`, `README.md` | rewritten while you have not changed it; otherwise reported with a diff |
+| `patched` | `internal/config/config.go` | the newer payload supplies the skeleton and your live marker regions are spliced into it |
+| `seam` | `internal/httpserver/middleware.go`, `internal/httpserver/policy.go`, `internal/di/*_providers.go`, `internal/*/register.go`, the `Makefile`, `.gitignore`, `config.yml` | written once, then yours: **never rewritten**, reported with a diff when the shipped version moves |
+| `generated` | `internal/di/di.go`, `internal/di/di_test.go` | re-rendered from the graph, never merged, never pruned |
+
+`go.mod` and `go.sum` belong to the Go toolchain: `go mod tidy`, every build and
+`go get` rewrite them, and a project legitimately keeps its own requirements
+outside the `weld:deps` region — the region is regenerated, so anything hand
+written has to live elsewhere. An upgrade never rewrites them.
+
+**A `patched` file** is a payload file that also carries marker regions another
+capability extends. `weld upgrade` renders the newer payload, then splices the
+live region bodies into it, so the payload change and everything inside a region
+both survive: upgrading `config` brings in the `cors` section while keeping the
+`redis` fields. Everything *outside* the regions belongs to weld, so a project
+addition to such a file goes inside a marker region.
+
+**A `seam`** is the promise the file itself makes — "weld writes this once and
+never regenerates it". An upgrade keeps that promise even when the file still
+matches the recorded baseline, which is what stops a payload update from quietly
+dropping middleware you added to the chain. When the shipped version of a seam
+changes, the upgrade prints the diff and you fold it in; a contract change in a
+seam (for example a different function signature) therefore needs the one manual
+edit, and the check below makes that visible instead of leaving a broken project.
+
+The regenerated Loom graph (`internal/di/di.go`, `internal/di/di_test.go` and
+`internal/di/loom_gen.go`) is reconciled rather than merged: an older or hand
+edited graph is re-rendered from the installed capability set and the pinned
+generator re-runs, with the same snapshot-and-rollback the check uses.
+
+**A retired file** — one the manifest records as a plain payload file that the
+newer payload no longer ships — is reported, and `--prune` deletes it only when it
+is unmodified. Seams, `patched` files, generated files and marker-patch targets
+are never pruned: they are not the capability's to remove.
+
+### The record is a baseline, and it is only refreshed for what weld wrote
+
+`weld.json` (manifest version 2) marks every record written by this weld with
+`baseline: true`, and `RefreshManifest` re-hashes only the paths weld's own
+tooling rewrote (`go.mod`, `go.sum`, the Loom initializer). A version 1 manifest
+refreshed *every* hash after *every* `weld add`, which absorbed your edits into
+the baseline; that is how an upgrade came to believe an edited middleware seam
+was untouched and overwrote it. A version 1 manifest is loaded with that fact
+recorded, and the upgrade says so in its report: it stays conservative, project
+seams are never rewritten, and each file becomes a trusted baseline as weld writes
+it.
+
+### It checks the project before it keeps the change
+
+After writing the plan, `weld upgrade` runs a check inside the project and rolls
+the entire upgrade back if it fails — so an upgrade can never be the reason a
+project stops compiling, and the error you read is the compiler's rather than a
+generator's:
+
+```text
+weld: go vet ./...: exit code 1
+# example.com/demo/internal/httpserver
+internal/httpserver/middleware.go:57:24: cfg.CORS undefined (type *config.Config has no field or method CORS)
+ (changes rolled back)
+```
+
+`--verify` selects the check: `vet` (the default; it compiles the tests too),
+`build`, or `none`. The check compares diagnostics rather than only asking whether
+the project builds: a project that is already broken stays upgradable, and the
+upgrade fails only on a diagnostic it introduced itself. That matters because
+migrating a project-owned seam is a manual step — while the seam is migrated and
+the payload has not moved yet, the project deliberately does not build, and the
+upgrade still has to be able to land.
+
+`--check` fails when weld would write anything at all, including a drifted
+generated file or an outstanding seam advisory, which makes it a CI gate rather
+than only a version comparison.
+
+### What it deliberately does not do
+
+Upgrading is not a migration engine. A payload change that cannot be expressed as
+"this is the new content of a file weld owns" — a renamed configuration key, a
+requirement removed from `go.mod`, a seam whose *signature* changed — is reported
+for you to apply, because weld performs no text substitution and rewrites nothing
+you own. Marker patch snippets are not re-applied either: a shared file moves
+forward by splicing the live regions into the newer skeleton, so a *changed
+snippet* on an existing region stays manual. A capability whose recorded version
+equals the catalog version is never rewritten, so an upgrade is deterministic and
+repeatable. The payloads of `weld add module`, `weld add command` and
+`weld add enum` are written once and belong to you; `weld upgrade` does not touch
+them.
+
 ## `weld skills`
 
 `weld skills` writes a project-specific agent skill to
@@ -320,8 +444,9 @@ version, what being **installed** does and does not mean, and which files weld
 generates. It is honest about the difference between installed and **wired**:
 a business module's default `Service` is an in-memory development demo that
 `db` never replaces on
-its own, `db` installs a pool and repository but connects nothing, and `redis`
-installs a client that never dials or pings. A capability the running binary
+its own, `db` installs a pool and repository but connects nothing, `redis`
+installs a client that never dials or pings, and `events` installs a dispatcher
+that publishes nothing. A capability the running binary
 knows but this command does not curate is described from the catalog summary,
 and an unrecognized one is listed without an invented description.
 
@@ -448,6 +573,45 @@ and `loom_gen.go` alone are regenerated.
 Because the generated initializer imports `github.com/Xwudao/loom`, installing
 `loom` raises the project's Go directive to `go 1.25.0`. The generator's
 `x/tools` dependency stays in `tools/loom`.
+
+## `weld add events` (synchronous, in-process)
+
+`weld add events` adds an in-process event dispatcher: `events.On[E](d, listener)`
+registers a listener keyed on the event's concrete Go type, and `Publish` runs
+every listener registered for that type, synchronously, in registration order.
+It requires `loom` but not `http`, so a CLI-only project can dispatch events.
+
+What lands in the project:
+
+- `internal/events/dispatcher.go` — `Publisher` (the interface application code
+  depends on), `Listener[T]`, `On[T]`, `Publish` and the concrete `*Dispatcher`.
+  `Publish` joins the listeners' errors with `errors.Join`, recovers a panicking
+  listener into a logged error, and never logs the event value.
+- `internal/events/recorder.go` — `Recorder`, a `Publisher` that records instead
+  of delivering, so a test asserts what a handler published with no listener and
+  no graph.
+- `internal/events/register.go` — the stable, user-editable registration file.
+  `weld add events` writes it once and never regenerates it.
+- `internal/di/events_provider.go` — the stable Loom provider seam, written when
+  `loom` is installed.
+
+Delivery is **synchronous**: `Publish` returns only after every listener
+returned, in the caller's goroutine. That is what makes a listener's failure
+visible to the caller and the behavior assertable in a test without a worker, a
+poll or a wait. It is also a real constraint, and the generated
+`internal/events/README.md` says so: a slow listener slows the caller, an event
+published inside a database transaction is delivered before the commit, and a
+listener that panics is contained but the event is not retried. Moving slow work
+behind a durable queue is a queue capability's job; because callers depend on
+`events.Publisher` rather than the concrete dispatcher, that change stays in the
+wiring.
+
+Installing it dispatches nothing: `internal/events/register.go` registers no
+listener, and the Loom graph prunes the dispatcher until a provider the graph
+consumes depends on `events.Publisher` — for example by adding the parameter to a
+business module's `NewService`, after which the graph constructs the dispatcher
+and runs `Register`. A listener that fails to register fails startup, not the
+first request.
 
 ## `weld add module` (stage 5)
 
@@ -739,11 +903,18 @@ project can reorder it, replace it or add its own middleware beside it.
 A project scaffolded by an earlier weld does not gain the policy from a repeat
 `weld add http`: a repeat add of an installed capability is a no-op that only
 reports the new files as drift, and the `weld:http:installed` sentinel means the
-config region is not re-appended either. Adopting it in such a project means
-copying `internal/httpx/cors.go` and `internal/httpx/cors_test.go` from a project
-that installs `http` now, adding the `cors` section to `config.yml`, and adding
-the `httpx.CORS` entry to `internal/httpserver/middleware.go`. A general
-capability-upgrade path (`weld upgrade`) is not implemented.
+config region is not re-appended either. `weld upgrade` is the path that closes
+that gap. It writes the payload files the project never touched
+(`internal/httpx/cors.go`, `internal/httpx/cors_test.go`), it brings the `cors`
+section into `internal/config/config.go` by splicing the live marker regions into
+the newer payload, and it reports the one file it will not touch — the stable,
+project-owned `internal/httpserver/middleware.go` — with the unified diff that
+adds the `httpx.CORS` entry. Two parts stay manual, on purpose: the
+`internal/httpserver/middleware.go` seam itself, because the project owns it, and
+the commented `cors:` block that lives in a patch snippet — a snippet already
+present in a region is never re-inserted, so add the block by hand or set the
+`CORS_*` environment variables. The policy is off by default either way. See
+[`weld upgrade`](#weld-upgrade).
 
 ## Tests
 
@@ -861,6 +1032,37 @@ Test conventions:
   unmanaged-file conflicts, dry-run, no unintended edits, and the extension
   point format (two capabilities into one region in either order, duplicate
   inserts, malformed markers, and preserved user text).
+- The `weld upgrade` tests prove a project this weld wrote is a no-op, that a
+  file an older payload wrote is updated while its recorded version moves
+  forward, that a new payload file is written, that an edited file produces an
+  advisory carrying the project's own line and is never overwritten, that a
+  deleted file is never resurrected, that a retired file is kept until `--prune`
+  and never deleted once modified, that a drifted generated Loom graph is
+  reconciled and regenerated, that a capability this weld no longer ships is
+  reported rather than fatal, and that a name the project does not have is an
+  error. Four of them are regression guards for the ownership model: a
+  project-owned seam is never rewritten even when its recorded hash matches the
+  edit, a payload file recorded under the capability that patched it is still
+  upgraded by the capability that ships it and keeps the live marker region, a
+  generated DI file is never treated as retired (so `--prune` cannot delete the
+  graph), and a plan that would not compile is rolled back while a project that
+  already fails the check is written with a note. The CLI tests cover `--check`,
+  `--dry-run` writing nothing, the apply path, `--verify` selection and the seam
+  report. `internal/project` covers the unified diff (a replaced line, an
+  insertion into an empty file, two hunks for distant changes, identical content
+  and the bound on huge input), marker-region splicing (live regions kept,
+  orphaned regions reported, a new region shipped, both comment styles, an
+  unclosed region rejected), a scoped `RefreshManifest` and a patch that extends a
+  file without taking it over; `internal/semver` covers version ordering and the
+  refusal to compare a version it cannot parse.
+- The events capability ships its own descriptor test (it requires `loom` and
+  never `http`, writes no shared file, adds no dependency, and registers
+  listeners only through the stable file) and its dispatcher test, which runs in
+  the generated project: registration order, keying on the concrete type, joined
+  errors, a recovered panic, the event value staying out of the log, nil safety
+  and concurrent publish/register under `-race`. A scaffold test generates a
+  project, registers a listener, and asserts delivery through the generated
+  package's own `go test` run.
 
 ## Layout
 
@@ -868,7 +1070,8 @@ Test conventions:
 cmd/weld/            CLI entry point
 internal/cli/        argument parsing and output
 internal/template/   capability catalog, module and command templates, placeholder rendering
-internal/project/    manifest, marker patching, best-effort rollback apply
-internal/scaffold/   create/add/add-module/add-command plans and dependency resolution
+internal/project/    manifest, marker regions and splicing, unified diff, best-effort rollback apply
+internal/scaffold/   create/add/upgrade/add-module/add-command plans and dependency resolution
+internal/semver/     comparison of the dotted capability versions weld records
 internal/skills/     project agent skill generation and safe write
 ```

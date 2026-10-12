@@ -10,7 +10,7 @@
     { "path": "internal/objectstore/objectstore.go", "source": "files/objectstore.go.tmpl" },
     { "path": "internal/objectstore/objectstore_test.go", "source": "files/objectstore_test.go.tmpl" },
     { "path": "internal/objectstore/README.md", "source": "files/README.md" },
-    { "path": "internal/di/storage_provider.go", "source": "files/storage_provider.go.tmpl", "when": ["loom"] }
+    { "path": "internal/di/storage_provider.go", "source": "files/storage_provider.go.tmpl", "role": "seam", "when": ["loom"] }
   ],
   "patches": [
     { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },

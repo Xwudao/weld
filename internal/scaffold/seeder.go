@@ -78,12 +78,12 @@ func AddSeeder(req Request, name string) (*Result, error) {
 		}
 	}
 
-	if err := p.planNewFile(path, "seed:"+name, seederFile(name)); err != nil {
+	if err := p.planNewFile(path, "seed:"+name, project.RoleSeam, seederFile(name)); err != nil {
 		return nil, err
 	}
 	registration := fmt.Sprintf("\t// weld:seed:%s:installed %s\n\tr.Register(%q, seed%s)\n",
 		name, seedCapability.Version, name, template.ExportName(name))
-	if err := p.planMarker(filepath.Join(seederDir, "register.go"), seederRegisterMarker, "seed:"+name, "seed", []byte(registration)); err != nil {
+	if err := p.planMarker(filepath.Join(seederDir, "register.go"), seederRegisterMarker, "seed:"+name, "seed", project.RoleSeam, []byte(registration)); err != nil {
 		return nil, err
 	}
 	if err := p.finish(); err != nil {

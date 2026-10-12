@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 
+	"github.com/Xwudao/weld/internal/project"
 	weldtemplate "github.com/Xwudao/weld/internal/weldtemplate"
 )
 
@@ -22,10 +23,49 @@ const (
 	KindAdd Kind = "add"
 )
 
+// Role classifies how `weld upgrade` may treat a payload file. It is the
+// ownership vocabulary the manifest records, declared here per file; the empty
+// role means project.RolePayload.
+//
+// The role exists because "weld wrote this file once" and "weld owns this file"
+// are different claims, and only the capability author knows which one is true.
+// Treating every recorded file as ownerless tool output is what let an earlier
+// weld overwrite a project's edited middleware chain.
+type Role = project.Role
+
+const (
+	// RolePayload is the default: a file weld owns outright. Upgrade rewrites it
+	// when the project has not changed it since weld last wrote it, and hands
+	// over a diff when it has.
+	RolePayload = project.RolePayload
+	// RolePatched is a file weld owns that also carries marker regions another
+	// capability extends (internal/config/config.go). Upgrade renders the newer
+	// payload skeleton and splices the live marker regions into it, so the
+	// payload change and everything a capability or the project added inside a
+	// region both survive. A path that is a payload file of one capability and a
+	// patch target of another is upgraded as patched even without a declaration,
+	// because that is the only safe reading.
+	RolePatched = project.RolePatched
+	// RoleSeam is a file weld writes once and the project then owns: the
+	// middleware and policy seams, the *_providers.go wiring, the register.go
+	// registration files and the project's Makefile. Upgrade never writes it.
+	// When the shipped version changes, the project gets the diff and decides how
+	// to fold it in, so an edit to a seam can never be lost.
+	RoleSeam = project.RoleSeam
+	// RoleGenerated is a file a code generator rewrites from the dependency graph
+	// (internal/di/di.go and its test). It is re-rendered on every plan that
+	// touches the graph, never merged and never retired.
+	RoleGenerated = project.RoleGenerated
+)
+
 // File is a payload written into a project.
 type File struct {
 	Path   string `json:"path"`
 	Source string `json:"source"`
+	// Role is how upgrade treats the file: RolePayload (the default),
+	// RolePatched or RoleSeam. RoleGenerated is implied by the di entry and must
+	// not be declared.
+	Role Role `json:"role,omitempty"`
 	// When lists capabilities that must all be installed for the file to apply;
 	// WhenAbsent lists capabilities that must all be absent. They let a payload
 	// vary deterministically with the installed capability set.
@@ -146,6 +186,13 @@ func (c *Capability) validate() error {
 		if file.Path == "" || file.Source == "" {
 			return fmt.Errorf("capability %q: file entry needs path and source", c.Name)
 		}
+		switch file.Role {
+		case "", RolePayload, RolePatched, RoleSeam:
+		case RoleGenerated:
+			return fmt.Errorf("capability %q: file %s: role %q is implied by the di entry and must not be declared", c.Name, file.Path, RoleGenerated)
+		default:
+			return fmt.Errorf("capability %q: file %s: unknown role %q", c.Name, file.Path, file.Role)
+		}
 		if err := c.requireSource(file.Source); err != nil {
 			return err
 		}
@@ -189,6 +236,59 @@ func (c *Capability) requireSource(source string) error {
 // ReadFile returns the raw payload for a capability file.
 func (c *Capability) ReadFile(file File) ([]byte, error) {
 	return c.read(file.Source)
+}
+
+// DIPaths lists the generated sources the capability's di entry renders.
+func (c *Capability) DIPaths() []string {
+	if c.DI == nil {
+		return nil
+	}
+	paths := []string{path.Join(c.DI.Dir, "di.go")}
+	if c.DI.Test != "" {
+		paths = append(paths, path.Join(c.DI.Dir, "di_test.go"))
+	}
+	return paths
+}
+
+// PayloadPaths lists every project path the capability ships: its file entries
+// in payload order, then its generated DI sources.
+//
+// It is the one enumeration install, upgrade and prune consult, so a file that
+// ships through the di entry (internal/di/di.go) is never mistaken for one the
+// capability stopped shipping — which is what made `weld upgrade --prune` try
+// to delete the project's dependency graph.
+func (c *Capability) PayloadPaths() []string {
+	paths := make([]string, 0, len(c.Files)+2)
+	for _, file := range c.Files {
+		paths = append(paths, file.Path)
+	}
+	return append(paths, c.DIPaths()...)
+}
+
+// FileFor returns the file entry that ships path.
+func (c *Capability) FileFor(path string) (File, bool) {
+	for _, file := range c.Files {
+		if file.Path == path {
+			return file, true
+		}
+	}
+	return File{}, false
+}
+
+// RoleOf returns the upgrade role of a path the capability ships. A generated DI
+// source is always RoleGenerated; otherwise the declared role applies, with
+// RolePayload as the default.
+func (c *Capability) RoleOf(target string) Role {
+	for _, generated := range c.DIPaths() {
+		if generated == target {
+			return RoleGenerated
+		}
+	}
+	file, ok := c.FileFor(target)
+	if !ok || file.Role == "" {
+		return RolePayload
+	}
+	return file.Role
 }
 
 // ReadPatch returns the raw snippet for a capability patch.

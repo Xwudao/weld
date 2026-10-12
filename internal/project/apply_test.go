@@ -226,7 +226,7 @@ func TestManifestRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	manifest := NewManifest("demo", "example.com/demo", "weld 0.1.0")
 	manifest.Base = CapabilityRef{Name: "base", Version: "0.1.0"}
-	manifest.SetFile("main.go", "base", []byte("package main\n"))
+	manifest.SetFile("main.go", "base", RolePayload, []byte("package main\n"))
 	manifest.AddCapability(CapabilityRef{Name: "web", Version: "0.1.0"})
 
 	encoded, err := manifest.Encode()
@@ -307,8 +307,8 @@ func TestApplyDeleteMissingIsNoOp(t *testing.T) {
 // unknown path.
 func TestManifestRemoveFile(t *testing.T) {
 	manifest := NewManifest("demo", "example.com/demo", "weld 0.1.0")
-	manifest.SetFile("a.go", "base", []byte("a\n"))
-	manifest.SetFile("b.go", "base", []byte("b\n"))
+	manifest.SetFile("a.go", "base", RolePayload, []byte("a\n"))
+	manifest.SetFile("b.go", "base", RolePayload, []byte("b\n"))
 	manifest.RemoveFile("a.go")
 	manifest.RemoveFile("absent.go")
 	if manifest.Owns("a.go") {

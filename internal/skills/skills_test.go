@@ -129,7 +129,7 @@ func TestRenderLoomSeams(t *testing.T) {
 	for _, want := range []string{
 		"`internal/di/di.go` and `internal/di/loom_gen.go`",
 		"`internal/di/redis_provider.go`",
-		"Unused DB, Redis, mail and storage providers are pruned",
+		"Unused DB, Redis, mail, storage and event providers are pruned",
 		"HTTP server graph exists only",
 	} {
 		if !strings.Contains(text, want) {
@@ -413,6 +413,44 @@ func TestRenderCronRequiresLoom(t *testing.T) {
 	for _, want := range []string{"`internal/cron/register.go`", "`internal/di/cron_provider.go`", "only the Loom `serve` lifecycle"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("cron skill does not describe the supported DI composition %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestRenderEventsNamesItsSeamsAndItsLimits proves the generated guide names the
+// registration seam, the Loom provider seam and the synchronous delivery limit,
+// so an agent reading it does not mistake events for a queue.
+func TestRenderEventsNamesItsSeamsAndItsLimits(t *testing.T) {
+	body, err := Render(manifest("loom", "events"), template.Load())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"**events** v0.1.0",
+		"`internal/events/register.go`",
+		"`internal/di/events_provider.go`",
+		"`events.Publisher`",
+		"`events.Recorder`",
+		"not a queue",
+		"dispatches nothing",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("rendered skill is missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestRenderMentionsUpgrade proves the generated guide tells an agent how a
+// capability moves forward, so it does not hand-edit a payload file instead.
+func TestRenderMentionsUpgrade(t *testing.T) {
+	body, err := Render(manifest("http", "loom"), template.Load())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{"`weld upgrade`", "`weld upgrade --check`", "is never resurrected"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("rendered skill is missing %q:\n%s", want, body)
 		}
 	}
 }

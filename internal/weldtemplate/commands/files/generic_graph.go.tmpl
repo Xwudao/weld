@@ -7,7 +7,7 @@
 //
 // The graph includes commonModule, the shared provider set di.go declares and
 // `weld add` regenerates (configuration, logger and the installed
-// db/redis/mail/storage bindings), plus the command's own dependency root. It
+// db/redis/mail/storage/events bindings), plus the command's own dependency root. It
 // does not copy those providers, so a capability installed after this file was
 // written still reaches the command. The root consumes only the providers the
 // fields on __modname__.Deps name — the worked example asks for the shared

@@ -127,7 +127,7 @@ func AddModule(req Request, name string) (*Result, error) {
 		}
 		path := string(template.Render([]byte(file.Path), vars))
 		rendered := template.Render(content, vars)
-		if err := p.planNewFile(path, capability, rendered); err != nil {
+		if err := p.planNewFile(path, capability, project.RoleSeam, rendered); err != nil {
 			return nil, err
 		}
 	}

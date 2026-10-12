@@ -1514,7 +1514,7 @@ func TestAddLoomGenerationIsReproducible(t *testing.T) {
 func TestLoomInstalledByEveryAdd(t *testing.T) {
 	t.Parallel()
 	catalog := newCatalog()
-	for _, name := range []string{"http", "db", "redis", "mail", "storage"} {
+	for _, name := range []string{"http", "db", "redis", "mail", "storage", "events"} {
 		capability, err := catalog.Get(name)
 		if err != nil {
 			t.Fatalf("Get %s: %v", name, err)
@@ -2086,6 +2086,8 @@ func TestLoggingMilestoneCombinationMatrix(t *testing.T) {
 		{name: "http+cron", caps: []string{"http", "cron"}},
 		{name: "cron+loom", caps: []string{"cron", "loom"}, needsLoom: true},
 		{name: "mail+storage+loom", caps: []string{"mail", "storage", "loom"}, needsLoom: true},
+		{name: "events+loom", caps: []string{"events", "loom"}, needsLoom: true},
+		{name: "http+events+loom", caps: []string{"http", "events", "loom"}, needsLoom: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

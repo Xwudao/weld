@@ -15,7 +15,7 @@ Generating the command also installed `loom` (and the `config` it requires), so
 the group resolves its dependencies from the command-specific graph in
 `internal/di/__modname___graph.go`. That graph includes `commonModule`, the
 shared provider set `di.go` declares (configuration, logger and the installed
-db/redis/mail/storage bindings), plus the `Deps` root, and Loom prunes every
+db/redis/mail/storage/events bindings), plus the `Deps` root, and Loom prunes every
 provider a subcommand does not consume, so the group never constructs the HTTP
 server, the scheduler or a database pool.
 

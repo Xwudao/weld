@@ -10,7 +10,7 @@
     { "path": "internal/redisclient/redisclient.go", "source": "files/redisclient.go.tmpl" },
     { "path": "internal/redisclient/redisclient_test.go", "source": "files/redisclient_test.go.tmpl" },
     { "path": "internal/redisclient/README.md", "source": "files/README.md" },
-    { "path": "internal/di/redis_provider.go", "source": "files/redis_provider.go.tmpl", "when": ["loom"] }
+    { "path": "internal/di/redis_provider.go", "source": "files/redis_provider.go.tmpl", "role": "seam", "when": ["loom"] }
   ],
   "patches": [
     { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },

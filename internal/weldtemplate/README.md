@@ -18,6 +18,64 @@ Capabilities are one-way additive. A project is created from exactly one
 `base` capability and then grows by adding capabilities, each of which records
 its version in the project manifest (`weld.json`).
 
+**Changing a payload requires bumping the capability's `version`.** A recorded
+version is what `weld upgrade` gates on: a capability whose version equals the
+one in the manifest is left alone, and only a version the catalog advances makes
+the upgrade rewrite the files weld wrote and the project never touched. A payload
+edited without a version bump therefore never reaches an existing project, and
+`weld upgrade --check` will not flag it either.
+
+### File roles decide what an upgrade may touch
+
+Every file entry declares a `role`, and `weld upgrade` obeys it. Declaring the
+wrong one is how a payload change ends up either destroying a project edit or
+never arriving:
+
+| role | who owns the file after install | upgrade |
+|---|---|---|
+| `payload` (default) | weld | rewrites while the project has not changed it, otherwise reports a diff |
+| `patched` | weld, plus the capabilities that patch its marker regions | renders the newer payload and splices the live region bodies into it |
+| `seam` | the project | **never writes it**; reports the diff when the shipped version moves |
+| `generated` (implied by `di`, never declared) | the Loom generator | re-renders it from the installed capability set |
+
+Use `seam` for every file whose doc comment promises "weld writes this once and
+never regenerates it": `internal/httpserver/middleware.go` and `policy.go`, the
+`*_providers.go` wiring, the `register.go` registration files, the `Makefile`,
+`.gitignore`, `config.yml` and `config.example.yml`.
+
+Use `patched` for a file weld ships *and* another capability extends through a
+marker patch — today that is `internal/config/config.go`. Its regions are the
+extension points, so project additions belong inside a region: the splice keeps
+regions verbatim and replaces everything outside them with the newer payload.
+
+A marker patch must never take ownership of the file it extends
+(`Manifest.SetPatchedFile` keeps the shipping capability as the owner), because
+the owner is what decides which capability upgrades the file.
+
+`go.mod` and `go.sum` need no role: `weld upgrade` skips them, because the Go
+toolchain rewrites them and a project legitimately keeps its own requirements
+outside the `weld:deps` region.
+
+Two consequences for capability authors:
+
+- **A seam's contract change is a manual migration.** `http` 0.5.0 changed
+  `middlewareChain(logger)` to `middlewareChain(cfg, logger)`. Projects whose
+  `middleware.go` is unmodified by hand see the diff; projects that edited it see
+  the difference too and fold it in themselves. The post-upgrade check
+  (`go vet ./...`) refuses to keep an upgrade that leaves the project unable to
+  build, so the migration is visible as a compiler error rather than as silently
+  dropped code.
+- **A changed patch snippet is not re-applied.** A snippet already present in a
+  region keeps its sentinel and is left as it is; the shared file moves forward
+  through the payload skeleton. Snippet upgrades are a known limitation, so ship
+  a config change that matters for existing projects as an advisory-shaped change
+  (documented in the capability README) rather than relying on the region.
+
+Every capability payload that changes shape should also keep its generated-project
+test green: `internal/scaffold` builds a real project, runs `gofmt`, `go build`,
+`go vet` and `go test` on it, and the upgrade tests build a project from the
+current payloads and move it forward again.
+
 ```
 capabilities/
   base/            kind: base   -> scaffolds a minimal, dependency-free CLI
@@ -64,12 +122,20 @@ capabilities/
                    lifecycle), internal/config/redis.go (typed connection
                    settings), internal/di/redis_provider.go (stable Loom seam),
                    snippets that extend the shared config, README
+  events/          kind: add    -> opt-in in-process event dispatcher, requires loom
+    capability.json
+    files/         internal/events (typed Dispatcher + Publisher + On/Publish,
+                   the stable register.go listener seam, a Recorder test double,
+                   the dispatcher's own test, README),
+                   internal/di/events_provider.go (stable Loom seam);
+                   standard library only, so it patches no shared file at all
   loom/            kind: add    -> Loom DI graph, requires config
     capability.json
     files/         internal/di/di.go.tmpl (capability-aware graph source),
                    tools/loom (nested module pinning the Loom generator),
                    README; the stable provider seams are contributed by the
-                   capabilities that need them (seed, redis, mail, storage, cron)
+                   capabilities that need them (seed, redis, events, mail,
+                   storage, cron)
   cron/            kind: add    -> in-process scheduler, requires http
     capability.json
     files/         internal/cron (registry + stable register.go job seam),
@@ -491,7 +557,7 @@ written once and never regenerated; the command is recorded in `weld.json`'s
 Both variants also write a stable command graph
 `internal/di/<name>_graph.go` and a lazy registration. The graph includes
 `commonModule`, the shared provider set `di.go` regenerates (configuration,
-logger and the installed db/redis/mail/storage
+logger and the installed db/redis/mail/storage/events
 bindings), plus the command's dependency root, and never the HTTP server or the
 cron scheduler; Loom prunes every provider the root does not consume. Because
 the shared providers live in the regenerated module rather than in the command

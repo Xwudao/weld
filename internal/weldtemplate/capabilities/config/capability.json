@@ -5,10 +5,10 @@
   "summary": "Typed YAML configuration: config.yml loaded from the working directory with environment and flag overrides, and a redacting Secret type.",
   "requires": ["base"],
   "files": [
-    { "path": "internal/config/config.go", "source": "files/config.go.tmpl" },
+    { "path": "internal/config/config.go", "source": "files/config.go.tmpl", "role": "patched" },
     { "path": "internal/config/config_test.go", "source": "files/config_test.go.tmpl" },
-    { "path": "config.example.yml", "source": "files/config.example.yml.tmpl" },
-    { "path": "config.yml", "source": "files/config.yml.tmpl" }
+    { "path": "config.example.yml", "source": "files/config.example.yml.tmpl", "role": "seam" },
+    { "path": "config.yml", "source": "files/config.yml.tmpl", "role": "seam" }
   ],
   "patches": [
     { "path": ".gitignore", "marker": "config", "source": "files/gitignore.snippet" },

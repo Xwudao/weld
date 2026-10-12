@@ -1,0 +1,177 @@
+// Package events is __name__'s in-process event dispatcher.
+//
+// It is deliberately small: a typed publish/subscribe seam inside the process
+// that already runs the work. Delivery is synchronous — every listener
+// registered for the event's concrete Go type runs, in registration order,
+// before Publish returns — so the caller learns whether the listeners succeeded
+// and a test needs no worker, no polling and no waiting.
+//
+// It is not a queue. A listener runs in the caller's goroutine, so a slow
+// listener slows the caller down, and an event published inside a database
+// transaction is delivered immediately even when the transaction later rolls
+// back. Publish after the commit when that matters (see README.md in this
+// package). Moving slow listeners off the request path is the job of a queue
+// capability; the Publisher seam below is what keeps that change local.
+package events
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"reflect"
+	"runtime"
+	"runtime/debug"
+	"sync"
+)
+
+// Publisher is the seam application code depends on.
+//
+// The Loom graph binds the concrete *Dispatcher; a test can bind a Recorder
+// instead. Depending on the interface rather than the concrete type is what lets
+// a queue-backed publisher replace the synchronous one later without touching a
+// caller.
+type Publisher interface {
+	Publish(ctx context.Context, event any) error
+}
+
+// Listener handles one event type. Returning an error reports a failure without
+// stopping the remaining listeners.
+type Listener[T any] func(ctx context.Context, event T) error
+
+// Dispatcher delivers events to the listeners registered for their concrete
+// type. Construct one with New; a nil *Dispatcher is safe and drops every event,
+// so a component that was handed no dispatcher keeps working.
+type Dispatcher struct {
+	logger *slog.Logger
+
+	mu        sync.RWMutex
+	listeners map[reflect.Type][]entry
+}
+
+// entry is one registered listener: its name for a log record, and the
+// type-erased call closure On built.
+type entry struct {
+	name string
+	call func(ctx context.Context, event any) error
+}
+
+// New returns an empty dispatcher. A nil logger silences listener failures,
+// which is what a test that does not assert logging passes.
+func New(logger *slog.Logger) *Dispatcher {
+	return &Dispatcher{logger: logger, listeners: map[reflect.Type][]entry{}}
+}
+
+// On registers listener for events of type T.
+//
+// The event's concrete type is the registration key: On[OrderPaid] receives
+// exactly the values published as OrderPaid, and publishing a *OrderPaid reaches
+// On[*OrderPaid], never On[OrderPaid]. An interface type is rejected loudly,
+// because there is no concrete type to key on; a nil dispatcher or a nil listener
+// is ignored, so registration in a package that was handed no dispatcher is
+// harmless.
+//
+// On is called during startup, from the stable registration file
+// (internal/events/register.go), so a panic there fails startup rather than the
+// first request.
+func On[T any](d *Dispatcher, listener Listener[T]) {
+	if d == nil || listener == nil {
+		return
+	}
+	eventType := reflect.TypeFor[T]()
+	if eventType.Kind() == reflect.Interface {
+		panic(fmt.Sprintf("events: On requires a concrete event type, got the interface %s", eventType))
+	}
+	registered := entry{
+		name: listenerName(listener),
+		call: func(ctx context.Context, event any) error {
+			typed, ok := event.(T)
+			if !ok {
+				return fmt.Errorf("events: event %s is not %s", typeName(event), eventType)
+			}
+			return listener(ctx, typed)
+		},
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.listeners[eventType] = append(d.listeners[eventType], registered)
+}
+
+// Publish delivers event to every listener registered for its concrete type, in
+// registration order, and returns their errors joined.
+//
+// Delivery is synchronous: Publish returns only after every listener returned. A
+// listener that panics is recovered, logged with the panic value and a stack, and
+// returned as an error, so one broken listener never stops the others and never
+// takes the process down. A nil dispatcher or a nil event publishes nothing and
+// is not an error.
+func (d *Dispatcher) Publish(ctx context.Context, event any) error {
+	if d == nil || event == nil {
+		return nil
+	}
+	d.mu.RLock()
+	registered := d.listeners[reflect.TypeOf(event)]
+	listeners := make([]entry, len(registered))
+	copy(listeners, registered)
+	d.mu.RUnlock()
+	if len(listeners) == 0 {
+		return nil
+	}
+
+	var failures []error
+	for _, listener := range listeners {
+		if err := d.deliver(ctx, listener, event); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// deliver runs one listener, turning a failure or a panic into an error and a log
+// record rather than letting either escape.
+func (d *Dispatcher) deliver(ctx context.Context, listener entry, event any) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("events: listener %s panicked on %s: %v", listener.name, typeName(event), recovered)
+			d.logFailure(listener, event, err, recovered)
+		}
+	}()
+	if err := listener.call(ctx, event); err != nil {
+		wrapped := fmt.Errorf("events: listener %s failed on %s: %w", listener.name, typeName(event), err)
+		d.logFailure(listener, event, wrapped, nil)
+		return wrapped
+	}
+	return nil
+}
+
+// logFailure records a listener failure through the injected logger. It never
+// logs the event value, which may carry personal data, only its type.
+func (d *Dispatcher) logFailure(listener entry, event any, err error, recovered any) {
+	if d.logger == nil {
+		return
+	}
+	attributes := []any{"listener", listener.name, "event", typeName(event), "error", err}
+	if recovered != nil {
+		attributes = append(attributes, "stack", string(debug.Stack()))
+	}
+	d.logger.Error("event listener failed", attributes...)
+}
+
+// typeName names an event's concrete type without printing its value.
+func typeName(event any) string {
+	if event == nil {
+		return "<nil>"
+	}
+	return reflect.TypeOf(event).String()
+}
+
+// listenerName returns a listener's function name, so a failure names something
+// searchable in a stack trace or a log query.
+func listenerName[T any](listener Listener[T]) string {
+	function := runtime.FuncForPC(reflect.ValueOf(listener).Pointer())
+	if function == nil {
+		return "anonymous"
+	}
+	return function.Name()
+}

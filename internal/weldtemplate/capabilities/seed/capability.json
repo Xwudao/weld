@@ -6,14 +6,14 @@
   "requires": ["db"],
   "files": [
     { "path": "internal/data/seeder/seeder.go", "source": "files/seeder.go.tmpl" },
-    { "path": "internal/data/seeder/register.go", "source": "files/register.go.tmpl" },
+    { "path": "internal/data/seeder/register.go", "source": "files/register.go.tmpl", "role": "seam" },
     { "path": "internal/data/seeder/register_stub.go", "source": "files/register_stub.go.tmpl" },
     { "path": "internal/data/seeder/seed_items.go", "source": "files/seed_items.go.tmpl" },
     { "path": "internal/data/seeder/seeder_test.go", "source": "files/seeder_test.go.tmpl" },
     { "path": "internal/data/seeder/seed_items_test.go", "source": "files/seed_items_test.go.tmpl" },
     { "path": "internal/data/seeder/README.md", "source": "files/README.md" },
     { "path": "internal/app/seed.go", "source": "files/seed.go.tmpl" },
-    { "path": "internal/di/seed_providers.go", "source": "files/seed_providers.go.tmpl", "when": ["loom"] }
+    { "path": "internal/di/seed_providers.go", "source": "files/seed_providers.go.tmpl", "role": "seam", "when": ["loom"] }
   ],
   "patches": [
     { "path": "Makefile", "marker": "db", "source": "files/Makefile.snippet" }

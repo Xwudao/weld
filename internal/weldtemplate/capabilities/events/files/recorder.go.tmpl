@@ -1,0 +1,72 @@
+package events
+
+import (
+	"context"
+	"reflect"
+	"sync"
+)
+
+// Recorder is a Publisher that records published events instead of delivering
+// them. It satisfies the same interface the Dispatcher does, so a test asserts
+// what a handler published without registering a listener or building a graph.
+//
+//	var recorder events.Recorder
+//	service := items.NewService(&recorder)
+//	...
+//	if !recorder.Contains(items.ItemCreated{ID: "1"}) {
+//		t.Fatal("the handler published nothing")
+//	}
+type Recorder struct {
+	mu        sync.Mutex
+	published []any
+}
+
+// Publish records event. A nil recorder or a nil event records nothing, matching
+// the Dispatcher's nil safety so a test double never needs a guard.
+func (r *Recorder) Publish(_ context.Context, event any) error {
+	if r == nil || event == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.published = append(r.published, event)
+	return nil
+}
+
+// Published returns the recorded events in publication order. The result is a
+// copy, so a caller cannot mutate the recorder's state.
+func (r *Recorder) Published() []any {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.published) == 0 {
+		return nil
+	}
+	recorded := make([]any, len(r.published))
+	copy(recorded, r.published)
+	return recorded
+}
+
+// Contains reports whether an event equal to want was recorded. Equality is
+// reflect.DeepEqual, so a struct event compares by value and a pointer event by
+// the pointed-to value.
+func (r *Recorder) Contains(want any) bool {
+	for _, event := range r.Published() {
+		if reflect.DeepEqual(event, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// Reset drops every recorded event.
+func (r *Recorder) Reset() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.published = nil
+}

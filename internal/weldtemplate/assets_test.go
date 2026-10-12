@@ -27,6 +27,7 @@ type descriptor struct {
 	Files []struct {
 		Path       string   `json:"path"`
 		Source     string   `json:"source"`
+		Role       string   `json:"role"`
 		When       []string `json:"when"`
 		WhenAbsent []string `json:"whenAbsent"`
 	} `json:"files"`
@@ -1487,6 +1488,7 @@ func TestLoomDeclaresAuxiliaryBindings(t *testing.T) {
 	}
 	graphText := string(graph)
 	for name, binding := range map[string]string{
+		"events":  "loom.Provide(NewEventDispatcher)",
 		"redis":   "loom.Provide(NewRedisClient)",
 		"mail":    "loom.Provide(NewMailSender)",
 		"storage": "loom.Provide(NewObjectStore)",
@@ -1551,6 +1553,16 @@ func TestLoomGraphIsConditionalOnHTTP(t *testing.T) {
 		if strings.Contains(cli, forbidden) {
 			t.Errorf("the http-less graph contains %q; the server graph must be conditional on http", forbidden)
 		}
+	}
+
+	// events is a CLI-only binding: it joins commonModule and never the server
+	// graph, so a project without http can still dispatch events.
+	withEvents := render(commandTestCaps{"events": true})
+	if !strings.Contains(withEvents, "loom.Provide(NewEventDispatcher)") {
+		t.Error("the events binding is missing from commonModule")
+	}
+	if strings.Contains(withEvents, "var appGraph = loom.Graph") {
+		t.Error("events pulled the server graph in")
 	}
 
 	server := render(commandTestCaps{"http": true})
@@ -1874,7 +1886,7 @@ func TestCommandGraphIsLoomAware(t *testing.T) {
 			"InitApp", "NewServer", "NewScheduler", "Scheduler",
 			"NewConfigLoader", "NewConfig)", "NewLogger",
 			"NewPool", "NewRepository", "data.Repository",
-			"NewRedisClient", "NewMailSender", "NewObjectStore",
+			"NewRedisClient", "NewMailSender", "NewObjectStore", "NewEventDispatcher",
 		} {
 			if strings.Contains(graph, forbidden) {
 				t.Errorf("%s graph snapshots the shared provider %q; it belongs to commonModule in di.go:\n%s", source, forbidden, graph)
@@ -2067,6 +2079,66 @@ func TestCapabilityGoPayloadsRenderClean(t *testing.T) {
 			return nil
 		}); err != nil {
 			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+}
+
+// TestPayloadRolesAreDeclared is the contract test for the ownership model behind
+// `weld upgrade`: a file weld writes once and the project then owns must say so
+// (role "seam"), and a file that carries marker regions another capability
+// extends must say "patched". Getting this wrong is how an upgrade overwrote a
+// project's middleware chain and how internal/config/config.go stopped being
+// upgradable by the capability that ships it.
+func TestPayloadRolesAreDeclared(t *testing.T) {
+	seams := map[string][]string{
+		"base":    {"Makefile", ".gitignore"},
+		"config":  {"config.yml", "config.example.yml"},
+		"cron":    {"internal/cron/register.go", "internal/di/cron_provider.go"},
+		"events":  {"internal/events/register.go", "internal/di/events_provider.go"},
+		"http":    {"internal/httpserver/middleware.go", "internal/httpserver/policy.go"},
+		"loom":    {"internal/di/repository_providers.go"},
+		"mail":    {"internal/di/mail_provider.go"},
+		"redis":   {"internal/di/redis_provider.go"},
+		"seed":    {"internal/data/seeder/register.go", "internal/di/seed_providers.go"},
+		"storage": {"internal/di/storage_provider.go"},
+	}
+	for name, paths := range seams {
+		d := readDescriptor(t, name)
+		roles := map[string]string{}
+		for _, file := range d.Files {
+			roles[file.Path] = file.Role
+		}
+		for _, path := range paths {
+			if roles[path] != "seam" {
+				t.Errorf("%s: %s role = %q, want seam", name, path, roles[path])
+			}
+		}
+	}
+
+	config := readDescriptor(t, "config")
+	var patched bool
+	for _, file := range config.Files {
+		if file.Path == "internal/config/config.go" {
+			patched = file.Role == "patched"
+		}
+	}
+	if !patched {
+		t.Error("config: internal/config/config.go must be declared patched: it carries marker regions other capabilities extend")
+	}
+
+	// A generated file is implied by the di entry, so no capability may claim the
+	// role itself.
+	for _, name := range []string{"loom", "http", "config", "db", "cron", "mail", "redis", "seed", "storage", "web", "events", "base"} {
+		d := readDescriptor(t, name)
+		for _, file := range d.Files {
+			if file.Role == "generated" {
+				t.Errorf("%s: %s declares the generated role, which only the di entry may imply", name, file.Path)
+			}
+			switch file.Role {
+			case "", "payload", "patched", "seam":
+			default:
+				t.Errorf("%s: %s declares unknown role %q", name, file.Path, file.Role)
+			}
 		}
 	}
 }

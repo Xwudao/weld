@@ -1,0 +1,36 @@
+package di
+
+import (
+	"log/slog"
+
+	"__module__/internal/events"
+)
+
+// NewEventDispatcher is the Loom provider for the application event dispatcher,
+// and this file is the stable integration seam for wiring events into the Loom
+// application.
+//
+// weld writes this file once, when both the events and loom capabilities are
+// installed, and never rewrites it while it regenerates the graph (di.go,
+// loom_gen.go): edits below survive every later `weld add`.
+//
+// The dispatcher is an available binding, not part of the default composition:
+// the graph declares NewEventDispatcher, but nothing depends on
+// *events.Dispatcher or events.Publisher, so Loom prunes it and an application
+// that publishes nothing constructs no dispatcher. To use it, make a provider the
+// graph already consumes depend on events.Publisher — for example edit the
+// service.go of one of your business modules so its NewService takes
+// events.Publisher. Loom then constructs the dispatcher and runs
+// internal/events/register.go, so a listener that fails to register fails
+// startup rather than the first publish.
+//
+// Depend on the events.Publisher interface rather than the concrete type: that is
+// what lets a queue-backed publisher replace the synchronous one later without
+// touching a caller.
+func NewEventDispatcher(logger *slog.Logger) (*events.Dispatcher, error) {
+	dispatcher := events.New(logger)
+	if err := events.Register(dispatcher); err != nil {
+		return nil, err
+	}
+	return dispatcher, nil
+}

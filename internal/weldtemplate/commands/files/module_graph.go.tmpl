@@ -9,7 +9,7 @@
 // stable factory the HTTP graph binds — so the command and the HTTP handler
 // share one business layer, and it includes commonModule, the shared provider
 // set di.go declares and `weld add` regenerates (configuration, logger and the
-// installed db/redis/mail/storage bindings). It does not copy those providers,
+// installed db/redis/mail/storage/events bindings). It does not copy those providers,
 // so a capability installed after this file was written still reaches the
 // command. Loom prunes every provider the command's root does not use, so
 // resolving the group never constructs the HTTP server, the application root,

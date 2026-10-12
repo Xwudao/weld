@@ -10,7 +10,7 @@
     { "path": "internal/mailsender/mailsender.go", "source": "files/mailsender.go.tmpl" },
     { "path": "internal/mailsender/mailsender_test.go", "source": "files/mailsender_test.go.tmpl" },
     { "path": "internal/mailsender/README.md", "source": "files/README.md" },
-    { "path": "internal/di/mail_provider.go", "source": "files/mail_provider.go.tmpl", "when": ["loom"] }
+    { "path": "internal/di/mail_provider.go", "source": "files/mail_provider.go.tmpl", "role": "seam", "when": ["loom"] }
   ],
   "patches": [
     { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },

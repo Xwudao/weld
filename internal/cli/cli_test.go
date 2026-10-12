@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/template"
 )
 
@@ -1067,4 +1068,214 @@ func TestDeployDryRunPlans(t *testing.T) {
 			t.Errorf("dry run output = %q, missing %q", out, want)
 		}
 	}
+}
+
+// rewriteCapabilityVersion stands in for a project an older weld scaffolded, so
+// `weld upgrade` has something to do.
+func rewriteCapabilityVersion(t *testing.T, dir, name, version string) {
+	t.Helper()
+	manifest, err := project.Load(dir)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	manifest.SetCapabilityVersion(name, version)
+	encoded, err := manifest.Encode()
+	if err != nil {
+		t.Fatalf("encode manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, project.ManifestName), encoded, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+}
+
+func TestUpgradeCheckDryRunAndApply(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "add", "redis", "--with-dependencies", "--dir", dir); err != nil {
+		t.Fatalf("add redis: %v", err)
+	}
+
+	out, err := run(t, "upgrade", "--dir", dir, "--check")
+	if err != nil {
+		t.Fatalf("check on a current project: %v (%s)", err, out)
+	}
+	if !strings.Contains(out, "already at this weld's version") {
+		t.Fatalf("check output = %q", out)
+	}
+
+	rewriteCapabilityVersion(t, dir, "redis", "0.0.1")
+	if _, err := run(t, "upgrade", "--dir", dir, "--check"); err == nil {
+		t.Fatal("--check accepted an out-of-date project")
+	}
+
+	out, err = run(t, "upgrade", "--dir", dir, "--dry-run")
+	if err != nil {
+		t.Fatalf("dry run: %v (%s)", err, out)
+	}
+	if !strings.Contains(out, "Would upgrade") {
+		t.Fatalf("dry-run output = %q", out)
+	}
+	manifest, err := project.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.CapabilityVersion("redis"); got != "0.0.1" {
+		t.Fatalf("dry run rewrote the manifest: redis v%s", got)
+	}
+
+	out, err = run(t, "upgrade", "--dir", dir)
+	if err != nil {
+		t.Fatalf("upgrade: %v (%s)", err, out)
+	}
+	if !strings.Contains(out, "Upgraded 1 capability") {
+		t.Fatalf("upgrade output = %q", out)
+	}
+	manifest, err = project.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := template.Load().Get("redis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.CapabilityVersion("redis"); got != capability.Version {
+		t.Fatalf("redis version = %q, want %q", got, capability.Version)
+	}
+	if drift := manifest.Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after upgrade: %+v", drift)
+	}
+}
+
+func TestUpgradeRejectsAnUninstalledCapability(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "upgrade", "http", "--dir", dir); err == nil {
+		t.Fatal("upgrade accepted a capability the project does not have")
+	}
+}
+
+func TestListReportsAnAvailableUpgrade(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "add", "redis", "--with-dependencies", "--dir", dir); err != nil {
+		t.Fatalf("add redis: %v", err)
+	}
+
+	out, err := run(t, "list", "--dir", dir)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if strings.Contains(out, "available)") || strings.Contains(out, "weld upgrade") {
+		t.Fatalf("a current project reports an upgrade:\n%s", out)
+	}
+
+	rewriteCapabilityVersion(t, dir, "redis", "0.0.1")
+	out, err = run(t, "list", "--dir", dir)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	capability, err := template.Load().Get("redis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"redis  v0.0.1 (v" + capability.Version + " available)", "run: weld upgrade"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestUpgradeVerifyFlag proves the post-change check is selectable and that a
+// typo is rejected instead of silently disabling it.
+func TestUpgradeVerifyFlag(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "add", "redis", "--with-dependencies", "--dir", dir); err != nil {
+		t.Fatalf("add redis: %v", err)
+	}
+	rewriteCapabilityVersion(t, dir, "redis", "0.0.1")
+
+	if out, err := run(t, "upgrade", "--dir", dir, "--verify=bogus"); err == nil {
+		t.Fatalf("upgrade accepted an unknown --verify mode (%s)", out)
+	}
+	if out, err := run(t, "upgrade", "--dir", dir, "--verify=none"); err != nil {
+		t.Fatalf("upgrade --verify=none: %v (%s)", err, out)
+	}
+	if drift := mustLoadManifest(t, dir).Drift(dir); len(drift) != 0 {
+		t.Fatalf("drift after upgrade: %+v", drift)
+	}
+}
+
+// TestUpgradeReportsAProjectOwnedSeam proves the report names a file weld refuses
+// to touch and says why, so a changed payload for a seam is visible instead of
+// silent — and that --check fails while it is outstanding.
+func TestUpgradeReportsAProjectOwnedSeam(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+	if _, err := run(t, "add", "http", "--with-dependencies", "--dir", dir); err != nil {
+		t.Fatalf("add http: %v", err)
+	}
+
+	const path = "internal/httpserver/middleware.go"
+	full := filepath.Join(dir, path)
+	raw, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editedContent := strings.Replace(string(raw), "\t\thttpx.RequestID(),", "\t\thttpx.RequestID(),\n\t\tmyOwnMiddleware(),", 1)
+	if editedContent == string(raw) {
+		t.Fatalf("fixture did not edit the chain:\n%s", raw)
+	}
+	if err := os.WriteFile(full, []byte(editedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := mustLoadManifest(t, dir)
+	manifest.SetFile(path, "http", project.RoleSeam, []byte(editedContent))
+	encoded, err := manifest.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, project.ManifestName), encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rewriteCapabilityVersion(t, dir, "http", "0.0.1")
+
+	out, err := run(t, "upgrade", "--dir", dir, "--check")
+	if err == nil {
+		t.Fatalf("--check accepted a project with an outstanding seam change (%s)", out)
+	}
+	if !strings.Contains(out, "seam") || !strings.Contains(out, "did not write") {
+		t.Fatalf("check output does not explain the seam:\n%s", out)
+	}
+	if !strings.Contains(out, path) {
+		t.Fatalf("check output does not name %s:\n%s", path, out)
+	}
+	if got, err := os.ReadFile(full); err != nil || string(got) != editedContent {
+		t.Fatalf("--check wrote the seam: %v", err)
+	}
+}
+
+// mustLoadManifest reads the project manifest or fails the test.
+func mustLoadManifest(t *testing.T, dir string) *project.Manifest {
+	t.Helper()
+	manifest, err := project.Load(dir)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	return manifest
 }
