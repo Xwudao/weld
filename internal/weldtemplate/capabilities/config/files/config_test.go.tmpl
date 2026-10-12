@@ -235,3 +235,114 @@ func TestConfigFormattingRedactsSecret(t *testing.T) {
 		t.Fatalf("marshalling the config leaked the secret: %s", encoded)
 	}
 }
+
+// TestCORSOmitsSectionSafely proves an omitted cors section is off, still carries
+// the defaults the middleware needs, and validates: a project that never
+// configures CORS is unaffected.
+func TestCORSOmitsSectionSafely(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CORS.Enabled {
+		t.Fatal("an omitted cors section enabled CORS")
+	}
+	if len(cfg.CORS.AllowedMethods) == 0 || len(cfg.CORS.AllowedHeaders) == 0 {
+		t.Fatalf("cors defaults were not applied: %+v", cfg.CORS)
+	}
+	if cfg.CORS.MaxAgeSeconds != DefaultCORSMaxAgeSeconds {
+		t.Fatalf("cors.max_age_seconds = %d, want %d", cfg.CORS.MaxAgeSeconds, DefaultCORSMaxAgeSeconds)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestCORSLoadsFromFileAndEnvironment proves the cors section is typed and that
+// the environment overrides the file, which is how a deployment sets its origin
+// list without rebuilding the image.
+func TestCORSLoadsFromFileAndEnvironment(t *testing.T) {
+	file := "cors:\n" +
+		"  enabled: true\n" +
+		"  allowed_origins: [\"https://from-file.example.com\"]\n" +
+		"  allowed_headers: [X-Custom]\n" +
+		"  allow_credentials: true\n" +
+		"  max_age_seconds: 120\n"
+	cfg, err := fakeLoader(map[string]string{DefaultPath: file}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.CORS.Enabled || !cfg.CORS.AllowCredentials || cfg.CORS.MaxAgeSeconds != 120 {
+		t.Fatalf("cors section was not loaded: %+v", cfg.CORS)
+	}
+	if len(cfg.CORS.AllowedOrigins) != 1 || cfg.CORS.AllowedOrigins[0] != "https://from-file.example.com" {
+		t.Fatalf("cors.allowed_origins = %v", cfg.CORS.AllowedOrigins)
+	}
+
+	env := map[string]string{
+		EnvCORSAllowedOrigins: "https://one.example.com, https://two.example.com",
+		EnvCORSExposedHeaders: "X-Request-Id",
+		EnvCORSCredentials:    "false",
+	}
+	cfg, err = fakeLoader(map[string]string{DefaultPath: file}, env).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.CORS.AllowedOrigins) != 2 || cfg.CORS.AllowedOrigins[1] != "https://two.example.com" {
+		t.Fatalf("CORS_ALLOWED_ORIGINS was not parsed as a trimmed list: %v", cfg.CORS.AllowedOrigins)
+	}
+	if len(cfg.CORS.ExposedHeaders) != 1 || cfg.CORS.ExposedHeaders[0] != "X-Request-Id" {
+		t.Fatalf("cors.exposed_headers = %v", cfg.CORS.ExposedHeaders)
+	}
+	if cfg.CORS.AllowCredentials {
+		t.Fatal("CORS_ALLOW_CREDENTIALS=false did not override the file")
+	}
+}
+
+// TestCORSInvalidEnvironmentIsAnError proves a malformed override is an error
+// rather than a silent fallback, matching every other setting.
+func TestCORSInvalidEnvironmentIsAnError(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"boolean": {EnvCORSEnabled: "maybe"},
+		"number":  {EnvCORSMaxAgeSeconds: "soon"},
+	} {
+		if _, err := fakeLoader(map[string]string{DefaultPath: ""}, env).Load(""); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+// TestValidateCORSRejectsAnUnsafePolicy proves the fail-closed validation: an
+// enabled policy with no origin, an entry that is not an origin, the invalid
+// wildcard-with-credentials pair and a negative max age all fail, while a
+// disabled section ignores its contents and a valid policy passes.
+func TestValidateCORSRejectsAnUnsafePolicy(t *testing.T) {
+	cases := []struct {
+		name    string
+		cors    CORS
+		wantErr bool
+	}{
+		{"disabled ignores contents", CORS{AllowedOrigins: []string{"not an origin"}}, false},
+		{"enabled without origins", CORS{Enabled: true}, true},
+		{"trailing slash", CORS{Enabled: true, AllowedOrigins: []string{"https://app.example.com/"}}, true},
+		{"missing scheme", CORS{Enabled: true, AllowedOrigins: []string{"app.example.com"}}, true},
+		{"with a path", CORS{Enabled: true, AllowedOrigins: []string{"https://app.example.com/api"}}, true},
+		{"wildcard with credentials", CORS{Enabled: true, AllowedOrigins: []string{"*"}, AllowCredentials: true}, true},
+		{"negative max age", CORS{Enabled: true, AllowedOrigins: []string{"https://app.example.com"}, MaxAgeSeconds: -1}, true},
+		{"exact origin", CORS{Enabled: true, AllowedOrigins: []string{"https://app.example.com"}}, false},
+		{"wildcard", CORS{Enabled: true, AllowedOrigins: []string{"*"}}, false},
+		{"local development origin", CORS{Enabled: true, AllowedOrigins: []string{"http://localhost:5173"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{HTTP: HTTP{Addr: DefaultHTTPAddr}, CORS: tc.cors}
+			err := cfg.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected an error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

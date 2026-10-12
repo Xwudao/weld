@@ -4,3 +4,33 @@
 # outranks this file.
 http:
   addr: ":8080"
+
+# Cross-Origin Resource Sharing. Off by default, which is right for this
+# project: the built SPA is served from this server and the Vite dev server
+# proxies /api, so the browser is already same-origin. Turn it on only when a
+# browser page is served from a different origin than this API, and list the
+# exact origins you trust.
+#
+# Each entry is scheme://host[:port] — no path, no trailing slash — or the single
+# literal "*". With allow_credentials true the origins are echoed back rather
+# than answered with "*", and a "*" origin is rejected at startup, because a
+# browser refuses that pair. An enabled section with no origins is an error, so a
+# mistake fails loudly instead of silently allowing (or blocking) every origin.
+#
+# CORS decides which origins may read a response; it never decides who may make
+# the request. Authorization stays in the named route policies (policy.go).
+#
+# Every value can be overridden by the environment, which is how a deployment
+# sets its origin list without rebuilding the image:
+#   CORS_ENABLED, CORS_ALLOWED_ORIGINS, CORS_ALLOWED_METHODS, CORS_ALLOWED_HEADERS,
+#   CORS_EXPOSED_HEADERS, CORS_ALLOW_CREDENTIALS, CORS_MAX_AGE_SECONDS
+cors:
+  enabled: false
+  allowed_origins: []
+  # - "http://localhost:5173"      # a Vite dev server on another host
+  # - "https://app.example.com"
+  allowed_methods: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
+  allowed_headers: [Content-Type, Authorization, X-Request-Id]
+  exposed_headers: []
+  allow_credentials: false
+  max_age_seconds: 600

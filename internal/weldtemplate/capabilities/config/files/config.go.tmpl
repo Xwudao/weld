@@ -19,6 +19,12 @@
 // so an unrecognized value simply is not development. See
 // Environment.IsDevelopment.
 //
+// The cors section is off by default and is validated at load time only when it
+// is enabled, so a same-origin SPA needs no configuration and a mistake — an
+// empty origin list, a URL with a trailing slash, a wildcard with credentials —
+// fails startup with a readable error instead of serving a policy no browser
+// honors. See CORS and ValidateCORS.
+//
 // The typed sections are closed but extensible: three marker regions
 // (weld:configfields, weld:configenv, weld:configdefaults) let a later
 // capability add its own field, environment overrides and defaults through a
@@ -68,6 +74,32 @@ const (
 	EnvDBPassword  = "DB_PASSWORD"
 	EnvDBName      = "DB_NAME"
 	EnvDatabaseURL = "DATABASE_URL"
+
+	// CORS environment names. They exist so a deployed origin list is not baked
+	// into the image: CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+	// overrides the file, and CORS_ENABLED=false turns the policy off entirely.
+	EnvCORSEnabled        = "CORS_ENABLED"
+	EnvCORSAllowedOrigins = "CORS_ALLOWED_ORIGINS"
+	EnvCORSAllowedMethods = "CORS_ALLOWED_METHODS"
+	EnvCORSAllowedHeaders = "CORS_ALLOWED_HEADERS"
+	EnvCORSExposedHeaders = "CORS_EXPOSED_HEADERS"
+	EnvCORSCredentials    = "CORS_ALLOW_CREDENTIALS"
+	EnvCORSMaxAgeSeconds  = "CORS_MAX_AGE_SECONDS"
+)
+
+// DefaultCORSMaxAgeSeconds is how long a browser may cache a preflight result
+// when the cors section omits max_age_seconds. Ten minutes matches the shortest
+// browser cap, so a policy change takes effect promptly.
+const DefaultCORSMaxAgeSeconds = 600
+
+// defaultCORSMethods and defaultCORSHeaders are the lists an omitted (or empty)
+// cors section uses. The headers are the ones the generated JSON API actually
+// needs: a JSON body, a bearer token and the request id the middleware echoes.
+// They are copied into the configuration rather than assigned, so a caller
+// editing the configuration cannot mutate the package default.
+var (
+	defaultCORSMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+	defaultCORSHeaders = []string{"Content-Type", "Authorization", "X-Request-Id"}
 )
 
 // Secret is a string that must never be printed.
@@ -158,6 +190,7 @@ type Config struct {
 	// weight. See Environment.IsDevelopment.
 	Environment Environment `yaml:"environment"`
 	HTTP        HTTP        `yaml:"http"`
+	CORS        CORS        `yaml:"cors"`
 	Database    Database    `yaml:"database"`
 	// weld:configfields:begin
 	// A capability that extends the typed configuration appends its field here
@@ -169,6 +202,47 @@ type Config struct {
 // HTTP holds the HTTP server settings.
 type HTTP struct {
 	Addr string `yaml:"addr"`
+}
+
+// CORS holds the cross-origin resource sharing policy.
+//
+// It is off by default: a browser frontend served from the same origin — which
+// the generated project is, because the SPA is embedded and the Vite dev server
+// proxies the API — needs no CORS header at all. Enable it only when a browser
+// page is served from a different origin than this server, and list the exact
+// origins you trust.
+//
+// It is a browser policy, not an authorization mechanism: it decides which
+// origins may *read* a response. Who may perform the request is decided by the
+// named route policies, which CORS never bypasses.
+type CORS struct {
+	// Enabled turns the policy on. While it is false the middleware is not
+	// installed and the server sends no CORS header, whatever the lists below
+	// say.
+	Enabled bool `yaml:"enabled"`
+	// AllowedOrigins lists the origins a browser may call from, each as
+	// scheme://host[:port] with no path and no trailing slash, or the single
+	// literal "*". It must not be empty while Enabled is true, and "*" is
+	// rejected together with AllowCredentials, because a browser refuses that
+	// pair.
+	AllowedOrigins []string `yaml:"allowed_origins"`
+	// AllowedMethods lists the methods a preflight may ask for. An empty list
+	// selects the standard set.
+	AllowedMethods []string `yaml:"allowed_methods"`
+	// AllowedHeaders lists the request headers a preflight may ask for,
+	// case-insensitively; the CORS-safelisted headers are always allowed. An
+	// empty list selects Content-Type, Authorization and X-Request-Id. The single
+	// literal "*" allows any requested header.
+	AllowedHeaders []string `yaml:"allowed_headers"`
+	// ExposedHeaders lists the response headers a browser script may read. An
+	// empty list exposes none beyond the CORS-safelisted response headers.
+	ExposedHeaders []string `yaml:"exposed_headers"`
+	// AllowCredentials permits cookies and other credentials on a cross-origin
+	// request. With it an allowed origin is echoed rather than answered with "*".
+	AllowCredentials bool `yaml:"allow_credentials"`
+	// MaxAgeSeconds is how long a browser may cache a preflight result. Zero
+	// leaves the browser default in place; the middleware clamps it to 24h.
+	MaxAgeSeconds int `yaml:"max_age_seconds"`
 }
 
 // Database holds the PostgreSQL connection settings.
@@ -285,6 +359,39 @@ func (l *Loader) applyEnv(cfg *Config) error {
 	if value, ok := l.lookupEnv(EnvDatabaseURL); ok {
 		cfg.Database.DSN = Secret(strings.TrimSpace(value))
 	}
+	if value, ok := l.lookupEnv(EnvCORSEnabled); ok {
+		enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a boolean", EnvCORSEnabled)
+		}
+		cfg.CORS.Enabled = enabled
+	}
+	if value, ok := l.lookupEnv(EnvCORSAllowedOrigins); ok {
+		cfg.CORS.AllowedOrigins = splitEnvList(value)
+	}
+	if value, ok := l.lookupEnv(EnvCORSAllowedMethods); ok {
+		cfg.CORS.AllowedMethods = splitEnvList(value)
+	}
+	if value, ok := l.lookupEnv(EnvCORSAllowedHeaders); ok {
+		cfg.CORS.AllowedHeaders = splitEnvList(value)
+	}
+	if value, ok := l.lookupEnv(EnvCORSExposedHeaders); ok {
+		cfg.CORS.ExposedHeaders = splitEnvList(value)
+	}
+	if value, ok := l.lookupEnv(EnvCORSCredentials); ok {
+		credentials, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a boolean", EnvCORSCredentials)
+		}
+		cfg.CORS.AllowCredentials = credentials
+	}
+	if value, ok := l.lookupEnv(EnvCORSMaxAgeSeconds); ok {
+		seconds, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a number", EnvCORSMaxAgeSeconds)
+		}
+		cfg.CORS.MaxAgeSeconds = seconds
+	}
 	// weld:configenv:begin
 	// A capability that extends the typed configuration applies its environment
 	// overrides here through a marker patch.
@@ -307,18 +414,95 @@ func (l *Loader) applyDefaults(cfg *Config) {
 	if cfg.Database.Port == 0 {
 		cfg.Database.Port = DefaultDBPort
 	}
+	if len(cfg.CORS.AllowedMethods) == 0 {
+		cfg.CORS.AllowedMethods = append([]string(nil), defaultCORSMethods...)
+	}
+	if len(cfg.CORS.AllowedHeaders) == 0 {
+		cfg.CORS.AllowedHeaders = append([]string(nil), defaultCORSHeaders...)
+	}
+	if cfg.CORS.MaxAgeSeconds == 0 {
+		cfg.CORS.MaxAgeSeconds = DefaultCORSMaxAgeSeconds
+	}
 	// weld:configdefaults:begin
 	// A capability that extends the typed configuration applies its defaults
 	// here through a marker patch.
 	// weld:configdefaults:end
 }
 
-// Validate reports whether the HTTP settings are usable.
+// Validate reports whether the always-loaded settings are usable: the HTTP
+// listen address and, when it is enabled, the cross-origin policy. The database
+// section is validated separately, by ValidateDatabase, because it is only
+// needed where the database is actually used.
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.HTTP.Addr) == "" {
 		return errors.New("config: http.addr must not be blank")
 	}
+	return c.ValidateCORS()
+}
+
+// ValidateCORS reports whether the cross-origin policy is usable.
+//
+// It is strict on purpose: an enabled policy must name at least one origin, every
+// entry must be a real origin rather than a URL with a path, and the wildcard is
+// refused together with credentials because a browser rejects that pair. A
+// project that gets this wrong fails at startup with a readable message instead
+// of serving a policy no browser will honor.
+func (c *Config) ValidateCORS() error {
+	if !c.CORS.Enabled {
+		return nil
+	}
+	if len(c.CORS.AllowedOrigins) == 0 {
+		return errors.New("config: cors.allowed_origins must list at least one origin when cors.enabled is true (set it in config.yml or " + EnvCORSAllowedOrigins + ")")
+	}
+	wildcard := false
+	for _, origin := range c.CORS.AllowedOrigins {
+		origin = strings.TrimSpace(origin)
+		if !validCORSOrigin(origin) {
+			return fmt.Errorf("config: cors.allowed_origins entry %q is not an origin; use scheme://host[:port] with no path and no trailing slash, or \"*\"", origin)
+		}
+		if origin == "*" {
+			wildcard = true
+		}
+	}
+	if wildcard && c.CORS.AllowCredentials {
+		return errors.New("config: cors.allow_credentials cannot be true while cors.allowed_origins contains \"*\"; list the origins explicitly")
+	}
+	if c.CORS.MaxAgeSeconds < 0 {
+		return errors.New("config: cors.max_age_seconds must not be negative")
+	}
 	return nil
+}
+
+// validCORSOrigin reports whether origin is a usable allowed origin: the literal
+// wildcard, or an absolute origin with a scheme and a host and no path, query,
+// fragment or user info. The strictness catches the common mistakes — a trailing
+// slash, a missing scheme, a pasted URL with a path — that a browser would
+// silently refuse to match.
+func validCORSOrigin(origin string) bool {
+	if origin == "*" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme != "" && parsed.Host != "" &&
+		parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.User == nil
+}
+
+// splitEnvList parses a comma-separated environment value into a list, trimming
+// each entry and dropping the empty ones so a trailing comma is harmless. An
+// explicitly empty variable clears the list rather than leaving the file's value
+// in place.
+func splitEnvList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	list := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			list = append(list, part)
+		}
+	}
+	return list
 }
 
 // ValidateDatabase reports whether the database settings are usable.

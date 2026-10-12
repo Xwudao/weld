@@ -1,0 +1,328 @@
+package httpx
+
+import (
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// The CORS header names this file reads and writes. They are constants rather
+// than literals, so a typo is a compile error and the tests reference the same
+// names the middleware uses.
+const (
+	headerOrigin           = "Origin"
+	headerVary             = "Vary"
+	headerRequestMethod    = "Access-Control-Request-Method"
+	headerRequestHeaders   = "Access-Control-Request-Headers"
+	headerAllowOrigin      = "Access-Control-Allow-Origin"
+	headerAllowMethods     = "Access-Control-Allow-Methods"
+	headerAllowHeaders     = "Access-Control-Allow-Headers"
+	headerAllowCredentials = "Access-Control-Allow-Credentials"
+	headerExposeHeaders    = "Access-Control-Expose-Headers"
+	headerMaxAge           = "Access-Control-Max-Age"
+)
+
+// corsAnyOrigin is the wildcard an allowed-origins list may carry, and
+// corsCredentialsOn is the value of the credentials header. They are values, not
+// header names, and are named separately so a reader never confuses the two.
+const (
+	corsAnyOrigin     = "*"
+	corsCredentialsOn = "true"
+)
+
+// maxCORSAge bounds Access-Control-Max-Age. A browser caps the preflight cache
+// anyway (Chrome at ten minutes, Firefox at a day), and a larger number only
+// makes a policy change take effect later, so a year-long value is clamped
+// rather than sent.
+const maxCORSAge = 24 * time.Hour
+
+// CORSConfig is one cross-origin resource sharing policy.
+//
+// It is the transport-level policy only: CORS decides which browsers may read a
+// response, never who may perform the request. Authentication and authorization
+// stay in the named route policies, which run after this middleware and are
+// never bypassed by it.
+type CORSConfig struct {
+	// AllowedOrigins lists the origins a browser may call from, each as
+	// scheme://host[:port] with no path and no trailing slash, or the single
+	// literal "*". An empty list allows no cross-origin caller and is the safe
+	// default: a preflight from every origin is then refused.
+	AllowedOrigins []string
+	// AllowedMethods lists the methods a preflight may ask for. An empty list
+	// selects the standard set (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS).
+	AllowedMethods []string
+	// AllowedHeaders lists the request headers a preflight may ask for,
+	// case-insensitively. The CORS-safelisted headers are always allowed. An
+	// empty list allows only those. The single literal "*" allows any requested
+	// header and is echoed back rather than written literally.
+	AllowedHeaders []string
+	// ExposedHeaders lists the response headers a browser script may read. An
+	// empty list exposes none beyond the CORS-safelisted response headers.
+	ExposedHeaders []string
+	// AllowCredentials permits a credentialed cross-origin request (cookies, an
+	// Authorization header a browser attaches). With it, the allowed origin is
+	// always echoed rather than answered with "*": a wildcard with credentials
+	// is invalid and a browser rejects it, so this middleware never emits that
+	// pair even if a caller builds the config by hand.
+	AllowCredentials bool
+	// MaxAge is how long a browser may cache a preflight result. Zero sends no
+	// Access-Control-Max-Age and leaves the browser default in place; the value
+	// is clamped to 24h.
+	MaxAge time.Duration
+}
+
+// CORS returns the middleware that applies cfg's cross-origin policy.
+//
+// The middleware runs before the router, so an OPTIONS preflight is answered
+// here and never reaches a route handler or a route policy. A request without an
+// Origin header (a same-origin request, a server-to-server call, a curl) passes
+// through untouched, so enabling CORS changes nothing for a non-browser client.
+//
+// A preflight names a method or a header the policy does not allow and it is
+// refused with a 403 in the shared envelope, so a misconfiguration surfaces as a
+// readable error instead of a browser's opaque CORS failure. A disallowed origin
+// gets no CORS header at all; an actual (non-preflight) request still reaches the
+// handler, because CORS is not an authorization mechanism and the named policies
+// are what refuse a caller.
+//
+// Every response that could be answered differently per origin carries Vary:
+// Origin, so a shared cache never hands one origin's response to another.
+func CORS(cfg CORSConfig) Middleware {
+	policy := newCORSPolicy(cfg)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := strings.TrimSpace(r.Header.Get(headerOrigin))
+			if origin == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			w.Header().Add(headerVary, headerOrigin)
+			if !policy.allowsOrigin(origin) {
+				if isPreflight(r) {
+					Error(w, http.StatusForbidden, "origin not allowed")
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+			if isPreflight(r) {
+				policy.writePreflight(w, r, origin)
+				return
+			}
+			policy.writeActual(w, origin)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// corsPolicy is a CORSConfig with its lists resolved into lookups, so a request
+// never scans the configuration and an empty list has one defined meaning.
+type corsPolicy struct {
+	anyOrigin        bool
+	originSet        map[string]struct{}
+	allowCredentials bool
+	methods          []string
+	methodSet        map[string]struct{}
+	headers          []string
+	anyHeader        bool
+	headerSet        map[string]struct{}
+	exposed          []string
+	maxAgeSeconds    int
+}
+
+// defaultCORSMethods is the method set a policy with no explicit list allows.
+var defaultCORSMethods = []string{
+	http.MethodGet, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions,
+}
+
+// corsSafelistedHeaders are the request headers a browser may send on a
+// cross-origin request without asking, so a preflight naming one is always
+// allowed even though the policy does not list it.
+var corsSafelistedHeaders = []string{
+	"accept", "accept-language", "content-language", "content-type", "range",
+}
+
+// newCORSPolicy resolves cfg into the lookups a request uses. The wildcard is
+// kept out of the origin set, so a policy that allows every origin and one that
+// lists origins take the same lookup path.
+func newCORSPolicy(cfg CORSConfig) *corsPolicy {
+	policy := &corsPolicy{
+		allowCredentials: cfg.AllowCredentials,
+		originSet:        make(map[string]struct{}, len(cfg.AllowedOrigins)),
+		methodSet:        make(map[string]struct{}, len(defaultCORSMethods)),
+		headerSet:        make(map[string]struct{}, len(corsSafelistedHeaders)),
+	}
+	for _, origin := range cfg.AllowedOrigins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		if origin == corsAnyOrigin {
+			policy.anyOrigin = true
+			continue
+		}
+		policy.originSet[strings.ToLower(origin)] = struct{}{}
+	}
+	policy.methods = cfg.AllowedMethods
+	if len(policy.methods) == 0 {
+		policy.methods = defaultCORSMethods
+	}
+	for _, method := range policy.methods {
+		policy.methodSet[strings.ToUpper(strings.TrimSpace(method))] = struct{}{}
+	}
+	for _, header := range corsSafelistedHeaders {
+		policy.headerSet[header] = struct{}{}
+	}
+	for _, header := range cfg.AllowedHeaders {
+		header = strings.ToLower(strings.TrimSpace(header))
+		if header == "" {
+			continue
+		}
+		if header == corsAnyOrigin {
+			policy.anyHeader = true
+			continue
+		}
+		policy.headerSet[header] = struct{}{}
+		policy.headers = append(policy.headers, header)
+	}
+	for _, header := range cfg.ExposedHeaders {
+		if header = strings.TrimSpace(header); header != "" {
+			policy.exposed = append(policy.exposed, header)
+		}
+	}
+	if cfg.MaxAge > 0 {
+		if cfg.MaxAge > maxCORSAge {
+			cfg.MaxAge = maxCORSAge
+		}
+		policy.maxAgeSeconds = int(cfg.MaxAge / time.Second)
+	}
+	return policy
+}
+
+// allowsOrigin reports whether origin may read the response. A wildcard allows
+// any origin; otherwise the comparison is case-insensitive, because a scheme and
+// a host are, while a port stays part of the identity.
+func (p *corsPolicy) allowsOrigin(origin string) bool {
+	if p.anyOrigin {
+		return true
+	}
+	_, ok := p.originSet[strings.ToLower(origin)]
+	return ok
+}
+
+// allowsMethod reports whether a preflight may ask for method.
+func (p *corsPolicy) allowsMethod(method string) bool {
+	_, ok := p.methodSet[strings.ToUpper(strings.TrimSpace(method))]
+	return ok
+}
+
+// allowsHeaders reports whether a preflight may ask for every header in names.
+// An empty list (a preflight with no Access-Control-Request-Headers) is allowed
+// trivially; so is any name when the policy declares the wildcard.
+func (p *corsPolicy) allowsHeaders(names []string) bool {
+	if p.anyHeader {
+		return true
+	}
+	for _, name := range names {
+		if _, ok := p.headerSet[strings.ToLower(strings.TrimSpace(name))]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// writeOrigin writes the allow-origin header: the wildcard when the policy
+// allows every origin and carries no credentials, and the request's own origin
+// otherwise. A credentialed request always gets the echoed origin, because "*"
+// with credentials is invalid and a browser rejects it.
+func (p *corsPolicy) writeOrigin(w http.ResponseWriter, origin string) {
+	if p.anyOrigin && !p.allowCredentials {
+		w.Header().Set(headerAllowOrigin, corsAnyOrigin)
+		return
+	}
+	w.Header().Set(headerAllowOrigin, origin)
+}
+
+// writeCredentials writes the credentials header when the policy allows them.
+func (p *corsPolicy) writeCredentials(w http.ResponseWriter) {
+	if p.allowCredentials {
+		w.Header().Set(headerAllowCredentials, corsCredentialsOn)
+	}
+}
+
+// writePreflight answers an OPTIONS preflight and never calls the next handler.
+//
+// It refuses a method or a header the policy does not allow, so a refused
+// preflight is a 403 the developer can read in the network panel rather than an
+// anonymous browser CORS error. An allowed preflight is a 204 with no body,
+// answered before the router: the mux never sees an OPTIONS request it did not
+// register a route for.
+func (p *corsPolicy) writePreflight(w http.ResponseWriter, r *http.Request, origin string) {
+	requestedMethod := r.Header.Get(headerRequestMethod)
+	requestedHeaders := splitHeaderList(r.Header.Get(headerRequestHeaders))
+	if !p.allowsMethod(requestedMethod) {
+		Error(w, http.StatusForbidden, "cors method not allowed")
+		return
+	}
+	if !p.allowsHeaders(requestedHeaders) {
+		Error(w, http.StatusForbidden, "cors header not allowed")
+		return
+	}
+	// The answer depends on the requested method and headers too, so a shared
+	// cache must not reuse it for a different preflight.
+	w.Header().Add(headerVary, headerRequestMethod)
+	w.Header().Add(headerVary, headerRequestHeaders)
+	w.Header().Set(headerAllowMethods, strings.Join(p.methods, ", "))
+	if len(requestedHeaders) > 0 {
+		// Echo the requested headers, which were just checked against the
+		// policy, so an allowed preflight always gets exactly what it asked for
+		// (a browser refuses an allow-headers list that omits a requested one,
+		// and casing varies between browsers).
+		w.Header().Set(headerAllowHeaders, strings.Join(requestedHeaders, ", "))
+	} else if len(p.headers) > 0 {
+		w.Header().Set(headerAllowHeaders, strings.Join(p.headers, ", "))
+	}
+	if p.maxAgeSeconds > 0 {
+		w.Header().Set(headerMaxAge, strconv.Itoa(p.maxAgeSeconds))
+	}
+	p.writeOrigin(w, origin)
+	p.writeCredentials(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeActual writes the headers an actual cross-origin request carries before
+// the handler runs, so the handler's response — including an error the handler
+// writes — is readable by the calling origin.
+func (p *corsPolicy) writeActual(w http.ResponseWriter, origin string) {
+	p.writeOrigin(w, origin)
+	p.writeCredentials(w)
+	if len(p.exposed) > 0 {
+		w.Header().Set(headerExposeHeaders, strings.Join(p.exposed, ", "))
+	}
+}
+
+// isPreflight reports whether r is a CORS preflight: an OPTIONS request that
+// names the method it intends to use. A plain OPTIONS request is not a
+// preflight and is left to the router, so a project can still answer one itself.
+func isPreflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions && strings.TrimSpace(r.Header.Get(headerRequestMethod)) != ""
+}
+
+// splitHeaderList parses a comma-separated header list (the shape
+// Access-Control-Request-Headers uses), dropping empty entries so trailing or
+// doubled commas are harmless.
+func splitHeaderList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			names = append(names, part)
+		}
+	}
+	return names
+}

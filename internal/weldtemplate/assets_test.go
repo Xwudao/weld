@@ -654,12 +654,14 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 		"internal/httpx/router.go",
 		"internal/httpx/route.go",
 		"internal/httpx/middleware.go",
+		"internal/httpx/cors.go",
 		"internal/httpx/httpx_test.go",
 		"internal/httpx/bind_test.go",
 		"internal/httpx/bind_query_test.go",
 		"internal/httpx/router_test.go",
 		"internal/httpx/route_test.go",
 		"internal/httpx/middleware_test.go",
+		"internal/httpx/cors_test.go",
 		"internal/httpserver/middleware.go",
 		"internal/httpserver/policy.go",
 	} {
@@ -714,9 +716,23 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 			t.Errorf("httpx route.go is missing %q", want)
 		}
 	}
+	corsGo := read(paths["internal/httpx/cors.go"])
+	for _, want := range []string{
+		"type CORSConfig struct",
+		"func CORS(",
+		"Access-Control-Allow-Origin",
+		"Access-Control-Allow-Credentials",
+		"Access-Control-Max-Age",
+		"Vary",
+		"isPreflight(",
+	} {
+		if !strings.Contains(corsGo, want) {
+			t.Errorf("httpx cors.go is missing %q", want)
+		}
+	}
 	// The framework defines no policy names of its own: a policy name is the
 	// project's, so the toolkit must not bake "admin" or any other audience in.
-	for _, frameworkFile := range []string{httpxGo, bindGo, middlewareGo, routerGo, routeGo} {
+	for _, frameworkFile := range []string{httpxGo, bindGo, middlewareGo, routerGo, routeGo, corsGo} {
 		if strings.Contains(frameworkFile, `"admin"`) || strings.Contains(frameworkFile, "AdminGuard") {
 			t.Errorf("httpx defines a project-specific policy name")
 		}
@@ -734,10 +750,16 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 	}
 
 	config := read(paths["internal/httpserver/middleware.go"])
-	for _, want := range []string{"func middlewareChain(", "httpx.RequestID()", "httpx.AccessLog(", "httpx.Recover(", "outer-to-inner"} {
+	for _, want := range []string{"func middlewareChain(", "httpx.CORS(", "httpx.RequestID()", "httpx.AccessLog(", "httpx.Recover(", "outer-to-inner"} {
 		if !strings.Contains(config, want) {
 			t.Errorf("httpserver/middleware.go is missing %q", want)
 		}
+	}
+	// CORS is installed from the typed configuration rather than hard-coded in
+	// the toolkit, so the project configures it in config.yml and the toolkit
+	// stays free of the project's config types.
+	if !strings.Contains(read(paths["internal/httpserver/middleware.go"]), "cfg.CORS.Enabled") {
+		t.Error("httpserver/middleware.go does not read the typed cors section")
 	}
 	if !strings.Contains(read(paths["internal/httpserver/http.go"]), "httpx.Chain(middlewareChain(") {
 		t.Error("http.go does not compose the configured middleware chain")

@@ -459,8 +459,9 @@ func newServer(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, hand
 	server := &Server{
 		// The composed mux is wrapped with the same middleware chain the
 		// httpserver package exposes (httpserver.Chain), so the composition serves
-		// the project middleware semantics.
-		HTTP: httpserver.NewServer(cfg.HTTP.Addr, httpserver.Chain(logger, handler)),
+		// the project middleware semantics. The configuration carries the
+		// cross-origin policy that chain reads.
+		HTTP: httpserver.NewServer(cfg.HTTP.Addr, httpserver.Chain(cfg, logger, handler)),
 		logger: logger,
 		fail:   make(chan error, 1),
 	}

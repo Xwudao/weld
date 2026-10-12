@@ -119,7 +119,8 @@ Capabilities:
   security weight. Required by `loom`, which every added capability requires,
   so `--with-dependencies` installs it too.
 - `http` (add) — HTTP server lifecycle, the shared `internal/httpx` toolkit, a
-  composable handler builder, and the single `serve` command. Requires `loom`.
+  composable handler builder, a configuration-driven CORS policy, and the single
+  `serve` command. Requires `loom`.
   The toolkit owns the `{code,msg,data}` response envelope, the `Router` with
   grouping and named route policies, typed endpoint helpers, raw route methods
   (`Router.Get`, `Router.Post`, ...) for a response the typed envelope does not
@@ -132,8 +133,8 @@ Capabilities:
   table with each route's policies at startup in a development environment. Its
   `Serve` takes the injected
   `*slog.Logger`, and `serve` reads the listen address through the shared
-  `config` loader. No authentication, CORS or rate limiting is enabled by
-  default.
+  `config` loader. CORS is off until `config.yml`'s `cors` section enables it
+  (see [CORS](#cors)); no authentication or rate limiting is enabled by default.
 - `web` (add) — React + TypeScript + Vite frontend, served by `http`.
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository. Requires `loom` but not
@@ -260,9 +261,11 @@ point; HTTP routes are not registered at init time.
 2. **Go route composition** — the regenerated Loom server graph in
    `internal/di/di.go` owns the composition, which registers the SPA and the
    installed business modules on one mux. `internal/httpserver/http.go`
-   exposes `NewHandler(logger, routes ...Route)` as the injectable test seam and
-   `httpserver.Chain(logger, handler)` applies the project middleware stack
-   (declared in the stable `internal/httpserver/middleware.go`). The server graph
+   exposes `NewHandler(cfg, logger, routes ...Route)` as the injectable test seam
+   and
+   `httpserver.Chain(cfg, logger, handler)` applies the project middleware stack
+   (declared in the stable `internal/httpserver/middleware.go`, reading the
+   cross-origin policy from the configuration). The server graph
    wraps the mux it composes with `Chain`, so production and tests serve
    identical middleware. Composition is explicit and in one place: no global
    route registry, no per-capability route file, no init-time route
@@ -621,9 +624,9 @@ it and the user never adds it by hand.
 
 What lands in the project:
 
-- `internal/config/` — typed Go structs (`Config`, `HTTP`, `Database`) with
-  `yaml` tags for names only (no validation tags), a loader whose `readFile` and
-  `lookupEnv` are injected (`NewLoader`) so it is testable without the
+- `internal/config/` — typed Go structs (`Config`, `HTTP`, `CORS`, `Database`)
+  with `yaml` tags for names only (no validation tags), a loader whose `readFile`
+  and `lookupEnv` are injected (`NewLoader`) so it is testable without the
   filesystem or the process environment, and a `Secret` type that redacts itself
   in `fmt`, `log/slog`, JSON and YAML.
 - `config.yml` — generated locally and added to `.gitignore`. It is not silently
@@ -646,7 +649,8 @@ live in the local `config.yml` for development while a production environment
 overrides `DB_PASSWORD` or `DATABASE_URL`. `weld` never logs the value.
 
 `config.yml` and `config.example.yml` carry a `weld:config` marker region that
-each capability appends to: `http` appends the `http` section and `db` appends
+each capability appends to: `http` appends the `http` and `cors` sections and
+`db` appends
 the `database` section, so a db-only project has no gratuitous http section.
 Because the append is marker-based and sentinel-guarded, `weld add db` after
 `weld add http` (or the reverse) merges the new section without clobbering the
@@ -667,6 +671,80 @@ the plan fails with an actionable restore instruction (for example
 loader is unchanged: `config.Load` still errors on a missing `config.yml` until
 the file exists.
 
+## CORS
+
+The `http` capability ships a cross-origin policy, wired but **off by default**.
+That default is deliberate: the built SPA is served by the same server, and the
+generated Vite dev server proxies `/api`, so a browser is already same-origin and
+needs no CORS header at all. Turning CORS on is a `config.yml` edit, not a Go
+edit:
+
+```yaml
+cors:
+  enabled: true
+  allowed_origins: ["http://localhost:5173", "https://app.example.com"]
+  allowed_methods: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
+  allowed_headers: [Content-Type, Authorization, X-Request-Id]
+  exposed_headers: []
+  allow_credentials: false
+  max_age_seconds: 600
+```
+
+What the policy does, and what it deliberately does not:
+
+- **A preflight is answered before the router.** `internal/httpserver/middleware.go`
+  installs `httpx.CORS` as the outermost middleware, so an `OPTIONS` preflight
+  never reaches the mux, a route handler or a named route policy. A preflight is
+  browser bookkeeping rather than application traffic, so it is not access-logged.
+- **It fails closed and it fails loudly.** An enabled section with no origin, an
+  entry that is not an origin (a trailing slash, a missing scheme, a pasted URL
+  with a path), a negative `max_age_seconds` and the invalid
+  `"*"`-with-`allow_credentials` pair are all startup errors, so a
+  misconfiguration never silently allows or blocks every origin:
+
+  ```text
+  config: cors.allowed_origins entry "http://localhost:5173/" is not an origin;
+  use scheme://host[:port] with no path and no trailing slash, or "*"
+  ```
+
+  A preflight that names a method or a header the policy does not allow is a
+  `403` in the shared `{code,msg,data}` envelope, so the developer reads a real
+  error instead of the browser's opaque CORS failure.
+- **The headers are already on the response when anything later refuses it.**
+  Because CORS runs first, a `401`, `403` or `500` from a policy or a handler is
+  still readable by the allowed origin, instead of surfacing as an anonymous CORS
+  error. A refused origin gets no CORS header on an actual request but still
+  reaches the handler: CORS decides which origins may *read* a response, never
+  who may make the request. Authorization stays in the named route policies,
+  which CORS never bypasses.
+- **It is a correct-by-construction implementation, not a header stamp.**
+  `internal/httpx/cors.go` matches origins exactly (case-insensitively, port
+  included) or by the `"*"` wildcard, echoes the origin rather than `"*"` when
+  credentials are allowed, always allows the CORS-safelisted request headers,
+  echoes the requested headers a preflight asked for, emits the full
+  `Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers`
+  set, and clamps `Access-Control-Max-Age` to 24h. It depends only on the
+  standard library, so it stays usable by a project that configures CORS in code.
+- **Deployments can override every value.** `CORS_ENABLED`,
+  `CORS_ALLOWED_ORIGINS` (comma-separated), `CORS_ALLOWED_METHODS`,
+  `CORS_ALLOWED_HEADERS`, `CORS_EXPOSED_HEADERS`, `CORS_ALLOW_CREDENTIALS` and
+  `CORS_MAX_AGE_SECONDS` follow the shared precedence (environment over file), so
+  an origin list is not baked into the image.
+
+`httpx.CORS` is a general middleware; the generated
+`internal/httpserver/middleware.go` is the one place that translates the typed
+`config.CORS` section into it, and it is written once and never regenerated, so a
+project can reorder it, replace it or add its own middleware beside it.
+
+A project scaffolded by an earlier weld does not gain the policy from a repeat
+`weld add http`: a repeat add of an installed capability is a no-op that only
+reports the new files as drift, and the `weld:http:installed` sentinel means the
+config region is not re-appended either. Adopting it in such a project means
+copying `internal/httpx/cors.go` and `internal/httpx/cors_test.go` from a project
+that installs `http` now, adding the `cors` section to `config.yml`, and adding
+the `httpx.CORS` entry to `internal/httpserver/middleware.go`. A general
+capability-upgrade path (`weld upgrade`) is not implemented.
+
 ## Tests
 
 ```sh
@@ -678,16 +756,22 @@ Test conventions:
 
 - No test opens a socket to a service. HTTP behavior is asserted with
   `net/http/httptest` against handlers built from injected routes/fixtures
-  (`httpserver.NewHandler(logger, routes...)`, and `web.Handler` over an
+  (`httpserver.NewHandler(cfg, logger, routes...)`, and `web.Handler` over an
   `fstest.MapFS`). The generated `internal/httpx` test covers the envelope
   writers, typed binding (content type, body limit, unknown field, trailing
   JSON) and the middleware (order, request id, recovery, Flusher/Hijacker
-  forwarding) without a socket. The generated graph tests bind an ephemeral
+  forwarding) without a socket; its `cors_test.go` covers the preflight answered
+  before the handler, the refused origin, method and header, the safelisted
+  header, the actual request's headers, the plain `OPTIONS` left to the router,
+  the wildcard never paired with credentials, the case-insensitive match and the
+  `Vary` and max-age output. The generated graph tests bind an ephemeral
   loopback socket only to prove that an
   occupied port fails `Start` and that a serve failure is reported, and close it
   immediately. The generated `internal/httpserver` test occupies a loopback port
   with `httptest` to prove `Serve` reports the bind failure without logging a
-  listening line, and closes the occupying server.
+  listening line, and closes the occupying server; it also proves the composed
+  chain reads the configured `cors` section (a preflight is answered) and sends
+  no CORS header while it is disabled.
 - The generated `serve` command is exercised as a Cobra command tree
   (`internal/app/serve_test.go`): the root builds the serve command, the shared
   `--config`/`--addr` flags parse and their precedence resolves, and the
@@ -697,7 +781,13 @@ Test conventions:
   a missing file, an invalid file that must not echo its content, a blank
   `HTTP_ADDR` that must not fall back to the default, the separate database
   validation, and a `Secret` sentinel that must not survive `fmt`, `slog`, JSON
-  or YAML. Scaffold tests prove the first `http`/`db` add installs `config`, that
+  or YAML. It also covers CORS: an omitted section is off with usable defaults,
+  the typed section and the comma-separated `CORS_*` overrides load, a malformed
+  override is an error, and the fail-closed validation rejects an enabled policy
+  with no origin, a trailing slash, a missing scheme, a path, the
+  wildcard-with-credentials pair and a negative max age while accepting an exact
+  origin, the wildcard and a localhost development origin. Scaffold tests prove
+  the first `http`/`db` add installs `config`, that
   a db-only project has no http section, that both add orders merge the sections,
   that an edited address and a local database password survive later adds, and
   that deleting only the git-ignored `config.yml` (a fresh clone) is repaired from

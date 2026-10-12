@@ -37,8 +37,10 @@ capabilities/
                    project-owned middleware configuration in middleware.go),
                    internal/httpx (the {code,msg,data} JSON envelope and raw
                    writers, typed JSON binding with a body limit, composable
-                   net/http middleware), internal/app/serve.go (the one serve
-                   command), config.yml / config.example.yml http section (snippet)
+                   net/http middleware, the configuration-driven CORS policy in
+                   cors.go), internal/app/serve.go (the one serve
+                   command), config.yml / config.example.yml http + cors sections
+                   (snippet)
   web/             kind: add    -> frontend, requires http
     capability.json
     files/         web/ (React + TS + Vite), internal/web (SPA handler),
@@ -371,20 +373,25 @@ table with each route's policies at startup, so the surface and its coverage are
 visible without a request; production stays silent.
 `internal/httpserver/http.go` exposes the test seams:
 
-- `NewHandler(logger, routes ...Route) http.Handler` builds a handler from
-  explicit routes, so tests compose a mux — and the real middleware chain —
-  without a socket or a capability.
-- `Chain(logger, handler) http.Handler` applies the project middleware chain to
-  an already-built handler. The server graph wraps its mux with it, so
+- `NewHandler(cfg, logger, routes ...Route) http.Handler` builds a handler from
+  explicit routes, so tests compose a mux — and the real middleware chain,
+  including the configured CORS policy — without a socket or a capability.
+- `Chain(cfg, logger, handler) http.Handler` applies the project middleware chain
+  to an already-built handler. The server graph wraps its mux with it, so
   production and tests serve the identical middleware stack.
 
 The stack itself lives in `internal/httpserver/middleware.go`, a project-owned
-file written once and never regenerated. It declares `middlewareChain(logger)`
-as an outer-to-inner list of `func(http.Handler) http.Handler`; the default is
-`RequestID`, `AccessLog` and `Recover`. No authentication, CORS or rate limiting
-is enabled by default — add such middleware there. Because the chain is an
-explicit `func(http.Handler) http.Handler`, any third-party middleware composes
-with it.
+file written once and never regenerated. It declares
+`middlewareChain(cfg, logger)` as an outer-to-inner list of
+`func(http.Handler) http.Handler`; the default is `CORS` (only when `config.yml`
+enables the `cors` section), `RequestID`, `AccessLog` and `Recover`. The CORS
+middleware is first so a preflight is answered before the router and the headers
+are on the response when a policy or a handler refuses a request; the file
+translates the typed `config.CORS` section into `httpx.CORS`, so the toolkit
+stays free of the project's configuration types. No authentication or rate
+limiting is enabled by default — add such middleware there. Because the chain is
+an explicit `func(http.Handler) http.Handler`, any third-party middleware
+composes with it.
 
 `internal/httpx` is the shared toolkit the generated
 business modules use: the `{code,msg,data}` JSON envelope (`JSON`, `Error`) and
@@ -393,11 +400,16 @@ the raw writers for responses that must stay unwrapped (`RawJSON`, `RawText`,
 configurable body limit, a content-type check, single-value and unknown-field
 rejection and an optional code-first validator callback; raw route methods on the
 router (`Router.Get`, `Router.Post`, ...), so a route built from a path constant
-never assembles a `"METHOD /path"` string by hand; and the
-composable middleware (`Chain`, `RequestID`, `AccessLog`, `Recover`). It depends
+never assembles a `"METHOD /path"` string by hand; the
+composable middleware (`Chain`, `RequestID`, `AccessLog`, `Recover`); and the
+cross-origin policy (`CORS`, `CORSConfig`) the project enables from `config.yml`,
+which answers a preflight before the router, refuses a disallowed origin, method
+or header, echoes the origin instead of `"*"` when credentials are allowed, and
+emits the matching `Vary` headers. It depends
 only on the standard library — binding takes a validator callback, so `httpx`
 never imports `go-validate` (a DTO that wants it wires it in through the
-callback). The `AccessLog`
+callback), and the CORS middleware takes its policy as a value rather than
+reading the project's configuration types. The `AccessLog`
 recorder forwards `Flush` and `Hijack`, so a streaming or SSE response and a
 WebSocket
 upgrade keep working.

@@ -13,6 +13,7 @@ import (
 	"net"
 	nethttp "net/http"
 
+	"__module__/internal/config"
 	"__module__/internal/httpx"
 )
 
@@ -25,23 +26,26 @@ type Route func(mux *nethttp.ServeMux)
 // wraps the mux it builds with it, and NewHandler uses it for injected routes,
 // so every composition serves identical middleware semantics. The stack it
 // applies is declared in middleware.go, the stable project-owned configuration
-// file.
-func Chain(logger *slog.Logger, handler nethttp.Handler) nethttp.Handler {
-	return httpx.Chain(middlewareChain(logger)...)(handler)
+// file, and cfg supplies the settings that stack reads — currently the
+// cross-origin policy. A nil cfg is treated as an empty configuration, so the
+// chain still applies with CORS off.
+func Chain(cfg *config.Config, logger *slog.Logger, handler nethttp.Handler) nethttp.Handler {
+	return httpx.Chain(middlewareChain(cfg, logger)...)(handler)
 }
 
 // NewHandler builds a handler from the given routes.
 //
 // It is the injectable seam for tests: pass routes directly to exercise the mux
-// — and the real middleware chain — without installing a capability or opening
-// a socket. Production composition happens in the Loom server graph, which
-// registers the business modules on its own mux.
-func NewHandler(logger *slog.Logger, routes ...Route) nethttp.Handler {
+// — and the real middleware chain, including the CORS policy cfg configures —
+// without installing a capability or opening a socket. Production composition
+// happens in the Loom server graph, which registers the business modules on its
+// own mux.
+func NewHandler(cfg *config.Config, logger *slog.Logger, routes ...Route) nethttp.Handler {
 	mux := nethttp.NewServeMux()
 	for _, route := range routes {
 		route(mux)
 	}
-	return Chain(logger, mux)
+	return Chain(cfg, logger, mux)
 }
 
 // BrowseURL returns the URL a developer can open for a server bound at addr.

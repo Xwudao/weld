@@ -10,11 +10,20 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"__module__/internal/config"
 )
 
 // testLogger is the injected logger for tests that do not assert on output.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+}
+
+// testConfig is the configuration the injected-handler tests compose with: CORS
+// off, so those tests exercise the default chain and one test enables it
+// explicitly.
+func testConfig() *config.Config {
+	return &config.Config{HTTP: config.HTTP{Addr: ":0"}}
 }
 
 // TestBrowseURLRewritesTheWildcardHost proves a listener address becomes a URL a
@@ -41,7 +50,7 @@ func TestBrowseURLRewritesTheWildcardHost(t *testing.T) {
 }
 
 func TestNewHandlerComposesInjectedRoutes(t *testing.T) {
-	handler := NewHandler(testLogger(), func(mux *nethttp.ServeMux) {
+	handler := NewHandler(testConfig(), testLogger(), func(mux *nethttp.ServeMux) {
 		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 			w.WriteHeader(nethttp.StatusTeapot)
 		})
@@ -55,7 +64,7 @@ func TestNewHandlerComposesInjectedRoutes(t *testing.T) {
 
 func TestNewHandlerWithoutRoutesServesNothing(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	NewHandler(testLogger()).ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/", nil))
+	NewHandler(testConfig(), testLogger()).ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/", nil))
 	if recorder.Code != nethttp.StatusNotFound {
 		t.Fatalf("status = %d, want %d", recorder.Code, nethttp.StatusNotFound)
 	}
@@ -65,7 +74,7 @@ func TestNewHandlerWithoutRoutesServesNothing(t *testing.T) {
 // project middleware chain: the request-id middleware echoes an identifier on
 // every response.
 func TestNewHandlerAppliesMiddleware(t *testing.T) {
-	handler := NewHandler(testLogger(), func(mux *nethttp.ServeMux) {
+	handler := NewHandler(testConfig(), testLogger(), func(mux *nethttp.ServeMux) {
 		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 			w.WriteHeader(nethttp.StatusOK)
 		})
@@ -77,13 +86,59 @@ func TestNewHandlerAppliesMiddleware(t *testing.T) {
 	}
 }
 
+// TestNewHandlerAppliesTheConfiguredCORSPolicy proves the chain is wired to the
+// configuration: an enabled cors section answers a preflight before the mux, so
+// the router never sees an OPTIONS request it registered no route for.
+func TestNewHandlerAppliesTheConfiguredCORSPolicy(t *testing.T) {
+	cfg := testConfig()
+	cfg.CORS = config.CORS{Enabled: true, AllowedOrigins: []string{"https://app.example.com"}}
+	handler := NewHandler(cfg, testLogger(), func(mux *nethttp.ServeMux) {
+		mux.HandleFunc("/api/items", func(nethttp.ResponseWriter, *nethttp.Request) {
+			t.Error("the preflight reached the mux")
+		})
+	})
+
+	request := httptest.NewRequest(nethttp.MethodOptions, "/api/items", nil)
+	request.Header.Set("Origin", "https://app.example.com")
+	request.Header.Set("Access-Control-Request-Method", nethttp.MethodGet)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != nethttp.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, nethttp.StatusNoContent)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Fatalf("allow-origin = %q", got)
+	}
+}
+
+// TestNewHandlerWithoutCORSSendsNoCORSHeader proves the default stays off: a
+// disabled cors section installs no middleware and adds no header, so a
+// same-origin project is unaffected.
+func TestNewHandlerWithoutCORSSendsNoCORSHeader(t *testing.T) {
+	handler := NewHandler(testConfig(), testLogger(), func(mux *nethttp.ServeMux) {
+		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+			w.WriteHeader(nethttp.StatusOK)
+		})
+	})
+
+	request := httptest.NewRequest(nethttp.MethodGet, "/ping", nil)
+	request.Header.Set("Origin", "https://app.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("allow-origin = %q, want none while CORS is disabled", got)
+	}
+}
+
 // TestNewHandlerRecoversAPanic proves a handler panic is contained: the client
 // receives the internal-error envelope and never the panic detail, which is
 // logged through the injected logger instead.
 func TestNewHandlerRecoversAPanic(t *testing.T) {
 	var sink bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&sink, nil))
-	handler := NewHandler(logger, func(mux *nethttp.ServeMux) {
+	handler := NewHandler(testConfig(), logger, func(mux *nethttp.ServeMux) {
 		mux.HandleFunc("/boom", func(nethttp.ResponseWriter, *nethttp.Request) {
 			panic("secret panic detail")
 		})
@@ -102,7 +157,7 @@ func TestNewHandlerRecoversAPanic(t *testing.T) {
 }
 
 func TestNewServerConfiguresWithoutListening(t *testing.T) {
-	server := NewServer("127.0.0.1:0", NewHandler(testLogger()))
+	server := NewServer("127.0.0.1:0", NewHandler(testConfig(), testLogger()))
 	if server.Addr != "127.0.0.1:0" {
 		t.Fatalf("Addr = %q", server.Addr)
 	}
@@ -119,7 +174,7 @@ func TestNewServerConfiguresWithoutListening(t *testing.T) {
 // line is printed. The occupying server is closed by the test, so no socket is
 // leaked.
 func TestListenReportsOccupiedPort(t *testing.T) {
-	occupied := httptest.NewServer(NewHandler(testLogger()))
+	occupied := httptest.NewServer(NewHandler(testConfig(), testLogger()))
 	defer occupied.Close()
 
 	listener, err := Listen(occupied.Listener.Addr().String())
@@ -152,7 +207,7 @@ func TestServeShutsDownGracefullyOnCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, addr, listener, NewHandler(testLogger())) }()
+	go func() { done <- Serve(ctx, addr, listener, NewHandler(testConfig(), testLogger())) }()
 
 	cancel()
 	select {

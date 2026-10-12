@@ -1,8 +1,8 @@
 {
   "name": "http",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "kind": "add",
-  "summary": "HTTP server lifecycle, the shared JSON/middleware toolkit, a composable handler builder and one serve command.",
+  "summary": "HTTP server lifecycle, the shared JSON/middleware toolkit, a composable handler builder, a configuration-driven CORS policy and one serve command.",
   "requires": ["loom"],
   "files": [
     { "path": "internal/httpserver/http.go", "source": "files/http.go.tmpl" },
@@ -16,12 +16,14 @@
     { "path": "internal/httpx/router.go", "source": "files/httpx/router.go.tmpl" },
     { "path": "internal/httpx/route.go", "source": "files/httpx/route.go.tmpl" },
     { "path": "internal/httpx/middleware.go", "source": "files/httpx/middleware.go.tmpl" },
+    { "path": "internal/httpx/cors.go", "source": "files/httpx/cors.go.tmpl" },
     { "path": "internal/httpx/httpx_test.go", "source": "files/httpx/httpx_test.go.tmpl" },
     { "path": "internal/httpx/bind_test.go", "source": "files/httpx/bind_test.go.tmpl" },
     { "path": "internal/httpx/bind_query_test.go", "source": "files/httpx/bind_query_test.go.tmpl" },
     { "path": "internal/httpx/router_test.go", "source": "files/httpx/router_test.go.tmpl" },
     { "path": "internal/httpx/route_test.go", "source": "files/httpx/route_test.go.tmpl" },
     { "path": "internal/httpx/middleware_test.go", "source": "files/httpx/middleware_test.go.tmpl" },
+    { "path": "internal/httpx/cors_test.go", "source": "files/httpx/cors_test.go.tmpl" },
     { "path": "internal/app/serve.go", "source": "files/serve.go.tmpl" },
     { "path": "internal/app/serve_test.go", "source": "files/serve_test.go.tmpl" }
   ],

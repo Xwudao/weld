@@ -1,0 +1,240 @@
+package httpx
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// This file covers the cross-origin middleware: the preflight it answers before
+// the router, the headers an actual request carries, the origins, methods and
+// headers it refuses, and the pair it must never emit ("*" with credentials).
+
+// corsTestHandler wraps handler with CORS under cfg and records whether the
+// wrapped handler ran, so a preflight test can prove the router is never
+// reached.
+func corsTestHandler(cfg CORSConfig) (http.Handler, *bool) {
+	reached := false
+	handler := CORS(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	return handler, &reached
+}
+
+// preflightRequest builds an OPTIONS preflight from origin for method.
+func preflightRequest(origin, method string) *http.Request {
+	request := httptest.NewRequest(http.MethodOptions, "/api/items", nil)
+	request.Header.Set(headerOrigin, origin)
+	request.Header.Set(headerRequestMethod, method)
+	return request
+}
+
+func TestCORSPreflightIsAnsweredBeforeTheRouter(t *testing.T) {
+	handler, reached := corsTestHandler(CORSConfig{
+		AllowedOrigins:   []string{"https://app.example.com"},
+		AllowedHeaders:   []string{"Authorization"},
+		AllowCredentials: true,
+		MaxAge:           10 * time.Minute,
+	})
+
+	request := preflightRequest("https://app.example.com", http.MethodPost)
+	request.Header.Set(headerRequestHeaders, "Content-Type, Authorization")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	if *reached {
+		t.Fatal("the preflight reached the wrapped handler")
+	}
+	header := recorder.Header()
+	if got := header.Get(headerAllowOrigin); got != "https://app.example.com" {
+		t.Errorf("allow-origin = %q, want the echoed origin", got)
+	}
+	if got := header.Get(headerAllowCredentials); got != corsCredentialsOn {
+		t.Errorf("allow-credentials = %q, want %q", got, corsCredentialsOn)
+	}
+	if got := header.Get(headerAllowHeaders); !strings.Contains(got, "Authorization") || !strings.Contains(got, "Content-Type") {
+		t.Errorf("allow-headers = %q, want the requested headers echoed", got)
+	}
+	if got := header.Get(headerAllowMethods); !strings.Contains(got, http.MethodPost) {
+		t.Errorf("allow-methods = %q, want POST", got)
+	}
+	if got := header.Get(headerMaxAge); got != "600" {
+		t.Errorf("max-age = %q, want 600", got)
+	}
+	// A cached answer depends on the origin as well as the requested method and
+	// headers, so all three must be varied on.
+	for _, want := range []string{headerOrigin, headerRequestMethod, headerRequestHeaders} {
+		if !varyContains(header.Values(headerVary), want) {
+			t.Errorf("Vary = %v, want it to contain %q", header.Values(headerVary), want)
+		}
+	}
+}
+
+func TestCORSRefusesADisallowedOrigin(t *testing.T) {
+	handler, reached := corsTestHandler(CORSConfig{AllowedOrigins: []string{"https://app.example.com"}})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, preflightRequest("https://evil.example.com", http.MethodGet))
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+	if got := recorder.Header().Get(headerAllowOrigin); got != "" {
+		t.Errorf("allow-origin = %q, want no header for a refused origin", got)
+	}
+	if *reached {
+		t.Fatal("a refused preflight reached the wrapped handler")
+	}
+}
+
+func TestCORSRefusesADisallowedMethodOrHeader(t *testing.T) {
+	handler, _ := corsTestHandler(CORSConfig{
+		AllowedOrigins: []string{"https://app.example.com"},
+		AllowedMethods: []string{http.MethodGet},
+		AllowedHeaders: []string{"X-Custom"},
+	})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, preflightRequest("https://app.example.com", http.MethodDelete))
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("a disallowed method: status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+
+	request := preflightRequest("https://app.example.com", http.MethodGet)
+	request.Header.Set(headerRequestHeaders, "X-Other")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("a disallowed header: status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+
+	// A CORS-safelisted header is allowed without being listed.
+	request = preflightRequest("https://app.example.com", http.MethodGet)
+	request.Header.Set(headerRequestHeaders, "Content-Type")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Errorf("a safelisted header: status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
+func TestCORSActualRequestCarriesTheHeadersBeforeTheHandler(t *testing.T) {
+	handler, reached := corsTestHandler(CORSConfig{
+		AllowedOrigins:   []string{"https://app.example.com"},
+		ExposedHeaders:   []string{"X-Request-Id"},
+		AllowCredentials: true,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/items", nil)
+	request.Header.Set(headerOrigin, "https://app.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if !*reached {
+		t.Fatal("an actual cross-origin request did not reach the handler")
+	}
+	header := recorder.Header()
+	if got := header.Get(headerAllowOrigin); got != "https://app.example.com" {
+		t.Errorf("allow-origin = %q", got)
+	}
+	if got := header.Get(headerAllowCredentials); got != corsCredentialsOn {
+		t.Errorf("allow-credentials = %q", got)
+	}
+	if got := header.Get(headerExposeHeaders); got != "X-Request-Id" {
+		t.Errorf("expose-headers = %q", got)
+	}
+	if !varyContains(header.Values(headerVary), headerOrigin) {
+		t.Errorf("Vary = %v, want it to contain %q", header.Values(headerVary), headerOrigin)
+	}
+}
+
+func TestCORSIgnoresANonBrowserRequest(t *testing.T) {
+	handler, reached := corsTestHandler(CORSConfig{AllowedOrigins: []string{"https://app.example.com"}})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/items", nil))
+
+	if !*reached {
+		t.Fatal("a request without an Origin header did not reach the handler")
+	}
+	if got := recorder.Header().Get(headerAllowOrigin); got != "" {
+		t.Errorf("allow-origin = %q, want no CORS header without an Origin", got)
+	}
+	if got := recorder.Header().Get(headerVary); got != "" {
+		t.Errorf("Vary = %q, want no Vary without an Origin", got)
+	}
+}
+
+func TestCORSLeavesAPlainOptionsRequestToTheRouter(t *testing.T) {
+	handler, reached := corsTestHandler(CORSConfig{AllowedOrigins: []string{"https://app.example.com"}})
+
+	request := httptest.NewRequest(http.MethodOptions, "/api/items", nil)
+	request.Header.Set(headerOrigin, "https://app.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if !*reached {
+		t.Fatal("a plain OPTIONS request was treated as a preflight")
+	}
+}
+
+func TestCORSWildcardNeverPairsWithCredentials(t *testing.T) {
+	handler, _ := corsTestHandler(CORSConfig{AllowedOrigins: []string{"*"}})
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set(headerOrigin, "https://anywhere.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if got := recorder.Header().Get(headerAllowOrigin); got != corsAnyOrigin {
+		t.Errorf("allow-origin = %q, want %q", got, corsAnyOrigin)
+	}
+
+	handler, _ = corsTestHandler(CORSConfig{AllowedOrigins: []string{"*"}, AllowCredentials: true})
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if got := recorder.Header().Get(headerAllowOrigin); got != "https://anywhere.example.com" {
+		t.Errorf("allow-origin = %q, want the echoed origin when credentials are allowed", got)
+	}
+}
+
+func TestCORSMatchesCaseInsensitivelyAndClampsMaxAge(t *testing.T) {
+	handler, _ := corsTestHandler(CORSConfig{
+		AllowedOrigins: []string{"HTTPS://App.Example.com"},
+		AllowedMethods: []string{"get"},
+		MaxAge:         0,
+	})
+
+	request := preflightRequest("https://app.example.com", "GET")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	if got := recorder.Header().Get(headerMaxAge); got != "" {
+		t.Errorf("max-age = %q, want no header for a zero MaxAge", got)
+	}
+
+	handler, _ = corsTestHandler(CORSConfig{AllowedOrigins: []string{"*"}, MaxAge: 365 * 24 * time.Hour})
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, preflightRequest("https://app.example.com", http.MethodGet))
+	if got := recorder.Header().Get(headerMaxAge); got != "86400" {
+		t.Errorf("max-age = %q, want it clamped to 86400", got)
+	}
+}
+
+// varyContains reports whether a parsed Vary header list names value.
+func varyContains(values []string, value string) bool {
+	for _, entry := range values {
+		for _, name := range strings.Split(entry, ",") {
+			if strings.EqualFold(strings.TrimSpace(name), value) {
+				return true
+			}
+		}
+	}
+	return false
+}
