@@ -178,3 +178,47 @@ func TestSeedTagDefaultAndOverride(t *testing.T) {
 		t.Errorf("SeedTag = %q, want devseed", got)
 	}
 }
+
+func TestDeployDefaultsToLinuxAmd64(t *testing.T) {
+	var cfg *Config // a missing file is a nil Config
+	got := cfg.EffectiveDeploy()
+	if got.Target == nil || got.Target.OS != "linux" || got.Target.Arch != "amd64" {
+		t.Fatalf("EffectiveDeploy target = %+v, want linux/amd64", got.Target)
+	}
+	if got.Host != "" {
+		t.Errorf("EffectiveDeploy host = %q, want empty", got.Host)
+	}
+}
+
+func TestDeploySettings(t *testing.T) {
+	dir := writeConfig(t, `
+version: 1
+deploy:
+  host: prod-app
+  remote_upload_dir: /srv/app
+  remote_script: /srv/app/deploy.sh
+  target: {os: linux, arch: arm64}
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.EffectiveDeploy()
+	if got.Host != "prod-app" || got.RemoteUploadDir != "/srv/app" || got.RemoteScript != "/srv/app/deploy.sh" {
+		t.Errorf("EffectiveDeploy = %+v", got)
+	}
+	if got.Target == nil || got.Target.Arch != "arm64" {
+		t.Errorf("EffectiveDeploy target = %+v, want arm64", got.Target)
+	}
+}
+
+func TestDeployValidate(t *testing.T) {
+	full := DeployConfig{Host: "h", RemoteUploadDir: "/srv", RemoteScript: "/srv/x.sh"}
+	if err := full.Validate(); err != nil {
+		t.Fatalf("Validate(full) = %v", err)
+	}
+	empty := DeployConfig{}
+	if err := empty.Validate(); err == nil || !strings.Contains(err.Error(), "deploy.host") {
+		t.Fatalf("Validate(empty) = %v, want a host error", err)
+	}
+}

@@ -1031,3 +1031,40 @@ func TestGenLoomRequiresLoom(t *testing.T) {
 		t.Fatalf("gen loom output = %q", out)
 	}
 }
+
+func TestDeployHelpAndDryRun(t *testing.T) {
+	out, err := run(t, "deploy", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"remote_upload_dir", "--no-build", "--artifact"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("deploy help omitted %q", want)
+		}
+	}
+}
+
+func TestDeployRequiresConfig(t *testing.T) {
+	dir := t.TempDir()
+	_, err := run(t, "deploy", "--dry-run", "--dir", dir)
+	if err == nil || !strings.Contains(err.Error(), "deploy.host") {
+		t.Fatalf("err = %v, want a deploy.host error", err)
+	}
+}
+
+func TestDeployDryRunPlans(t *testing.T) {
+	dir := t.TempDir()
+	body := "version: 1\ndeploy:\n  host: prod-app\n  remote_upload_dir: /srv/app\n  remote_script: /srv/app/deploy.sh\n"
+	if err := os.WriteFile(filepath.Join(dir, "weld.yml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, "deploy", "--dry-run", "--dir", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"scp ", "ssh ", "prod-app:/srv/app", "sh '/srv/app/deploy.sh'"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry run output = %q, missing %q", out, want)
+		}
+	}
+}

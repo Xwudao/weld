@@ -99,13 +99,28 @@ type SeedConfig struct {
 	Tag string `yaml:"tag"`
 }
 
+// DeployConfig holds the `weld deploy` settings.
+type DeployConfig struct {
+	// Host is the ssh destination the artifact is uploaded to, usually a Host
+	// alias from ~/.ssh/config.
+	Host string `yaml:"host"`
+	// RemoteUploadDir is the remote directory the artifact is uploaded to.
+	RemoteUploadDir string `yaml:"remote_upload_dir"`
+	// RemoteScript is the remote script run after the upload. The uploaded
+	// artifact path is passed as its argument.
+	RemoteScript string `yaml:"remote_script"`
+	// Target is the GOOS/GOARCH built and uploaded. It defaults to linux/amd64.
+	Target *Target `yaml:"target"`
+}
+
 // Config is a parsed weld.yml.
 type Config struct {
 	// Version is the schema version. It is currently always 1.
-	Version int         `yaml:"version"`
-	Build   BuildConfig `yaml:"build"`
-	Dev     DevConfig   `yaml:"dev"`
-	Seed    SeedConfig  `yaml:"seed"`
+	Version int          `yaml:"version"`
+	Build   BuildConfig  `yaml:"build"`
+	Dev     DevConfig    `yaml:"dev"`
+	Seed    SeedConfig   `yaml:"seed"`
+	Deploy  DeployConfig `yaml:"deploy"`
 }
 
 // Load reads weld.yml from dir and returns ErrNotFound when it is absent.
@@ -261,6 +276,35 @@ func (c *Config) SeedTag() string {
 	return "seed"
 }
 
+// EffectiveDeploy returns the deploy settings with the target defaulted to
+// linux/amd64, the server platform `weld deploy` assumes when weld.yml does not
+// name one. The receiver may be nil.
+func (c *Config) EffectiveDeploy() DeployConfig {
+	cfg := DeployConfig{Target: &Target{OS: "linux", Arch: "amd64"}}
+	if c == nil {
+		return cfg
+	}
+	cfg = c.Deploy
+	if cfg.Target == nil {
+		cfg.Target = &Target{OS: "linux", Arch: "amd64"}
+	}
+	return cfg
+}
+
+// Validate reports the first missing required deploy setting.
+func (c DeployConfig) Validate() error {
+	if strings.TrimSpace(c.Host) == "" {
+		return errors.New("weld.yml: deploy.host is required")
+	}
+	if strings.TrimSpace(c.RemoteUploadDir) == "" {
+		return errors.New("weld.yml: deploy.remote_upload_dir is required")
+	}
+	if strings.TrimSpace(c.RemoteScript) == "" {
+		return errors.New("weld.yml: deploy.remote_script is required")
+	}
+	return nil
+}
+
 // expandVars resolves ${VAR} placeholders in s. Built-in variables take
 // precedence over environment variables, so a build never depends on a
 // same-named variable a user happened to export.
@@ -373,5 +417,17 @@ seed:
   # carries neither the seed data nor any faker a seeder imports. Run them with
   # ` + "`weld seed`" + ` or ` + "`make seed`" + `.
   tag: seed
+
+deploy:
+  # ssh destination, usually a Host alias from ~/.ssh/config.
+  host: prod-app
+  # Remote directory the built artifact is uploaded to.
+  remote_upload_dir: /srv/app
+  # Remote script run after the upload; the uploaded artifact path is passed
+  # as its argument. ` + "`weld deploy`" + ` builds the linux target, scp's the
+  # binary and runs this script over ssh.
+  remote_script: /srv/app/deploy.sh
+  # GOOS/GOARCH built and uploaded (default: linux/amd64).
+  # target: { os: linux, arch: arm64 }
 `
 }

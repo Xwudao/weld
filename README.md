@@ -5,8 +5,9 @@ capabilities to the *same* project over time — `weld add web` modifies your
 existing project to gain a web frontend instead of generating a second
 template. It also drives the assembled project: `weld dev` runs the backend and
 frontend together, `weld build` builds the frontend and cross-compiles the
-binary, and `weld seed` runs the project's database seeders — all configured by
-the optional, user-owned `weld.yml`.
+binary, `weld seed` runs the project's database seeders, and `weld deploy`
+uploads the built binary to the configured host and runs its remote script —
+all configured by the optional, user-owned `weld.yml`.
 
 Install the latest patch release with Go 1.23 or newer (the tool itself builds on Go
 1.23; a generated project that adds a capability installs Loom and raises its
@@ -27,6 +28,7 @@ weld config example    # print the optional, user-owned weld.yml starter
 weld dev               # backend + pnpm frontend dev servers, side by side
 weld build             # builds the frontend and cross-compiles the binary
 weld seed              # runs the database seeders (seed build tag)
+weld deploy            # builds the linux binary, uploads it and runs the remote script
 make build             # the Makefile stays as the no-weld fallback
 make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
 ```
@@ -51,6 +53,7 @@ weld gen [enum|loom] [--dir dir] [--dry-run]
 weld dev [--dir dir]
 weld build [--dir dir]
 weld seed [name] [--tag tag] [--dir dir]
+weld deploy [--no-build] [--artifact file] [--dir dir]
 weld config example
 weld config init [--force]
 weld list [--dir dir]
@@ -79,14 +82,26 @@ target does the same. The tag defaults to `seed` and can be overridden with
 `weld.yml`'s `seed.tag` or `weld seed --tag`. It requires the `seed`
 capability.
 
+`weld deploy` uploads the built binary and runs the remote deploy script over
+ssh, driven by `weld.yml`'s `deploy` section (`host`, `remote_upload_dir`,
+`remote_script`, optional `target`). It builds the deploy target first
+(`deploy.target`, default `linux/amd64`) and uploads that one artifact, so a
+deploy never cross-compiles the unrelated `build.targets` entries; `--no-build`
+uploads an existing artifact instead and `--artifact file` names one
+explicitly (which also skips the build). The artifact is `scp`'d to
+`host:remote_upload_dir` and the remote script is run as `sh <remote_script>
+<uploaded-path>`, so the script decides how to swap the running service over.
+`--dry-run` prints the `scp`/`ssh` steps without building or running anything.
+
 Both commands read the optional, user-owned `weld.yml` (print a commented
 starter with `weld config example`, or write one into a project that has none
 with `weld config init`, which keeps an existing file unless `--force` is
 given). `weld.yml` is deliberately **not** the
 machine-owned `weld.json` manifest: `weld` never rewrites it and `weld add`
-never touches it, so your hand-edited build, dev and seed settings survive every
-later capability. Every setting is optional and defaults from the installed
-capabilities and the host platform.
+never touches it, so your hand-edited build, dev, seed and deploy settings
+survive every later capability. Every setting is optional and defaults from the
+installed capabilities and the host platform (the deploy target defaults to
+`linux/amd64`).
 
 Capabilities:
 
