@@ -1,8 +1,8 @@
 {
   "name": "events",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "kind": "add",
-  "summary": "Opt-in in-process event dispatcher: typed Publish/On keyed on the event's concrete Go type, synchronous delivery in registration order, panic isolation and joined listener errors. The stable Loom seam selects delivery with its asyncEvents switch: synchronous, or the in-process, best-effort events.Async mode behind a bounded channel with explicit backpressure (TryPublish reports a full queue) that still loses buffered events on exit. Installing it dispatches nothing until a listener is registered in internal/events/register.go.",
+  "summary": "Opt-in in-process event dispatcher: typed Publish/On keyed on the event's concrete Go type, synchronous delivery in registration order, panic isolation and joined listener errors. The stable Loom seam selects delivery with its asyncEvents switch: synchronous, or the in-process, best-effort events.Async mode behind a bounded channel with explicit backpressure (TryPublish, or events.TryPublish through the Publisher interface, reports a full queue) that still loses buffered events on exit. Installing it dispatches nothing until a listener is registered in internal/events/register.go.",
   "requires": ["loom"],
   "files": [
     { "path": "internal/events/dispatcher.go", "source": "files/dispatcher.go.tmpl" },

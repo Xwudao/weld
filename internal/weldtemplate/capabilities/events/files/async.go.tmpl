@@ -291,6 +291,35 @@ func (a *Async) Stats() Stats {
 	}
 }
 
+// tryPublisher is implemented by the publishers that can drop an event instead
+// of waiting for room. Today only *Async does.
+type tryPublisher interface {
+	TryPublish(event any) error
+}
+
+// TryPublish hands event to p without waiting for room when p is asynchronous,
+// and falls back to synchronous delivery otherwise.
+//
+// An *Async returns ErrQueueFull when its bounded queue is full, so the caller
+// can shed or retry, and ErrStopped after Stop. The synchronous *Dispatcher has
+// no queue to fill, so it delivers through Publish and returns the listeners'
+// joined error; ctx is used only on that path, because an async listener runs
+// under the worker's base context, not the publish context. A nil publisher or a
+// nil event is a no-op.
+//
+// It is a helper rather than a method on Publisher because only the asynchronous
+// publisher can honor the promise: a method on the interface would have to
+// pretend on the synchronous one. It is the TryPublish counterpart of StatsOf.
+func TryPublish(ctx context.Context, p Publisher, event any) error {
+	if p == nil || event == nil {
+		return nil
+	}
+	if async, ok := p.(tryPublisher); ok {
+		return async.TryPublish(event)
+	}
+	return p.Publish(ctx, event)
+}
+
 // StatsOf returns the queue statistics behind p when p is an *Async, and false
 // for any other Publisher (the synchronous Dispatcher, a Recorder, or nil). It
 // lets a caller that depends only on the Publisher interface reach Stats

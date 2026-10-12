@@ -62,7 +62,10 @@ isolation and error logging are unchanged.
 - **`Publish` blocks and applies backpressure.** It returns once the event is
   buffered, or when the caller's context ends. When the buffer is full it waits,
   which slows the caller instead of growing memory; `TryPublish` never waits and
-  returns `events.ErrQueueFull` so the caller can shed the event.
+  returns `events.ErrQueueFull` so the caller can shed the event. A caller that
+  depends only on `events.Publisher` reaches that path with
+  `events.TryPublish(ctx, publisher, event)`, and a `Recorder` or the
+  synchronous `*Dispatcher` falls back to `Publish`.
 - **Delivery is best effort and in-process.** The queue is a channel, not a
   broker: a process that exits or crashes drops whatever it has not delivered,
   and `events.ErrStopped` reports a publish after `Stop`. There is no retry and
@@ -73,8 +76,9 @@ isolation and error logging are unchanged.
   `ctx.Err()`.
 - **Listeners run with the worker's context, not the request's.** A request
   context is cancelled when the response is written, so reusing it would fail
-  every listener. A listener that publishes should use `TryPublish`, because a
-  worker that blocks on a full queue waits for itself.
+  every listener. A listener that publishes should use `TryPublish` (through the
+  method or `events.TryPublish`), because a worker that blocks on a full queue
+  waits for itself.
 - **One worker by default.** `events.WithWorkers(n)` raises throughput for
   I/O-bound listeners but drops the one-event-at-a-time guarantee: events may be
   handled out of order and a listener must be safe to run concurrently with
@@ -85,7 +89,8 @@ isolation and error logging are unchanged.
   builds the `*events.Async` and registers the Loom lifecycle hook that starts
   and drains the workers, so the switch alone is the opt-in. A component that
   depends only on `events.Publisher` can call `events.StatsOf(publisher)` to read
-  the queue statistics.
+  the queue statistics, and `events.TryPublish(ctx, publisher, event)` to publish
+  without waiting, so the mode stays invisible to the caller.
 
 ## What it is not
 

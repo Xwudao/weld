@@ -598,8 +598,10 @@ What lands in the project:
   events onto a bounded in-process channel and delivers them through the same
   dispatcher from worker goroutines. `Publish` blocks and applies backpressure;
   `TryPublish` returns `events.ErrQueueFull`; `Stop(ctx)` drains within a
-  deadline; `Stats()` reports occupancy and counters. It is **best effort**: a
-  process that exits drops whatever it has not delivered.
+  deadline; `Stats()` reports occupancy and counters. A caller that depends only
+  on `events.Publisher` reaches those with `events.TryPublish(ctx, publisher,
+  event)` and `events.StatsOf(publisher)`, so the mode stays invisible. It is
+  **best effort**: a process that exits drops whatever it has not delivered.
 - `internal/events/recorder.go` — `Recorder`, a `Publisher` that records instead
   of delivering, so a test asserts what a handler published with no listener and
   no graph.

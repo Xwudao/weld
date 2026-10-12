@@ -386,3 +386,59 @@ func TestStatsOfReportsOnlyAsync(t *testing.T) {
 		t.Fatal("StatsOf reported a nil publisher as async")
 	}
 }
+
+// TestTryPublishHelperShedsOnAsyncAndFallsBackToSync proves the package helper
+// reaches Async's non-blocking path through the Publisher interface and falls
+// back to synchronous delivery for the Dispatcher, so a caller that depends only
+// on the interface can choose without a concrete binding.
+func TestTryPublishHelperShedsOnAsyncAndFallsBackToSync(t *testing.T) {
+	t.Parallel()
+
+	// Async: a full queue is reported, never waited on.
+	inner := New(nil)
+	blocked := make(chan struct{})
+	entered := make(chan struct{})
+	On(inner, func(context.Context, orderPaid) error {
+		close(entered)
+		<-blocked
+		return nil
+	})
+	async := NewAsync(inner, nil, WithCapacity(1))
+	async.Start(context.Background())
+	defer func() {
+		close(blocked)
+		async.Stop(context.Background())
+	}()
+	if err := TryPublish(context.Background(), async, orderPaid{ID: "1"}); err != nil {
+		t.Fatalf("TryPublish into an empty queue: %v", err)
+	}
+	<-entered
+	if err := TryPublish(context.Background(), async, orderPaid{ID: "2"}); err != nil {
+		t.Fatalf("TryPublish into the last free slot: %v", err)
+	}
+	if err := TryPublish(context.Background(), async, orderPaid{ID: "3"}); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("TryPublish on a full queue = %v, want ErrQueueFull", err)
+	}
+
+	// Synchronous: no queue, so the helper delivers inline.
+	var delivered atomic.Int64
+	sync := New(nil)
+	On(sync, func(context.Context, orderPaid) error {
+		delivered.Add(1)
+		return nil
+	})
+	if err := TryPublish(context.Background(), sync, orderPaid{ID: "4"}); err != nil {
+		t.Fatalf("TryPublish on the synchronous dispatcher: %v", err)
+	}
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("the synchronous fallback delivered %d events, want 1", got)
+	}
+
+	// A nil publisher and a nil event are no-ops, matching the other helpers.
+	if err := TryPublish(context.Background(), nil, orderPaid{ID: "5"}); err != nil {
+		t.Fatalf("TryPublish(nil publisher): %v", err)
+	}
+	if err := TryPublish(context.Background(), sync, nil); err != nil {
+		t.Fatalf("TryPublish(nil event): %v", err)
+	}
+}
