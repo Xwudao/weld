@@ -9,8 +9,13 @@
 // The scheduler wraps github.com/robfig/cron/v3 and fixes the policy this
 // project wants:
 //
-//   - five-field cron expressions ("minute hour day-of-month month day-of-week"),
-//     interpreted in one timezone (UTC unless WithLocation says otherwise);
+//   - two schedule forms, chosen at registration: a five-field cron expression
+//     ("minute hour day-of-month month day-of-week"), interpreted in one
+//     timezone (UTC unless WithLocation says otherwise), or a fixed interval
+//     (Every) for the sub-minute and non-divisible cases a five-field
+//     expression cannot say;
+//   - readable schedule helpers (Cron, Every, DailyAt, WeeklyOn, MonthlyOn), so
+//     the common cases read as intent rather than as cron syntax;
 //   - unique, human-readable job names, so a job can be removed or rescheduled
 //     at run time;
 //   - an execution that is still running when the next tick arrives is skipped,
@@ -50,6 +55,66 @@ import (
 // can ignore it. A Job is an ordinary function, so a test invokes it directly
 // without a scheduler or a wall clock.
 type Job func(ctx context.Context, deps *Deps)
+
+// Schedule says when a job runs.
+//
+// Build one with Cron for a five-field expression or with the helpers: Every
+// for a fixed interval, DailyAt, WeeklyOn and MonthlyOn for a calendar time. A
+// Schedule is a string, so a bare five-field literal keeps working —
+// s.Register("nightly", "0 3 * * *", job) — while the helpers read as intent.
+type Schedule string
+
+// everyPrefix marks the interval form. Every writes it and add reads it, so the
+// only @descriptor the scheduler accepts is the one it wrote itself.
+const everyPrefix = "@every "
+
+// Cron builds a Schedule from a five-field expression, "minute hour day-of-month
+// month day-of-week", interpreted in the scheduler's location. It exists for
+// symmetry with the helpers; a string literal works just as well.
+func Cron(expr string) Schedule {
+	return Schedule(strings.TrimSpace(expr))
+}
+
+// Every builds a Schedule that runs once per interval, measured from the
+// previous run (the first, from Start) rather than aligned to a wall-clock
+// boundary. It is the form for intervals a five-field expression cannot say:
+// every 30 seconds, every 90 minutes, every 36 hours. The interval is truncated
+// to whole seconds and must be at least one second; anything smaller fails at
+// registration instead of busy-looping.
+//
+// Every(24*time.Hour) is a rolling day. For midnight, use DailyAt; for the
+// first of a month, MonthlyOn.
+func Every(interval time.Duration) Schedule {
+	return Schedule(everyPrefix + interval.String())
+}
+
+// Day is 24 hours, so an interval reads as its purpose: Every(3*Day). It is a
+// duration, not a calendar day; DailyAt is the wall-clock form.
+const Day time.Duration = 24 * time.Hour
+
+// DailyAt runs every day at hour:minute in the scheduler's location.
+func DailyAt(hour, minute int) Schedule {
+	return Schedule(fmt.Sprintf("%d %d * * *", minute, hour))
+}
+
+// WeeklyOn runs every week on weekday at hour:minute in the scheduler's
+// location.
+func WeeklyOn(weekday time.Weekday, hour, minute int) Schedule {
+	return Schedule(fmt.Sprintf("%d %d * * %d", minute, hour, int(weekday)))
+}
+
+// MonthlyOn runs every month on day-of-month at hour:minute in the scheduler's
+// location. A day past the end of a short month does not fire that month.
+func MonthlyOn(day, hour, minute int) Schedule {
+	return Schedule(fmt.Sprintf("%d %d %d * *", minute, hour, day))
+}
+
+// Hourly, Daily, Weekly and Monthly are the calendar defaults, at the top of the
+// hour, midnight, Sunday midnight and the first of the month.
+func Hourly() Schedule  { return Cron("0 * * * *") }
+func Daily() Schedule   { return Cron("0 0 * * *") }
+func Weekly() Schedule  { return Cron("0 0 * * 0") }
+func Monthly() Schedule { return Cron("0 0 1 * *") }
 
 // Errors returned by the job registry. Test them with errors.Is.
 var (
@@ -113,9 +178,10 @@ func WithDeps(deps *Deps) Option {
 // rather than reaching for a process-global one. No job runs until Start is
 // called, and a scheduler with no registered jobs runs nothing at all.
 //
-// The spec parser accepts exactly the five standard fields: the six-field
-// seconds form and the @descriptor shortcuts are rejected, so a malformed
-// schedule fails at registration rather than silently never firing.
+// The string parser accepts exactly the five standard fields: the six-field
+// seconds form and every @descriptor other than the @every form Every produces
+// are rejected, so a malformed schedule fails at registration rather than
+// silently never firing.
 func New(logger *slog.Logger, options ...Option) *Scheduler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -202,13 +268,15 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	}
 }
 
-// Register adds job under name with the given cron spec. Names are unique: a
-// duplicate is ErrJobExists, so use Reschedule to change an existing job. A
-// blank name, a nil job or an invalid spec is an error and registers nothing.
+// Register adds job under name on schedule. Names are unique: a duplicate is
+// ErrJobExists, so use Reschedule to change an existing job. A blank name, a
+// nil job or an unparseable schedule is an error and registers nothing.
 //
-// Register works before or after Start: a job added to a running scheduler
-// begins on its next matching time, never retroactively.
-func (s *Scheduler) Register(name, spec string, job Job) error {
+// A Schedule is a string, so a five-field literal works directly; the helpers
+// (Every, DailyAt, WeeklyOn, MonthlyOn) name the common cases. Register works
+// before or after Start: a job added to a running scheduler begins on its next
+// matching time, never retroactively.
+func (s *Scheduler) Register(name string, schedule Schedule, job Job) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("cron: job name must not be blank")
@@ -222,7 +290,7 @@ func (s *Scheduler) Register(name, spec string, job Job) error {
 		return fmt.Errorf("%w: %q", ErrJobExists, name)
 	}
 	run := s.wrap(job)
-	id, err := s.runner.AddFunc(spec, run)
+	id, err := s.add(schedule, run)
 	if err != nil {
 		return fmt.Errorf("cron: register %q: %w", name, err)
 	}
@@ -246,11 +314,12 @@ func (s *Scheduler) Remove(name string) error {
 	return nil
 }
 
-// Reschedule replaces the spec of an existing job. The job function and its
-// overlap guard are preserved, so a running execution is not disturbed and is
-// not doubled by the new schedule. An invalid spec leaves the current schedule
-// untouched; an unknown name is ErrJobNotFound.
-func (s *Scheduler) Reschedule(name, spec string) error {
+// Reschedule replaces the schedule of an existing job, and may switch it between
+// a cron expression and an interval. The job function and its overlap guard are
+// preserved, so a running execution is not disturbed and is not doubled by the
+// new schedule. An invalid schedule leaves the current one untouched; an unknown
+// name is ErrJobNotFound.
+func (s *Scheduler) Reschedule(name string, schedule Schedule) error {
 	name = strings.TrimSpace(name)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -258,13 +327,38 @@ func (s *Scheduler) Reschedule(name, spec string) error {
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrJobNotFound, name)
 	}
-	id, err := s.runner.AddFunc(spec, record.run)
+	id, err := s.add(schedule, record.run)
 	if err != nil {
 		return fmt.Errorf("cron: reschedule %q: %w", name, err)
 	}
 	s.runner.Remove(record.id)
 	s.entries[name] = entry{id: id, run: record.run}
 	return nil
+}
+
+// add turns a Schedule into a runner entry, so Register and Reschedule share
+// one parser. The interval form produced by Every is handed to robfig's Every;
+// everything else is a five-field expression. A blank schedule, an unsupported
+// @descriptor or an interval below a second is an error.
+func (s *Scheduler) add(schedule Schedule, run func()) (robfigcron.EntryID, error) {
+	expr := strings.TrimSpace(string(schedule))
+	if expr == "" {
+		return 0, errors.New("cron: schedule must not be blank")
+	}
+	if interval, ok := strings.CutPrefix(expr, everyPrefix); ok {
+		parsed, err := time.ParseDuration(strings.TrimSpace(interval))
+		if err != nil {
+			return 0, fmt.Errorf("cron: interval %q: %w", interval, err)
+		}
+		if parsed < time.Second {
+			return 0, fmt.Errorf("cron: interval %s is below one second", parsed)
+		}
+		return s.runner.Schedule(robfigcron.Every(parsed), robfigcron.FuncJob(run)), nil
+	}
+	if strings.HasPrefix(expr, "@") {
+		return 0, fmt.Errorf("cron: descriptor %q is not supported; use a five-field spec or Every", expr)
+	}
+	return s.runner.AddFunc(expr, run)
 }
 
 // wrap adapts a Job to robfig's func(), supplying the scheduler's current base

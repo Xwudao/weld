@@ -6,11 +6,14 @@ package cron
 // `weld add`.
 //
 // The default implementation registers no jobs, which is why installing the cron
-// capability schedules nothing by itself. Add a job with Scheduler.Register: the
-// five-field spec is "minute hour day-of-month month day-of-week", interpreted
-// in the configured cron.timezone (UTC by default). A job runs only while a
-// long-running serve process has started the scheduler, and its context is
-// canceled when the process stops.
+// capability schedules nothing by itself. Add a job with Scheduler.Register,
+// which takes a Schedule: either a five-field cron expression, "minute hour
+// day-of-month month day-of-week", interpreted in the configured cron.timezone
+// (UTC by default), or an interval built with Every. The helpers name the common
+// cases — Every(30*time.Second), DailyAt(3, 0), WeeklyOn(time.Monday, 9, 30),
+// MonthlyOn(1, 0, 0) — so a job reads as its intent instead of as cron syntax. A
+// job runs only while a long-running serve process has started the scheduler,
+// and its context is canceled when the process stops.
 //
 // A job receives a *Deps bundle as its second parameter, so it works with the
 // application's dependencies instead of a global. The bundle is defined in
@@ -18,9 +21,15 @@ package cron
 // to Deps and consume it there when a job needs another dependency:
 //
 //	func Register(s *Scheduler) error {
-//		return s.Register("nightly-report", "0 3 * * *", func(ctx context.Context, deps *Deps) {
+//		if err := s.Register("nightly-report", "0 3 * * *", func(ctx context.Context, deps *Deps) {
 //			deps.Logger.Info("nightly report started")
 //			// do the work; return promptly when ctx is canceled
+//		}); err != nil {
+//			return err
+//		}
+//		// Every is the form for intervals cron syntax cannot say.
+//		return s.Register("poll", Every(30*time.Second), func(ctx context.Context, deps *Deps) {
+//			// ...
 //		})
 //	}
 //

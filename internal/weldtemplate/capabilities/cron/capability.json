@@ -1,8 +1,8 @@
 {
   "name": "cron",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "kind": "add",
-  "summary": "Opt-in in-process scheduler: a named job registry with explicit Start/Stop, five-field cron specs, overlap skipping, panic recovery and a UTC-default timezone. Jobs receive a Deps bundle, the seam for injecting application dependencies. Installing it schedules nothing on its own; the scheduler starts and stops with the serve command through the Loom graph and jobs are declared in a stable registration file.",
+  "summary": "Opt-in in-process scheduler: a named job registry with explicit Start/Stop, five-field cron specs or fixed intervals (Every, DailyAt, WeeklyOn, MonthlyOn), overlap skipping, panic recovery and a UTC-default timezone. Jobs receive a Deps bundle, the seam for injecting application dependencies. Installing it schedules nothing on its own; the scheduler starts and stops with the serve command through the Loom graph and jobs are declared in a stable registration file.",
   "requires": ["http"],
   "files": [
     { "path": "internal/cron/cron.go", "source": "files/cron.go.tmpl" },

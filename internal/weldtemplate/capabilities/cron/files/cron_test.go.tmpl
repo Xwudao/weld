@@ -80,6 +80,82 @@ func TestWithLocationIsHonored(t *testing.T) {
 	}
 }
 
+// TestScheduleHelpersRenderSpecs pins the strings the helpers build, so changing
+// one is a deliberate edit rather than a silent reschedule.
+func TestScheduleHelpersRenderSpecs(t *testing.T) {
+	cases := []struct {
+		schedule Schedule
+		want     string
+	}{
+		{Cron(" 0 3 * * * "), "0 3 * * *"},
+		{DailyAt(3, 5), "5 3 * * *"},
+		{WeeklyOn(time.Monday, 1, 2), "2 1 * * 1"},
+		{MonthlyOn(15, 4, 30), "30 4 15 * *"},
+		{Hourly(), "0 * * * *"},
+		{Daily(), "0 0 * * *"},
+		{Weekly(), "0 0 * * 0"},
+		{Monthly(), "0 0 1 * *"},
+		{Every(90 * time.Second), "@every 1m30s"},
+		{Every(3 * Day), "@every 72h0m0s"},
+	}
+	for _, tc := range cases {
+		if got := string(tc.schedule); got != tc.want {
+			t.Errorf("schedule = %q, want %q", got, tc.want)
+		}
+	}
+}
+
+// TestEveryRegistersAnInterval proves the interval form reaches robfig as a
+// fixed delay rather than being parsed as a five-field expression.
+func TestEveryRegistersAnInterval(t *testing.T) {
+	s := New(testLogger())
+	if err := s.Register("poll", Every(90*time.Second), func(context.Context, *Deps) {}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	entry := s.runner.Entry(s.entries["poll"].id)
+	if !entry.Valid() {
+		t.Fatal("the interval job is not scheduled")
+	}
+	delay, ok := entry.Schedule.(robfigcron.ConstantDelaySchedule)
+	if !ok {
+		t.Fatalf("schedule type = %T, want robfigcron.ConstantDelaySchedule", entry.Schedule)
+	}
+	if delay.Delay != 90*time.Second {
+		t.Fatalf("delay = %s, want 1m30s", delay.Delay)
+	}
+}
+
+// TestEveryRejectsSubSecondInterval proves an interval shorter than a second is
+// refused at registration instead of being rounded up to a busy loop.
+func TestEveryRejectsSubSecondInterval(t *testing.T) {
+	s := New(testLogger())
+	if err := s.Register("fast", Every(500*time.Millisecond), func(context.Context, *Deps) {}); err == nil {
+		t.Fatal("Register with a sub-second interval succeeded, want an error")
+	}
+	if len(s.entries) != 0 {
+		t.Fatalf("entries = %d, want none registered", len(s.entries))
+	}
+}
+
+// TestRescheduleSwitchesScheduleForm proves a job can move between a cron
+// expression and an interval without losing its function.
+func TestRescheduleSwitchesScheduleForm(t *testing.T) {
+	s := New(testLogger())
+	if err := s.Register("nightly", "0 3 * * *", func(context.Context, *Deps) {}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := s.Reschedule("nightly", Every(time.Minute)); err != nil {
+		t.Fatalf("Reschedule: %v", err)
+	}
+	entry := s.runner.Entry(s.entries["nightly"].id)
+	if _, ok := entry.Schedule.(robfigcron.ConstantDelaySchedule); !ok {
+		t.Fatalf("schedule type = %T, want robfigcron.ConstantDelaySchedule", entry.Schedule)
+	}
+	if entry.WrappedJob == nil {
+		t.Fatal("Reschedule dropped the job function")
+	}
+}
+
 // TestRegisterRejectsInvalidInput proves invalid names, jobs and specs fail
 // loudly and register nothing. The spec checks pin the five-field parser: the
 // six-field seconds form and the @descriptor shortcuts are rejected.
@@ -89,7 +165,7 @@ func TestRegisterRejectsInvalidInput(t *testing.T) {
 	cases := []struct {
 		name string
 		job  Job
-		spec string
+		spec Schedule
 	}{
 		{name: "", job: job, spec: "* * * * *"},
 		{name: "   ", job: job, spec: "* * * * *"},
@@ -98,6 +174,8 @@ func TestRegisterRejectsInvalidInput(t *testing.T) {
 		{name: "garbage", job: job, spec: "not a spec"},
 		{name: "six-field", job: job, spec: "0 0 0 * * *"},
 		{name: "descriptor", job: job, spec: "@daily"},
+		{name: "bad-interval", job: job, spec: Schedule("@every nope")},
+		{name: "short-interval", job: job, spec: Every(500 * time.Millisecond)},
 	}
 	for _, tc := range cases {
 		if err := s.Register(tc.name, tc.spec, tc.job); err == nil {

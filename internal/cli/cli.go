@@ -764,8 +764,9 @@ Capabilities:
                     creates no bucket and uploads nothing
   cron   (add)      Opt-in in-process scheduler that starts and stops with
                     serve; installing it schedules nothing until you register
-                    jobs in internal/cron/register.go. Jobs receive a cron.Deps
-                    bundle you extend in internal/cron/deps.go
+                    jobs in internal/cron/register.go. Jobs take a five-field
+                    spec or Every/DailyAt/WeeklyOn/MonthlyOn and receive a
+                    cron.Deps bundle you extend in internal/cron/deps.go
   loom   (add)      Loom dependency-injection graph wiring the HTTP server, the
                     database, Redis, mail, storage and event bindings and the
                     cron scheduler (requires config; opt-in, never installed by

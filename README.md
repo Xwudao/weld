@@ -170,9 +170,11 @@ Capabilities:
 - `cron` (add) — an opt-in in-process scheduler that starts and stops with the
   `serve` command and never with a short command. Requires `http` (and therefore
   `loom`); installing it schedules nothing until you register jobs in
-  `internal/cron/register.go`. Each job receives a `cron.Deps` bundle you extend
-  in `internal/cron/deps.go` and wire in `internal/di/cron_provider.go`, so a job
-  gets the application's dependencies without a service locator.
+  `internal/cron/register.go`. Jobs take a five-field cron spec or a readable
+  interval (`cron.Every`, `cron.DailyAt`, `cron.WeeklyOn`, `cron.MonthlyOn`) and
+  each receives a `cron.Deps` bundle you extend in `internal/cron/deps.go` and
+  wire in `internal/di/cron_provider.go`, so a job gets the application's
+  dependencies without a service locator.
 - `loom` (add) — the compile-time [Loom](https://github.com/Xwudao/loom)
   dependency-injection foundation. Its `commonModule` always wires the
   configuration, the logger and the installed `db`/`redis`/`mail`/`storage`/`events`

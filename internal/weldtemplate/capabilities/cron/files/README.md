@@ -12,15 +12,40 @@ and never regenerates, so the jobs you add there survive every later
 
 ```go
 func Register(s *cron.Scheduler) error {
-	return s.Register("nightly-report", "0 3 * * *", func(ctx context.Context, deps *cron.Deps) {
+	if err := s.Register("nightly-report", cron.DailyAt(3, 0), func(ctx context.Context, deps *cron.Deps) {
 		deps.Logger.Info("nightly report started")
 		report(ctx) // ctx is canceled when the process stops
+	}); err != nil {
+		return err
+	}
+	// Every is the form for intervals cron syntax cannot say.
+	return s.Register("poll", cron.Every(30*time.Second), func(ctx context.Context, deps *cron.Deps) {
+		poll(ctx)
 	})
 }
 ```
 
 The default implementation registers nothing, which is why installing the
 capability schedules nothing by itself.
+
+## Schedules
+
+`Register` takes a `Schedule`. A five-field cron literal works directly
+(`"0 3 * * *"`), and the helpers name the common cases:
+
+- `DailyAt(3, 0)` — every day at 03:00
+- `WeeklyOn(time.Monday, 9, 30)` — Mondays at 09:30
+- `MonthlyOn(1, 0, 0)` — the first of the month at 00:00
+- `Hourly()`, `Daily()`, `Weekly()`, `Monthly()` — the calendar defaults
+- `Every(30*time.Second)` — a fixed interval, measured between runs
+
+The cron helpers and expressions are wall-clock times in `config.Cron`'s
+timezone; `Every` is a fixed delay measured from the previous run (the first
+from `Start`), so it drifts away from clock boundaries on purpose. Use `Every`
+for polling loops and the intervals cron cannot express — seconds, 90 minutes,
+36 hours — and the calendar helpers, or a literal, for "at 03:00". `Every` must
+be at least one second; anything smaller fails at `Register` rather than
+busy-looping.
 
 ## Where dependencies come from
 
@@ -64,9 +89,10 @@ one scheduler and it runs only while `serve` runs.
 
 ## What the scheduler guarantees
 
-- **Five-field specs.** `minute hour day-of-month month day-of-week`. The
-  six-field seconds form and the `@descriptor` shortcuts are rejected, so a typo
-  fails at `Register`, not silently at 3am.
+- **Two schedule forms.** A five-field cron expression (`minute hour day-of-month
+  month day-of-week`) or a fixed interval (`Every`). The six-field seconds form
+  and every `@descriptor` except the `@every` form `Every` produces are rejected,
+  so a typo fails at `Register`, not silently at 3am.
 - **One timezone.** Schedules are interpreted in the timezone given to
   `WithLocation`; the default is UTC, so a schedule means the same thing on every
   host. The value comes from `config.Cron` (`cron.timezone`, env
