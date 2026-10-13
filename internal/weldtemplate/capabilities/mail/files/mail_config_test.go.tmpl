@@ -3,11 +3,12 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"__module__/internal/logging"
 )
 
 // TestLoadReadsMailFromFile proves the mail section, including the username and
@@ -128,7 +129,7 @@ func TestMailSettingsAccessor(t *testing.T) {
 }
 
 // TestMailSecretsRedactEverywhere is the credential-safety sentinel for the mail
-// section: the username and password must not survive fmt, log/slog, JSON or
+// section: the username and password must not survive fmt, logging, JSON or
 // YAML.
 func TestMailSecretsRedactEverywhere(t *testing.T) {
 	const sentinel = "sentinel-do-not-log"
@@ -139,9 +140,9 @@ func TestMailSecretsRedactEverywhere(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	slog.New(slog.NewTextHandler(&buf, nil)).Info("mail", "username", cfg.Mail.Username, "password", cfg.Mail.Password)
+	logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true}).Info("mail", "username", cfg.Mail.Username, "password", cfg.Mail.Password)
 	if strings.Contains(buf.String(), sentinel) {
-		t.Fatalf("log/slog leaked the mail secret:\n%s", buf.String())
+		t.Fatalf("logging leaked the mail secret:\n%s", buf.String())
 	}
 
 	encoded, err := json.Marshal(cfg)

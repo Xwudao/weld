@@ -3,20 +3,21 @@ package httpx
 import (
 	"bufio"
 	"bytes"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"__module__/internal/logging"
 )
 
 // This file covers the composable middleware: the outer-to-inner Chain order,
 // the request-id, access-log and recovery middlewares, and the optional
 // ResponseWriter interfaces a streaming response depends on.
 
-func testLogger(sink *bytes.Buffer) *slog.Logger {
-	return slog.New(slog.NewTextHandler(sink, nil))
+func testLogger(sink *bytes.Buffer) logging.Logger {
+	return logging.New(sink, logging.TextFormat, &logging.Options{NoColor: true})
 }
 
 func TestChainAppliesMiddlewaresOutermostFirst(t *testing.T) {

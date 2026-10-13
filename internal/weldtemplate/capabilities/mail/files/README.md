@@ -63,7 +63,7 @@ The configuration lives in `internal/config` (`config.Mail`) and is read from
 `config.yml` (`mail:` section) and overridden by the environment (`MAIL_HOST`,
 `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`, `MAIL_TLS`,
 `MAIL_TIMEOUT_SECONDS`). The username and password are `config.Secret`, which
-redacts itself in `fmt`, `log/slog`, JSON and YAML, so a credential cannot reach
+redacts itself in `fmt`, `logging`, JSON and YAML, so a credential cannot reach
 a log record by accident. The port defaults to `587` and the timeout to `10`
 seconds; the credentials never have a default. The `mail` section is validated
 only when `New` builds a sender, so a project that installs mail but never sends

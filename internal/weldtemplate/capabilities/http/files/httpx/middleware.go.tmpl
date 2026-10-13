@@ -7,11 +7,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"runtime/debug"
 	"time"
+
+	"__module__/internal/logging"
 )
 
 // Middleware is one net/http middleware: a function that wraps a handler. The
@@ -73,7 +74,7 @@ func RequestIDFrom(ctx context.Context) string {
 // request id. It never logs a request or response body, and it logs the path
 // without its query string so a credential in a query parameter cannot reach
 // the log. A nil logger makes it a pass-through.
-func AccessLog(logger *slog.Logger) Middleware {
+func AccessLog(logger logging.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if logger == nil {
@@ -102,7 +103,7 @@ func AccessLog(logger *slog.Logger) Middleware {
 // and are never sent to the client, whose response is the fixed internal-error
 // envelope. http.ErrAbortHandler is re-panicked so net/http's own abort path is
 // preserved.
-func Recover(logger *slog.Logger) Middleware {
+func Recover(logger logging.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {

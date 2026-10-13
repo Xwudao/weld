@@ -14,10 +14,11 @@ package events
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+
+	"__module__/internal/logging"
 )
 
 // Errors Async reports. Test them with errors.Is.
@@ -97,7 +98,7 @@ func WithWorkers(workers int) AsyncOption {
 // when Stop's deadline expires is dropped.
 type Async struct {
 	inner  *Dispatcher
-	logger *slog.Logger
+	logger logging.Logger
 
 	capacity int
 	workers  int
@@ -124,7 +125,7 @@ type Async struct {
 // logs listener failures through the logger it was built with. A non-positive
 // capacity or worker count panics, because both are programming errors rather
 // than runtime conditions.
-func NewAsync(inner *Dispatcher, logger *slog.Logger, options ...AsyncOption) *Async {
+func NewAsync(inner *Dispatcher, logger logging.Logger, options ...AsyncOption) *Async {
 	settings := asyncSettings{capacity: defaultAsyncCapacity, workers: 1}
 	for _, option := range options {
 		option(&settings)

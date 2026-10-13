@@ -740,7 +740,7 @@ the built binary to the configured host and runs its remote script.
 
 Capabilities:
   base   (scaffold) minimal Go CLI on a Cobra command tree with a tint-backed
-                    log/slog factory
+                    logging.Logger contract (default slog)
   config (add)      typed YAML configuration (config.yml + environment) with a
                     redacting Secret type; installed by http and db
   http   (add)      HTTP lifecycle, shared JSON/middleware toolkit and a serve

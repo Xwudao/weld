@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"__module__/internal/commandkit"
+
+	"__module__/internal/logging"
 )
 
 // stubLifecycle records that the resolved graph was started and stopped.
@@ -25,7 +26,7 @@ func (l *stubLifecycle) Stop(context.Context) error  { l.stopped = true; return 
 // stubBuild returns a Deps and a lifecycle without resolving any real graph. The
 // logger is discarded so the worked-example status subcommand can use it.
 func stubBuild() (*Deps, *stubLifecycle, error) {
-	return &Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, &stubLifecycle{}, nil
+	return &Deps{Logger: logging.New(io.Discard, logging.TextFormat, &logging.Options{NoColor: true})}, &stubLifecycle{}, nil
 }
 
 // TestNewCommandBuildsGroup checks the generated factory builds a real command

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,12 +13,14 @@ import (
 	"time"
 
 	robfigcron "github.com/robfig/cron/v3"
+
+	"__module__/internal/logging"
 )
 
 // testLogger builds a logger that discards output. Tests that assert on log
 // records build their own logger over a buffer.
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+func testLogger() logging.Logger {
+	return logging.New(io.Discard, logging.TextFormat, &logging.Options{NoColor: true})
 }
 
 // TestJobRunsDirectly proves a Job needs no scheduler and no wall clock: it is
@@ -315,7 +316,7 @@ func TestOverlapIsSkipped(t *testing.T) {
 // process, and does not leave the overlap guard permanently held.
 func TestPanicIsRecovered(t *testing.T) {
 	var buf bytes.Buffer
-	s := New(slog.New(slog.NewTextHandler(&buf, nil)))
+	s := New(logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true}))
 	if err := s.Register("boom", "* * * * *", func(context.Context, *Deps) { panic("kaboom") }); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -325,7 +326,7 @@ func TestPanicIsRecovered(t *testing.T) {
 	wrapped.Run()
 	wrapped.Run()
 
-	if got := strings.Count(buf.String(), "msg=panic"); got != 2 {
+	if got := strings.Count(buf.String(), "ERR panic"); got != 2 {
 		t.Fatalf("recovered panics logged = %d, want 2 (the guard must be released after a panic):\n%s", got, buf.String())
 	}
 }

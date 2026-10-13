@@ -15,13 +15,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	sqlc "__module__/internal/data/sqlc"
+
 	"__module__/internal/logging"
 )
 
@@ -67,7 +67,7 @@ type PoolOption func(*pgxpool.Config)
 // graph's logger is built at the default level. The arguments are recorded
 // verbatim, so a development pool is the only place to attach it: a production
 // statement's arguments can hold a credential.
-func WithQueryLog(logger *slog.Logger) PoolOption {
+func WithQueryLog(logger logging.Logger) PoolOption {
 	return func(config *pgxpool.Config) {
 		config.ConnConfig.Tracer = queryLogger{logger: logger}
 	}
@@ -181,7 +181,7 @@ func WithTx(ctx context.Context, pool *pgxpool.Pool, fn func(repo *PostgresRepos
 
 // queryLogger logs every statement the pool runs. It is attached only through
 // WithQueryLog, so a pool without one pays nothing for it.
-type queryLogger struct{ logger *slog.Logger }
+type queryLogger struct{ logger logging.Logger }
 
 // queryTrace is a statement in flight: TraceQueryStart records it on the context
 // that pgx hands back to TraceQueryEnd.

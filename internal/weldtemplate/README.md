@@ -82,7 +82,7 @@ capabilities/
     capability.json
     files/         main.go (builds the logger, logs a failed command),
                    internal/app (dispatch + command registry),
-                   internal/logging (log/slog factory, injectable writer),
+                   internal/logging (logging.Logger contract (default slog), injectable writer),
                    Makefile, README, .gitignore
   config/          kind: add    -> typed YAML configuration, requires base
     capability.json
@@ -172,8 +172,9 @@ commands/          per-name    -> `weld add command <name>` / `--command` payloa
 ```
 
 `base` is pure CLI: it never imports `net/http` and ships no configuration. It
-ships `internal/logging`: one `*slog.Logger`, built through an injected
-`io.Writer`, with no custom logger interface. Text records go through
+ships `internal/logging`: one `logging.Logger`, built through an injected
+`io.Writer`. All consumers depend on the backend-neutral `logging.Logger`
+interface; only its default implementation uses slog. Text records go through
 [`tint`](https://github.com/lmittmann/tint), a zero-dependency slog handler, so
 a console record is colored while the project keeps its `time.DateTime` clock
 and can paint a statement field; JSON stays slog's own handler for a log
@@ -200,7 +201,7 @@ missing or corrupt example is an actionable error rather than a silent default.
 See [Configuration](#configuration) below.
 
 `http` requires `loom` and owns the single `serve` command. Its `Serve` takes the
-injected `*slog.Logger`, and `serve` loads the listen address through the shared
+injected `logging.Logger`, and `serve` loads the listen address through the shared
 `config` loader and runs the Loom graph. `web` and each business module require
 `http` and
 register their handler on the Loom server graph, the only composition point, so
@@ -244,7 +245,7 @@ a project is always either the base CLI or a Loom project. It renders
 whatever of `http`, `db`, `seed`, `redis`, `mail`, `storage` and `cron` is
 installed. It is the only capability whose payload is capability aware; every
 other capability stays Loom-free. The
-graph also provides the `*slog.Logger` (via `NewLogger`) that the managed HTTP
+graph also provides the `logging.Logger` (via `NewLogger`) that the managed HTTP
 server uses to record startup, a serve failure and a graceful shutdown, so the
 logger is injected rather than reached for through a global. The `db`, `redis`,
 `mail` and `storage` bindings are declared but pruned until a provider depends
@@ -305,7 +306,7 @@ fallback to defaults: an absent `config.yml`, a malformed one, or an explicitly
 set-but-blank `HTTP_ADDR` fails loudly. A parse error never quotes the file
 content, so a malformed secret cannot reach a log record.
 
-`Secret` is a string that redacts itself in `fmt`, `log/slog`, JSON and YAML
+`Secret` is a string that redacts itself in `fmt`, `logging`, JSON and YAML
 output; `Value()` is the one accessor that reveals it, and `Config.DSN()` is the
 only place the database password is read. The database section is validated only
 where the database is actually used (`ValidateDatabase`), so an http-only project
@@ -587,7 +588,7 @@ plus a pinned sqlc/goose tool module, and patches the `go.mod` dependency,
 Makefile `db` and both `config` extension points. It also proves the migration
 targets are guarded (no `psql`, explicit `DATABASE_URL`, one-step confirmed
 down) and the integration test isolates itself in its own schema with no global
-`DROP TABLE`. For the logging milestone it proves `base` ships the `log/slog`
+`DROP TABLE`. For the logging milestone it proves `base` ships the `logging`
 factory and `main` logs a failed command through it (no `fmt.Fprintln`, no
 process default logger), that the `serve` command records the listening and
 shutdown lines through the injected logger while `httpserver.Serve` itself never

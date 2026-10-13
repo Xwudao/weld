@@ -5,7 +5,6 @@ import (
 	"io/fs"
 {{- if or (.Caps.Has "http") (.Caps.Has "db")}}
 	"io"
-	"log/slog"
 {{- end}}
 {{- if .Caps.Has "http"}}
 	"bytes"
@@ -213,7 +212,7 @@ func TestNewConfigRejectsBlankAddr(t *testing.T) {
 // injected logger and an empty handler, so the bind, serve-failure and
 // graceful-stop lifecycle is exercised without a database, without a global
 // logger and without any installed business module.
-func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
+func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger logging.Logger) *Server {
 	t.Helper()
 	server, err := newServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger, nethttp.NewServeMux())
 	if err != nil {
@@ -227,7 +226,7 @@ func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logg
 // the router directly, so it needs no module.
 func TestDevelopmentLogsTheComposedRoutes(t *testing.T) {
 	var buf bytes.Buffer
-	logger := logging.New(&buf, logging.TextFormat, nil)
+	logger := logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true})
 	router := httpx.NewRouter(nethttp.NewServeMux())
 	router.Get("/ping", func(nethttp.ResponseWriter, *nethttp.Request) {})
 
@@ -326,7 +325,7 @@ func TestServerStopsGracefully(t *testing.T) {
 // global logger is involved.
 func TestServerLogsLifecycle(t *testing.T) {
 	var buf bytes.Buffer
-	logger := logging.New(&buf, logging.TextFormat, nil)
+	logger := logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true})
 	lifecycle := loom.NewLifecycle()
 	server := newServerForTest(t, lifecycle, "127.0.0.1:0", logger)
 	ctx := context.Background()
@@ -356,7 +355,7 @@ func TestServerLogsLifecycle(t *testing.T) {
 // logger, so the ordering is the real hook order rather than an assumption.
 func TestSchedulerStartsAfterTheServerAndStopsFirst(t *testing.T) {
 	var buf bytes.Buffer
-	logger := logging.New(&buf, logging.TextFormat, nil)
+	logger := logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true})
 	lifecycle := loom.NewLifecycle()
 	server := newServerForTest(t, lifecycle, "127.0.0.1:0", logger)
 	cfg := &config.Config{
@@ -395,7 +394,7 @@ func TestSchedulerStartsAfterTheServerAndStopsFirst(t *testing.T) {
 {{- if or (.Caps.Has "http") (.Caps.Has "db")}}
 
 // discardLogger is the injected logger for tests that do not assert on output.
-func discardLogger() *slog.Logger {
-	return logging.New(io.Discard, logging.TextFormat, nil)
+func discardLogger() logging.Logger {
+	return logging.New(io.Discard, logging.TextFormat, &logging.Options{NoColor: true})
 }
 {{- end}}

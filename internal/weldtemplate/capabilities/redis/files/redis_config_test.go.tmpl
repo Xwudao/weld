@@ -3,11 +3,12 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"__module__/internal/logging"
 )
 
 // TestLoadReadsRedisFromFile proves the Redis section, including the username
@@ -88,7 +89,7 @@ func TestRedisLoadErrorDoesNotLeakSecret(t *testing.T) {
 }
 
 // TestRedisSecretsRedactEverywhere is the credential-safety sentinel for the
-// Redis section: the username and password must not survive fmt, log/slog, JSON
+// Redis section: the username and password must not survive fmt, logging, JSON
 // or YAML.
 func TestRedisSecretsRedactEverywhere(t *testing.T) {
 	const sentinel = "sentinel-do-not-log"
@@ -99,9 +100,9 @@ func TestRedisSecretsRedactEverywhere(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	slog.New(slog.NewTextHandler(&buf, nil)).Info("redis", "username", cfg.Redis.Username, "password", cfg.Redis.Password)
+	logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true}).Info("redis", "username", cfg.Redis.Username, "password", cfg.Redis.Password)
 	if strings.Contains(buf.String(), sentinel) {
-		t.Fatalf("log/slog leaked the Redis secret:\n%s", buf.String())
+		t.Fatalf("logging leaked the Redis secret:\n%s", buf.String())
 	}
 
 	encoded, err := json.Marshal(cfg)

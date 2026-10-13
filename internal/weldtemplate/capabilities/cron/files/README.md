@@ -57,12 +57,12 @@ construct it in `NewCronDeps` in `internal/di/cron_provider.go` (also stable):
 ```go
 // internal/cron/deps.go
 type Deps struct {
-	Logger    *slog.Logger
+	Logger    logging.Logger
 	Publisher events.Publisher
 }
 
 // internal/di/cron_provider.go
-func NewCronDeps(logger *slog.Logger, publisher events.Publisher) *cron.Deps {
+func NewCronDeps(logger logging.Logger, publisher events.Publisher) *cron.Deps {
 	return &cron.Deps{Logger: logger, Publisher: publisher}
 }
 ```

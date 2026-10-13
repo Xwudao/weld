@@ -110,7 +110,7 @@ installed capabilities and the host platform (the deploy target defaults to
 Capabilities:
 
 - `base` (scaffold) — minimal Go CLI on a Cobra command tree with a
-  `log/slog` factory (`internal/logging`) whose sink is an injected
+  `logging.Logger` contract (`internal/logging`) with a default slog implementation whose sink is an injected
   `io.Writer`. Text records are colored by [`tint`](https://github.com/lmittmann/tint)
   and JSON stays slog's handler; `NewFromEnv`, `ParseLevel` and the
   `WithContext`/`FromContext` pair are built in. It ships no configuration and
@@ -136,7 +136,7 @@ Capabilities:
   registers (`Routes`, `LogRoutes`, `PrintRoutes`), and the composition logs the
   table with each route's policies at startup in a development environment. Its
   `Serve` takes the injected
-  `*slog.Logger`, and `serve` reads the listen address through the shared
+  `logging.Logger`, and `serve` reads the listen address through the shared
   `config` loader. CORS is off until `config.yml`'s `cors` section enables it
   (see [CORS](#cors)); no authentication or rate limiting is enabled by default.
 - `web` (add) — React + TypeScript + Vite frontend, served by `http`.
@@ -537,10 +537,11 @@ What Loom binds, and why it is not ceremonial:
   the database section is validated: the credentials must come from `config.yml`
   or the environment, there is no invented default, so a database-backed serve
   cannot silently reach a local database, and an error never echoes the dsn.
-- `*slog.Logger` — provided by the graph (`NewLogger`) from the base
-  `log/slog` factory and injected into the managed server, so startup, a serve
+- `logging.Logger` — provided by the graph (`NewLogger`) from the base
+  `logging` factory and injected into the managed server, so startup, a serve
   failure and a graceful shutdown are recorded through one logging protocol
-  with no process default logger and no custom logger interface.
+  with no process default logger. Business code uses the `logging.Logger`
+  interface, not backend types.
 - `*pgxpool.Pool` and `data.Repository` (`db`) — the pool parses the dsn lazily
   and is **not** connected at build, test or startup, so no database is needed;
   the constructor returns a cleanup that Loom runs exactly once, whether
@@ -802,7 +803,7 @@ user file that happens to share the name is never clobbered. Use a pointer
 ## Configuration
 
 `config` is a first-class, shared capability, not a base dependency: the base
-scaffold stays a minimal CLI with `log/slog` and no `config.yml`. `loom` requires
+scaffold stays a minimal CLI with `logging` and no `config.yml`. `loom` requires
 `config`, and every added capability requires `loom`, so any `weld add` installs
 it and the user never adds it by hand.
 
@@ -812,7 +813,7 @@ What lands in the project:
   with `yaml` tags for names only (no validation tags), a loader whose `readFile`
   and `lookupEnv` are injected (`NewLoader`) so it is testable without the
   filesystem or the process environment, and a `Secret` type that redacts itself
-  in `fmt`, `log/slog`, JSON and YAML.
+  in `fmt`, `logging`, JSON and YAML.
 - `config.yml` — generated locally and added to `.gitignore`. It is not silently
   omitted: `weld` writes it and records it in the manifest.
 - `config.example.yml` — committed, and documents the shape.
@@ -971,7 +972,7 @@ Test conventions:
   `readFile`/`lookupEnv`: it covers the flag/environment/file/default precedence,
   a missing file, an invalid file that must not echo its content, a blank
   `HTTP_ADDR` that must not fall back to the default, the separate database
-  validation, and a `Secret` sentinel that must not survive `fmt`, `slog`, JSON
+  validation, and a `Secret` sentinel that must not survive `fmt`, `logging`, JSON
   or YAML. It also covers CORS: an omitted section is off with usable defaults,
   the typed section and the comma-separated `CORS_*` overrides load, a malformed
   override is an error, and the fail-closed validation rejects an enabled policy
@@ -984,7 +985,7 @@ Test conventions:
   that deleting only the git-ignored `config.yml` (a fresh clone) is repaired from
   the committed example in both add orders — with the example persisted, no local
   secret copied into it, and a missing or corrupt example failing actionably.
-- The base CLI logs a failed command through its injected `log/slog` logger, and
+- The base CLI logs a failed command through its injected `logging` logger, and
   a generated `internal/logging` test covers tint text records (color on and
   off, the painted statement, the `time.DateTime` clock), JSON formatting,
   handler-level filtering, `ParseLevel`, `OptionsFromEnv`/`NewFromEnv` and the

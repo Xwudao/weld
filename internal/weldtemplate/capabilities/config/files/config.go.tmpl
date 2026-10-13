@@ -37,7 +37,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -104,7 +103,7 @@ var (
 
 // Secret is a string that must never be printed.
 //
-// It redacts itself in fmt, log/slog, JSON and YAML output, so a configuration
+// It redacts itself in fmt, logging, JSON and YAML output, so a configuration
 // value can be logged or marshalled without leaking a credential. Value is the
 // one accessor that reveals the underlying string.
 type Secret string
@@ -118,8 +117,8 @@ func (Secret) String() string { return "[REDACTED]" }
 // GoString redacts the secret for the %#v verb.
 func (Secret) GoString() string { return "[REDACTED]" }
 
-// LogValue redacts the secret for log/slog.
-func (Secret) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
+// LogValue redacts the secret for logging.
+func (Secret) LogValue() any { return "[REDACTED]" }
 
 // MarshalJSON redacts the secret in JSON output.
 func (Secret) MarshalJSON() ([]byte, error) { return []byte(`"[REDACTED]"`), nil }

@@ -3,10 +3,11 @@ package httpx
 import (
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+
+	"__module__/internal/logging"
 )
 
 // Router registers routes on a *http.ServeMux under a shared path prefix,
@@ -313,7 +314,7 @@ func (r *Router) Routes() []Route {
 // policies that guard it. The composition calls it in a development
 // environment, so the composed surface and its coverage are visible at startup
 // without a request. A nil logger is a no-op.
-func (r *Router) LogRoutes(logger *slog.Logger) {
+func (r *Router) LogRoutes(logger logging.Logger) {
 	if logger == nil {
 		return
 	}

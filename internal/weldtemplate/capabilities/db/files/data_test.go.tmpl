@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	sqlc "__module__/internal/data/sqlc"
+
+	"__module__/internal/logging"
 )
 
 // TestItemFromSQLC pins the row-to-domain conversion. The generated row is the
@@ -82,7 +83,7 @@ func TestWithQueryLogAttachesATracer(t *testing.T) {
 	if config.ConnConfig.Tracer != nil {
 		t.Fatal("a pool config without WithQueryLog already has a tracer")
 	}
-	WithQueryLog(slog.New(slog.NewTextHandler(io.Discard, nil)))(config)
+	WithQueryLog(logging.New(io.Discard, logging.TextFormat, &logging.Options{NoColor: true}))(config)
 	if config.ConnConfig.Tracer == nil {
 		t.Fatal("WithQueryLog did not attach a tracer")
 	}
@@ -92,11 +93,11 @@ func TestWithQueryLogAttachesATracer(t *testing.T) {
 // record it writes is pinned without a database.
 func TestQueryLoggerLogsTheStatementAndResult(t *testing.T) {
 	var buf bytes.Buffer
-	tracer := queryLogger{logger: slog.New(slog.NewTextHandler(&buf, nil))}
+	tracer := queryLogger{logger: logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true})}
 	ctx := tracer.TraceQueryStart(context.Background(), nil, pgx.TraceQueryStartData{SQL: "select 1", Args: []any{7}})
 	tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{CommandTag: pgconn.NewCommandTag("SELECT 1")})
 	out := buf.String()
-	for _, want := range []string{"level=INFO", `sql="select 1"`, "args=[7]", "duration=", "rows=1"} {
+	for _, want := range []string{"INF", `sql="select 1"`, "args=[7]", "duration=", "rows=1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("a query record is missing %q:\n%s", want, out)
 		}
@@ -107,7 +108,7 @@ func TestQueryLoggerLogsTheStatementAndResult(t *testing.T) {
 // the error where the row count would be.
 func TestQueryLoggerLogsAFailure(t *testing.T) {
 	var buf bytes.Buffer
-	tracer := queryLogger{logger: slog.New(slog.NewTextHandler(&buf, nil))}
+	tracer := queryLogger{logger: logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true})}
 	ctx := tracer.TraceQueryStart(context.Background(), nil, pgx.TraceQueryStartData{SQL: "select 1"})
 	tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{Err: errors.New("boom")})
 	out := buf.String()

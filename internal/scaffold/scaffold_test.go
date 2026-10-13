@@ -1893,7 +1893,7 @@ func TestAddDoesNotBootstrapUnmanagedConfig(t *testing.T) {
 
 // assertInjectedLogger fails when a generated project does not ship the base
 // logging factory or reaches for the process default logger instead of an
-// injected *slog.Logger.
+// injected logging.Logger.
 func assertInjectedLogger(t *testing.T, dir string) {
 	t.Helper()
 	if _, err := os.Stat(filepath.Join(dir, "internal", "logging", "logging.go")); err != nil {

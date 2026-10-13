@@ -9,12 +9,13 @@
 package httpserver
 
 import (
-	"log/slog"
 	"net"
 	nethttp "net/http"
 
 	"__module__/internal/config"
 	"__module__/internal/httpx"
+
+	"__module__/internal/logging"
 )
 
 // Route installs one capability's routes on the application mux.
@@ -29,7 +30,7 @@ type Route func(mux *nethttp.ServeMux)
 // file, and cfg supplies the settings that stack reads — currently the
 // cross-origin policy. A nil cfg is treated as an empty configuration, so the
 // chain still applies with CORS off.
-func Chain(cfg *config.Config, logger *slog.Logger, handler nethttp.Handler) nethttp.Handler {
+func Chain(cfg *config.Config, logger logging.Logger, handler nethttp.Handler) nethttp.Handler {
 	return httpx.Chain(middlewareChain(cfg, logger)...)(handler)
 }
 
@@ -40,7 +41,7 @@ func Chain(cfg *config.Config, logger *slog.Logger, handler nethttp.Handler) net
 // without installing a capability or opening a socket. Production composition
 // happens in the Loom server graph, which registers the business modules on its
 // own mux.
-func NewHandler(cfg *config.Config, logger *slog.Logger, routes ...Route) nethttp.Handler {
+func NewHandler(cfg *config.Config, logger logging.Logger, routes ...Route) nethttp.Handler {
 	mux := nethttp.NewServeMux()
 	for _, route := range routes {
 		route(mux)

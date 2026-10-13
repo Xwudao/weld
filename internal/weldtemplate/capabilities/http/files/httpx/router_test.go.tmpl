@@ -3,11 +3,12 @@ package httpx
 import (
 	"bytes"
 	"context"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"__module__/internal/logging"
 )
 
 func TestJoinPathKeepsOneSlash(t *testing.T) {
@@ -344,7 +345,7 @@ func TestRoutesRecordsTheComposedSurface(t *testing.T) {
 	}
 
 	printed.Reset()
-	router.LogRoutes(slog.New(slog.NewTextHandler(&printed, nil)))
+	router.LogRoutes(logging.New(&printed, logging.TextFormat, &logging.Options{NoColor: true}))
 	if !strings.Contains(printed.String(), "/admin/items") || !strings.Contains(printed.String(), "base") {
 		t.Fatalf("LogRoutes output %q is missing a route or its policy", printed.String())
 	}

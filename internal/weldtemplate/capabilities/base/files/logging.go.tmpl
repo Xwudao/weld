@@ -1,16 +1,5 @@
-// Package logging builds the __name__ logger.
-//
-// It is a small factory over log/slog. Callers inject an io.Writer, so a test
-// captures records in a buffer and no package reaches for os.Stderr or
-// slog.Default. Code depends on *slog.Logger directly and replaces the sink by
-// supplying a different Writer.
-//
-// Text records are written by github.com/lmittmann/tint, a zero-dependency slog
-// handler: one colored, human-readable line per record. Tint keeps the project's
-// time.DateTime clock (instead of slog's RFC 3339 timestamp) and lets a single
-// field — the query logger's statement — be painted, which slog's own text
-// handler cannot express. JSON records stay slog's handler, so a log pipeline
-// gets the standard RFC 3339 object and no escape byte.
+// Package logging defines the project's logging contract and its default slog implementation.
+// Loggers are injected; no process-wide default logger is installed.
 package logging
 
 import (
@@ -18,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -25,151 +15,234 @@ import (
 	"github.com/lmittmann/tint"
 )
 
-// Format selects how a logger encodes records.
+// Logger writes structured records. Arguments are alternating string keys and
+// values, or Fields. Implementations must be safe for concurrent use, preserve
+// the caller's source location, and resolve Valuer values before encoding.
+// With and WithGroup return derived loggers without modifying the receiver.
+// Context methods pass ctx to the backend; cancellation does not suppress logs.
+type Logger interface {
+	Debug(string, ...any)
+	Info(string, ...any)
+	Warn(string, ...any)
+	Error(string, ...any)
+	DebugContext(context.Context, string, ...any)
+	InfoContext(context.Context, string, ...any)
+	WarnContext(context.Context, string, ...any)
+	ErrorContext(context.Context, string, ...any)
+	With(...any) Logger
+	WithGroup(string) Logger
+}
+
+// Valuer supplies a log-safe representation, for example a redacted secret.
+type Valuer interface{ LogValue() any }
+
+// Field is a structured attribute. A zero Field is omitted.
+type Field struct {
+	Key   string
+	Value any
+}
+
+func Any(key string, value any) Field     { return Field{Key: key, Value: value} }
+func Group(key string, args ...any) Field { return Any(key, fields(args)) }
+func Err(err error) Field                 { return Any("error", err) }
+
+// Level selects the minimum severity; the zero value is Info.
+type Level int
+
+const (
+	LevelDebug Level = -4
+	LevelInfo  Level = 0
+	LevelWarn  Level = 4
+	LevelError Level = 8
+)
+
 type Format string
 
 const (
-	// TextFormat writes one colored, human-readable line per record.
 	TextFormat Format = "text"
-	// JSONFormat writes one JSON object per record.
 	JSONFormat Format = "json"
 )
 
-// StatementKey is the attribute a query logger records a SQL statement under.
-// The text format paints that one value, so a statement is visible in a stream
-// of request records. Only the pool logger writes it, and only in a development
-// environment, so a production record carries no escape byte.
 const StatementKey = "sql"
-
-// timeLayout is the record time the text format writes: time.DateTime, the date
-// and local wall clock to the second, uncolored and with no zone offset.
 const timeLayout = time.DateTime
 
-// statementColor is the tint color (an ANSI 8-bit index: 6 is cyan) used to
-// paint a StatementKey value.
-const statementColor = 6
-
-// Options configures a logger. It is the full form of New: Format selects the
-// encoder, Level and AddSource mean what they do in slog.HandlerOptions, NoColor
-// turns the text colors off, and TimeFormat overrides the text clock. A zero
-// Options is a colored text logger at slog's default level.
+// Options configures the default implementation without exposing backend types.
 type Options struct {
-	// Format selects the encoder; anything but JSONFormat is the text format.
-	Format Format
-	// Level is the minimum level written; nil is slog's default of INFO.
-	Level slog.Leveler
-	// AddSource records the call site of each record.
-	AddSource bool
-	// NoColor disables the text colors, for a pipe or a file.
-	NoColor bool
-	// TimeFormat overrides the text clock; empty is time.DateTime.
+	Format     Format
+	Level      Level
+	AddSource  bool
+	NoColor    bool
 	TimeFormat string
-	// ReplaceAttr rewrites or drops attributes, as in slog.HandlerOptions. The
-	// text handler runs it first and then paints the statement field, so a
-	// caller can still drop or rename that attribute.
-	ReplaceAttr func(groups []string, a slog.Attr) slog.Attr
+	// ReplaceAttr rewrites resolved, non-group fields, including built-in fields.
+	// Returning a zero Field drops the field. The groups slice must not be retained.
+	ReplaceAttr func(groups []string, field Field) Field
 }
 
-// New returns a *slog.Logger that writes records to w.
-//
-// format selects the encoder: JSONFormat writes one JSON object per record
-// through slog's JSON handler, and any other value writes the text format, so
-// the zero Format is a working default. options configures the handler — for
-// example its Level — and a nil options uses slog's defaults. It is the short
-// form of NewWithOptions for callers that only need slog's own options.
-func New(w io.Writer, format Format, options *slog.HandlerOptions) *slog.Logger {
-	if options == nil {
-		options = &slog.HandlerOptions{}
+// New writes to the injected sink. Nil options selects the defaults.
+func New(w io.Writer, format Format, options *Options) Logger {
+	var opts Options
+	if options != nil {
+		opts = *options
 	}
-	return NewWithOptions(w, Options{
-		Format:      format,
-		Level:       options.Level,
-		AddSource:   options.AddSource,
-		ReplaceAttr: options.ReplaceAttr,
-	})
+	opts.Format = format
+	return NewWithOptions(w, opts)
 }
 
-// NewWithOptions returns a logger configured by options.
-func NewWithOptions(w io.Writer, options Options) *slog.Logger {
-	if options.Format == JSONFormat {
-		return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
-			Level:       options.Level,
-			AddSource:   options.AddSource,
-			ReplaceAttr: options.ReplaceAttr,
-		}))
-	}
-	timeFormat := options.TimeFormat
-	if timeFormat == "" {
-		timeFormat = timeLayout
-	}
-	return slog.New(tint.NewTextHandler(w, &tint.Options{
-		Level:       options.Level,
-		AddSource:   options.AddSource,
-		TimeFormat:  timeFormat,
-		NoColor:     options.NoColor,
-		ReplaceAttr: paintStatement(options.ReplaceAttr),
-	}))
-}
-
-// paintStatement composes the caller's ReplaceAttr with the statement paint. The
-// caller runs first, so it may drop or rename the field; whatever survives and
-// is still named StatementKey at the top level is painted.
-func paintStatement(replace func([]string, slog.Attr) slog.Attr) func([]string, slog.Attr) slog.Attr {
-	return func(groups []string, a slog.Attr) slog.Attr {
-		if replace != nil {
-			a = replace(groups, a)
+func NewWithOptions(w io.Writer, options Options) Logger {
+	replace := func(groups []string, a slog.Attr) slog.Attr {
+		if options.ReplaceAttr != nil {
+			a = attr(options.ReplaceAttr(groups, Any(a.Key, a.Value.Any())))
 		}
-		if a.Key == StatementKey && len(groups) == 0 {
-			return tint.Attr(statementColor, a)
+		if options.Format != JSONFormat && len(groups) == 0 {
+			switch a.Key {
+			case StatementKey:
+				return tint.Attr(6, a)
+			case "error":
+				return tint.Attr(9, a)
+			}
 		}
 		return a
 	}
+	opts := &slog.HandlerOptions{Level: slog.Level(options.Level), AddSource: options.AddSource, ReplaceAttr: replace}
+	var handler slog.Handler
+	if options.Format == JSONFormat {
+		handler = slog.NewJSONHandler(w, opts)
+	} else {
+		clock := options.TimeFormat
+		if clock == "" {
+			clock = timeLayout
+		}
+		handler = tint.NewTextHandler(w, &tint.Options{
+			Level: opts.Level, AddSource: opts.AddSource, ReplaceAttr: replace,
+			TimeFormat: clock, NoColor: options.NoColor,
+		})
+	}
+	return &slogLogger{handler: handler}
 }
 
-// ParseLevel parses a level name into a slog.Level. It accepts debug, info, warn
-// (or warning) and error, case-insensitively, and an empty string is info. It is
-// the parser OptionsFromEnv uses, so a caller that wants to fail loudly can call
-// it directly.
-func ParseLevel(name string) (slog.Level, error) {
+type slogLogger struct{ handler slog.Handler }
+
+var _ Logger = (*slogLogger)(nil)
+
+func (l *slogLogger) Debug(msg string, args ...any) {
+	l.log(context.Background(), LevelDebug, msg, args)
+}
+func (l *slogLogger) Info(msg string, args ...any) { l.log(context.Background(), LevelInfo, msg, args) }
+func (l *slogLogger) Warn(msg string, args ...any) { l.log(context.Background(), LevelWarn, msg, args) }
+func (l *slogLogger) Error(msg string, args ...any) {
+	l.log(context.Background(), LevelError, msg, args)
+}
+func (l *slogLogger) DebugContext(ctx context.Context, msg string, args ...any) {
+	l.log(ctx, LevelDebug, msg, args)
+}
+func (l *slogLogger) InfoContext(ctx context.Context, msg string, args ...any) {
+	l.log(ctx, LevelInfo, msg, args)
+}
+func (l *slogLogger) WarnContext(ctx context.Context, msg string, args ...any) {
+	l.log(ctx, LevelWarn, msg, args)
+}
+func (l *slogLogger) ErrorContext(ctx context.Context, msg string, args ...any) {
+	l.log(ctx, LevelError, msg, args)
+}
+
+func (l *slogLogger) log(ctx context.Context, level Level, msg string, args []any) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !l.handler.Enabled(ctx, slog.Level(level)) {
+		return
+	}
+	var pcs [1]uintptr
+	runtime.Callers(3, pcs[:]) // Callers -> log -> public method -> business caller.
+	record := slog.NewRecord(time.Now(), slog.Level(level), msg, pcs[0])
+	for _, field := range fields(args) {
+		record.AddAttrs(attr(field))
+	}
+	_ = l.handler.Handle(ctx, record)
+}
+
+func (l *slogLogger) With(args ...any) Logger {
+	attrs := make([]slog.Attr, 0, len(args))
+	for _, field := range fields(args) {
+		attrs = append(attrs, attr(field))
+	}
+	return &slogLogger{handler: l.handler.WithAttrs(attrs)}
+}
+func (l *slogLogger) WithGroup(name string) Logger {
+	return &slogLogger{handler: l.handler.WithGroup(name)}
+}
+
+// Malformed key/value arguments are retained under !BADKEY, matching slog.
+func fields(args []any) []Field {
+	var result []Field
+	for i := 0; i < len(args); i++ {
+		if field, ok := args[i].(Field); ok {
+			result = append(result, field)
+		} else if key, ok := args[i].(string); ok && i+1 < len(args) {
+			i++
+			result = append(result, Any(key, args[i]))
+		} else {
+			result = append(result, Any("!BADKEY", args[i]))
+		}
+	}
+	return result
+}
+
+func attr(field Field) slog.Attr {
+	if field.Key == "" && field.Value == nil {
+		return slog.Attr{}
+	}
+	value := field.Value
+	// Bound resolution so a buggy Valuer cannot hang logging.
+	for i := 0; i < 100; i++ {
+		valuer, ok := value.(Valuer)
+		if !ok {
+			break
+		}
+		value = valuer.LogValue()
+		if i == 99 {
+			value = "[invalid log value]"
+		}
+	}
+	if group, ok := value.([]Field); ok {
+		attrs := make([]slog.Attr, 0, len(group))
+		for _, child := range group {
+			attrs = append(attrs, attr(child))
+		}
+		return slog.Attr{Key: field.Key, Value: slog.GroupValue(attrs...)}
+	}
+	return slog.Any(field.Key, value)
+}
+
+func ParseLevel(name string) (Level, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "info":
-		return slog.LevelInfo, nil
+		return LevelInfo, nil
 	case "debug":
-		return slog.LevelDebug, nil
+		return LevelDebug, nil
 	case "warn", "warning":
-		return slog.LevelWarn, nil
+		return LevelWarn, nil
 	case "error":
-		return slog.LevelError, nil
+		return LevelError, nil
 	default:
 		return 0, &unknownLevelError{name: name}
 	}
 }
 
-// unknownLevelError reports an unparsable level name. It is a distinct type so a
-// caller can tell a bad level from any other error with errors.As.
 type unknownLevelError struct{ name string }
 
 func (e *unknownLevelError) Error() string {
 	return "unknown log level " + strconv.Quote(e.name) + " (want debug, info, warn or error)"
 }
 
-// OptionsFromEnv builds Options from the process environment:
-//
-//	LOG_FORMAT  text (default) or json
-//	LOG_LEVEL   debug, info (default), warn or error
-//	LOG_SOURCE  bool: record the call site
-//	NO_COLOR    any non-empty value disables the text colors
-//
-// An unparsable LOG_LEVEL or LOG_SOURCE is ignored rather than failing startup,
-// so a bad environment degrades to the default instead of crashing the process.
-// getenv is injectable so a test reads a fixed environment.
+// OptionsFromEnv reads LOG_FORMAT, LOG_LEVEL, LOG_SOURCE and NO_COLOR.
+// Invalid values fall back to defaults rather than failing startup.
 func OptionsFromEnv(getenv func(string) string) Options {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	options := Options{Format: TextFormat, Level: slog.LevelInfo}
-	switch strings.ToLower(strings.TrimSpace(getenv("LOG_FORMAT"))) {
-	case "json":
+	options := Options{Format: TextFormat, Level: LevelInfo}
+	if strings.EqualFold(strings.TrimSpace(getenv("LOG_FORMAT")), "json") {
 		options.Format = JSONFormat
 	}
 	if level, err := ParseLevel(getenv("LOG_LEVEL")); err == nil {
@@ -181,48 +254,26 @@ func OptionsFromEnv(getenv func(string) string) Options {
 	options.NoColor = getenv("NO_COLOR") != ""
 	return options
 }
+func NewFromEnv(w io.Writer) Logger { return NewWithOptions(w, OptionsFromEnv(os.Getenv)) }
 
-// NewFromEnv returns a logger configured by OptionsFromEnv, defaulting to a
-// colored text logger. It is what the generated main and the Loom graph build,
-// so an operator tunes logging with the environment and never edits code.
-func NewFromEnv(w io.Writer) *slog.Logger {
-	return NewWithOptions(w, OptionsFromEnv(os.Getenv))
-}
+// Nop returns a logger that discards records.
+func Nop() Logger { return contextFallback }
 
-// Err returns the conventional "error" attribute. Tint paints the value red and
-// every other handler renders it like slog.Any("error", err), so a caller does
-// not repeat the key.
-func Err(err error) slog.Attr {
-	return tint.Attr(9, slog.Any("error", err))
-}
-
-// contextKey is the private type a logger travels under, so no other package can
-// collide with it.
 type contextKey struct{}
 
-// contextFallback is returned when a context carries no logger. It discards, so a
-// missing injection is silent rather than written to the wrong sink; the graph
-// injects a logger into every component that logs and the boundary calls
-// WithContext, so the fallback is a safety net, not the normal path.
-var contextFallback = slog.New(slog.NewTextHandler(io.Discard, nil))
+var contextFallback = NewWithOptions(io.Discard, Options{})
 
-// WithContext returns a context carrying logger. Set it at a request or command
-// boundary and read it back with FromContext deeper in the call chain, so a
-// function needs no logger parameter.
-func WithContext(ctx context.Context, logger *slog.Logger) context.Context {
+func WithContext(ctx context.Context, logger Logger) context.Context {
 	if logger == nil {
 		return ctx
 	}
 	return context.WithValue(ctx, contextKey{}, logger)
 }
-
-// FromContext returns the logger WithContext stored, or a discard logger when the
-// context carries none. It never returns nil.
-func FromContext(ctx context.Context) *slog.Logger {
+func FromContext(ctx context.Context) Logger {
 	if ctx != nil {
-		if logger, ok := ctx.Value(contextKey{}).(*slog.Logger); ok && logger != nil {
+		if logger, ok := ctx.Value(contextKey{}).(Logger); ok && logger != nil {
 			return logger
 		}
 	}
-	return contextFallback
+	return Nop()
 }

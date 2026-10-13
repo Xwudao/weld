@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
@@ -12,6 +11,8 @@ import (
 
 	"__module__/internal/commandkit"
 	module "__module__/internal/modules/__modname__"
+
+	"__module__/internal/logging"
 )
 
 // stubLifecycle records that the resolved graph was started and stopped.
@@ -26,7 +27,7 @@ func (l *stubLifecycle) Stop(context.Context) error  { l.stopped = true; return 
 // stubDeps builds the dependency set the real command graph injects, with a
 // discarded logger so the worked-example status subcommand can use it.
 func stubDeps() *Deps {
-	return NewDeps(module.NewDemoService(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewDeps(module.NewDemoService(), logging.New(io.Discard, logging.TextFormat, &logging.Options{NoColor: true}))
 }
 
 // TestNewCommandBuildsGroup checks the generated factory builds the command

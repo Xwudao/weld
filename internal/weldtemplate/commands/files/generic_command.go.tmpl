@@ -19,11 +19,12 @@ package __modname__
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/spf13/cobra"
 
 	"__module__/internal/commandkit"
+
+	"__module__/internal/logging"
 )
 
 // Deps is the dependency set the group's subcommands consume and the root of the
@@ -33,7 +34,7 @@ import (
 // parameter to NewDeps. There are two cases:
 //
 //   - A dependency the shared commonModule already provides needs nothing else.
-//     That covers *config.Config, *slog.Logger and, when installed, the Redis,
+//     That covers *config.Config, logging.Logger and, when installed, the Redis,
 //     mail and storage bindings, plus a data.Repository the project registered
 //     in repository_providers.go: Loom injects
 //     them and prunes them until a subcommand consumes them.
@@ -45,13 +46,13 @@ import (
 // resolving the graph constructs the shared logger and nothing else. Replace it
 // with your own dependency, or delete it and its subcommand.
 type Deps struct {
-	Logger *slog.Logger
+	Logger logging.Logger
 }
 
 // NewDeps builds the dependency set from the dependencies the graph injects. Add
 // one parameter per field added to Deps; the graph follows the signature
 // automatically, so no other file changes.
-func NewDeps(logger *slog.Logger) *Deps { return &Deps{Logger: logger} }
+func NewDeps(logger logging.Logger) *Deps { return &Deps{Logger: logger} }
 
 // NewCommand builds the __modname__ command group from a lazy dependency
 // builder. The builder is not called here: a subcommand resolves it through

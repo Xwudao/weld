@@ -1,11 +1,12 @@
 package httpserver
 
 import (
-	"log/slog"
 	"time"
 
 	"__module__/internal/config"
 	"__module__/internal/httpx"
+
+	"__module__/internal/logging"
 )
 
 // middlewareChain is the project-owned middleware configuration.
@@ -35,7 +36,7 @@ import (
 // here when the project needs it. Authorization belongs in the named route
 // policies (policy.go), which run inside this chain and are never bypassed by
 // CORS. The base CLI installs none of this, because it has no HTTP server.
-func middlewareChain(cfg *config.Config, logger *slog.Logger) []httpx.Middleware {
+func middlewareChain(cfg *config.Config, logger logging.Logger) []httpx.Middleware {
 	chain := make([]httpx.Middleware, 0, 4)
 	if cors := corsMiddleware(cfg); cors != nil {
 		chain = append(chain, cors)

@@ -368,8 +368,8 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	// Consume the late-added repository from the command root: only the
 	// user-owned root changes, never the stable command graph.
 	commandPath := filepath.Join(dir, "internal", "commands", "orders", "command.go")
-	editInPlace(t, commandPath, "\tLogger *slog.Logger\n", "\tLogger *slog.Logger\n\tRepo data.Repository\n")
-	editInPlace(t, commandPath, "func NewDeps(logger *slog.Logger) *Deps { return &Deps{Logger: logger} }", "func NewDeps(logger *slog.Logger, repo data.Repository) *Deps { return &Deps{Logger: logger, Repo: repo} }")
+	editInPlace(t, commandPath, "\tLogger logging.Logger\n", "\tLogger logging.Logger\n\tRepo data.Repository\n")
+	editInPlace(t, commandPath, "func NewDeps(logger logging.Logger) *Deps { return &Deps{Logger: logger} }", "func NewDeps(logger logging.Logger, repo data.Repository) *Deps { return &Deps{Logger: logger, Repo: repo} }")
 	editInPlace(t, commandPath, "\t\"example.com/demo/internal/commandkit\"\n", "\t\"example.com/demo/internal/commandkit\"\n\t\"example.com/demo/internal/data\"\n")
 
 	// Register the repository in the project-owned seam. The generated graph

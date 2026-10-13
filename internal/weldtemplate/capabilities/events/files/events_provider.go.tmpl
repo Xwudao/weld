@@ -2,12 +2,13 @@ package di
 
 import (
 	"context"
-	"log/slog"
 	"time"
 
 	"github.com/Xwudao/loom"
 
 	"__module__/internal/events"
+
+	"__module__/internal/logging"
 )
 
 // asyncEvents selects how the application event publisher delivers events. It is
@@ -58,7 +59,7 @@ const eventShutdownTimeout = 10 * time.Second
 // Depend on events.Publisher rather than a concrete type. A component that needs
 // the queue statistics can call events.StatsOf(publisher); it reports whether the
 // chosen publisher was asynchronous.
-func NewEventDispatcher(lc *loom.Lifecycle, logger *slog.Logger) (events.Publisher, error) {
+func NewEventDispatcher(lc *loom.Lifecycle, logger logging.Logger) (events.Publisher, error) {
 	dispatcher := events.New(logger)
 	if err := events.Register(dispatcher); err != nil {
 		return nil, err

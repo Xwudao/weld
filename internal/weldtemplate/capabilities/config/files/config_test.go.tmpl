@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"__module__/internal/logging"
 )
 
 // fakeLoader builds a loader over in-memory files and environment, so every
@@ -180,7 +181,7 @@ func TestDSNUsesFieldsOrExplicitValue(t *testing.T) {
 }
 
 // TestSecretRedactsEverywhere is the credential-safety sentinel: the secret must
-// not survive fmt, log/slog, JSON or YAML.
+// not survive fmt, logging, JSON or YAML.
 func TestSecretRedactsEverywhere(t *testing.T) {
 	const sentinel = "sentinel-do-not-log"
 	secret := Secret(sentinel)
@@ -197,9 +198,9 @@ func TestSecretRedactsEverywhere(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	slog.New(slog.NewTextHandler(&buf, nil)).Info("config", "secret", secret)
+	logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true}).Info("config", "secret", secret)
 	if strings.Contains(buf.String(), sentinel) {
-		t.Fatalf("log/slog leaked the secret:\n%s", buf.String())
+		t.Fatalf("logging leaked the secret:\n%s", buf.String())
 	}
 
 	encoded, err := json.Marshal(secret)

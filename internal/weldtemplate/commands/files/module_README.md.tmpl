@@ -41,7 +41,7 @@ business layer; `Logger` is the worked example of a second field. There are two
 cases:
 
 - A dependency the shared `commonModule` already provides needs nothing else —
-  `*config.Config`, `*slog.Logger` and, when installed, the Redis, mail and
+  `*config.Config`, `logging.Logger` and, when installed, the Redis, mail and
   storage bindings, plus a `data.Repository` the project registered in
   `repository_providers.go`. Adding the field and the `NewDeps` parameter
   is all it takes, and Loom injects it.

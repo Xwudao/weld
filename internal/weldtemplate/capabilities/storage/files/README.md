@@ -62,7 +62,7 @@ The configuration lives in `internal/config` (`config.Storage`) and is read from
 | `tls` | `true` | a scheme-less `endpoint` follows this; an `http://` endpoint with credentials requires an explicit `false` |
 
 The access key and secret are `config.Secret`, which redacts itself in `fmt`,
-`log/slog`, JSON and YAML, so a credential cannot reach a log record by
+`logging`, JSON and YAML, so a credential cannot reach a log record by
 accident. An endpoint without a scheme is given `https`, or `http` when `tls` is
 explicitly disabled. An endpoint that names `http://` explicitly is rejected
 when credentials are set and `tls` is not explicitly `false`, so the secure

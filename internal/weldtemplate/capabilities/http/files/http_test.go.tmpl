@@ -3,7 +3,6 @@ package httpserver
 import (
 	"bytes"
 	"context"
-	"log/slog"
 	"net"
 	nethttp "net/http"
 	"net/http/httptest"
@@ -12,11 +11,13 @@ import (
 	"time"
 
 	"__module__/internal/config"
+
+	"__module__/internal/logging"
 )
 
 // testLogger is the injected logger for tests that do not assert on output.
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+func testLogger() logging.Logger {
+	return logging.New(&bytes.Buffer{}, logging.TextFormat, &logging.Options{NoColor: true})
 }
 
 // testConfig is the configuration the injected-handler tests compose with: CORS
@@ -137,7 +138,7 @@ func TestNewHandlerWithoutCORSSendsNoCORSHeader(t *testing.T) {
 // logged through the injected logger instead.
 func TestNewHandlerRecoversAPanic(t *testing.T) {
 	var sink bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&sink, nil))
+	logger := logging.New(&sink, logging.TextFormat, &logging.Options{NoColor: true})
 	handler := NewHandler(testConfig(), logger, func(mux *nethttp.ServeMux) {
 		mux.HandleFunc("/boom", func(nethttp.ResponseWriter, *nethttp.Request) {
 			panic("secret panic detail")

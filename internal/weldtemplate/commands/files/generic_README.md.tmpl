@@ -34,7 +34,7 @@ the command package never imports Loom itself.
 needs, and one matching parameter on `NewDeps`. There are two cases:
 
 - A dependency the shared `commonModule` already provides needs nothing else —
-  `*config.Config`, `*slog.Logger` and, when installed, the Redis, mail and
+  `*config.Config`, `logging.Logger` and, when installed, the Redis, mail and
   storage bindings, plus a `data.Repository` the project registered in
   `repository_providers.go`. The `status` subcommand's `Deps.Logger` is
   the worked example: adding the field and the `NewDeps` parameter is all it

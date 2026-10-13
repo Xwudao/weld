@@ -24,7 +24,7 @@ The configuration lives in `internal/config` (`config.Redis`) and is read from
 `config.yml` (`redis:` section) and overridden by the environment
 (`REDIS_ADDR`, `REDIS_USERNAME`, `REDIS_PASSWORD`, `REDIS_DB`, `REDIS_TLS`).
 The username and password are `config.Secret`, which redacts itself in `fmt`,
-`log/slog`, JSON and YAML, so a credential cannot reach a log record by
+`logging`, JSON and YAML, so a credential cannot reach a log record by
 accident. The address defaults to `localhost:6379`; the credentials never do.
 
 ## With Loom

@@ -38,13 +38,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	robfigcron "github.com/robfig/cron/v3"
+
+	"__module__/internal/logging"
 )
 
 // Job is a unit of scheduled work.
@@ -126,7 +126,7 @@ var (
 
 // Scheduler runs named jobs on cron schedules.
 type Scheduler struct {
-	logger *slog.Logger
+	logger logging.Logger
 	runner *robfigcron.Cron
 	deps   *Deps
 
@@ -182,9 +182,9 @@ func WithDeps(deps *Deps) Option {
 // seconds form and every @descriptor other than the @every form Every produces
 // are rejected, so a malformed schedule fails at registration rather than
 // silently never firing.
-func New(logger *slog.Logger, options ...Option) *Scheduler {
+func New(logger logging.Logger, options ...Option) *Scheduler {
 	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		logger = logging.Nop()
 	}
 	configured := settings{location: time.UTC, deps: &Deps{}}
 	for _, option := range options {
@@ -374,11 +374,11 @@ func (s *Scheduler) wrap(job Job) func() {
 	}
 }
 
-// cronLogger adapts the injected *slog.Logger to robfig's Logger interface, so
+// cronLogger adapts the injected logging.Logger to robfig's Logger interface, so
 // schedule wake-ups, skipped overlaps and recovered panics all go through the
 // one logging protocol the process owns. No global logger is installed.
 type cronLogger struct {
-	logger *slog.Logger
+	logger logging.Logger
 }
 
 // Info logs a routine message from robfig.

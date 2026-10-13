@@ -312,7 +312,7 @@ func TestConfigCapabilityContract(t *testing.T) {
 	loaderText := string(loader)
 	for _, want := range []string{
 		"type Secret string",
-		"func (Secret) LogValue() slog.Value",
+		"func (Secret) LogValue() any",
 		"func (Secret) MarshalJSON()",
 		"func (c *Config) ValidateDatabase() error",
 		"func NewLoader(readFile ReadFileFunc, lookupEnv LookupEnvFunc) *Loader",
@@ -500,8 +500,34 @@ func TestBaseCapabilityIsCLIOnly(t *testing.T) {
 	}
 }
 
+// TestLoggingBackendBoundary keeps backend imports inside the implementation and its tests.
+func TestLoggingBackendBoundary(t *testing.T) {
+	err := fs.WalkDir(FS(), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go.tmpl") {
+			return nil
+		}
+		if strings.HasSuffix(path, "/logging.go.tmpl") || strings.HasSuffix(path, "/logging_test.go.tmpl") {
+			return nil
+		}
+		body, err := fs.ReadFile(FS(), path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(body), `"log/slog"`) || strings.Contains(string(body), "slog.") {
+			t.Errorf("%s depends on the logging backend instead of logging.Logger", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestBaseCapabilityShipsInjectedLogger guards the logging milestone: base ships
-// a log/slog factory and main logs the failed command through it, with no
+// a logging contract and main logs the failed command through it, with no
 // competing error path and no global logger.
 func TestBaseCapabilityShipsInjectedLogger(t *testing.T) {
 	d := readDescriptor(t, "base")
@@ -829,7 +855,7 @@ func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
 }
 
 // TestLoomCapabilityBindsLogger guards the Loom logging wiring: the graph
-// provides a *slog.Logger and the managed server consumes it, while nothing
+// provides a logging.Logger and the managed server consumes it, while nothing
 // installs a process-wide default logger.
 func TestLoomCapabilityBindsLogger(t *testing.T) {
 	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
@@ -837,7 +863,7 @@ func TestLoomCapabilityBindsLogger(t *testing.T) {
 		t.Fatalf("read di template: %v", err)
 	}
 	graphText := string(graph)
-	for _, want := range []string{"loom.Provide(NewLogger)", "func NewLogger() *slog.Logger", "logger *slog.Logger", "logging.New"} {
+	for _, want := range []string{"loom.Provide(NewLogger)", "func NewLogger() logging.Logger", "logger logging.Logger", "logging.New"} {
 		if !strings.Contains(graphText, want) {
 			t.Errorf("di template is missing %q", want)
 		}
@@ -1336,7 +1362,7 @@ func TestCronProviderSeamIsOwnedByCron(t *testing.T) {
 		t.Fatalf("read cron provider template: %v", err)
 	}
 	for _, want := range []string{
-		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, server *Server, deps *cron.Deps) (*cron.Scheduler, error)",
+		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *Server, deps *cron.Deps) (*cron.Scheduler, error)",
 		"__module__/internal/cron",
 		"loom.Hook",
 	} {

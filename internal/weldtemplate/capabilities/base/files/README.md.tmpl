@@ -104,8 +104,9 @@ alone.
 
 ## Logging
 
-`internal/logging` builds one `*slog.Logger` and the whole program depends on
-that type directly — there is no custom logger interface. It writes through an
+`internal/logging` builds one `logging.Logger` and the whole program depends on
+that interface. Only the default implementation depends on slog; DI, commands
+and capabilities use the backend-neutral contract. It writes through an
 injected `io.Writer`, so a test captures records in a buffer and nothing reaches
 for `os.Stderr` or `slog.Default`.
 
@@ -119,14 +120,18 @@ value, so a SQL statement stands out in a stream of request records.
 logger := logging.NewFromEnv(os.Stderr)             // LOG_LEVEL, LOG_FORMAT, NO_COLOR
 logger = logging.NewWithOptions(w, logging.Options{ // full control
 	Format: logging.TextFormat,
-	Level:  slog.LevelDebug,
+	Level:  logging.LevelDebug,
 })
 ```
 
-`logging.ParseLevel` turns a level name into a `slog.Level`, `logging.Err`
+`logging.ParseLevel` turns a level name into a `logging.Level`, `logging.Err`
 builds the conventional `error` attribute, and `logging.WithContext` /
 `logging.FromContext` carry a logger through a `context.Context`, so a function
-deep in a call chain needs no logger parameter.
+deep in a call chain needs no logger parameter. `Logger` provides Debug/Info/Warn/Error,
+their context variants, and immutable `With`/`WithGroup` derivation. Fields use
+key/value arguments or `logging.Any`/`logging.Group`; `logging.Valuer` supplies
+log-safe values (used by `config.Secret` for redaction). A new backend implements
+this interface and is returned by the DI provider; consumers need no changes.
 
 ## Layout
 

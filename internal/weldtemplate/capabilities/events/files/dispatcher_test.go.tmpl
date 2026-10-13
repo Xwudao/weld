@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"strings"
 	"sync"
 	"testing"
+
+	"__module__/internal/logging"
 )
 
 type orderPaid struct{ ID string }
@@ -97,7 +98,7 @@ func TestPublishJoinsListenerErrorsAndKeepsGoing(t *testing.T) {
 func TestPublishRecoversAPanickingListener(t *testing.T) {
 	t.Parallel()
 	var sink bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&sink, nil))
+	logger := logging.New(&sink, logging.TextFormat, &logging.Options{NoColor: true})
 	dispatcher := New(logger)
 	ran := false
 	On(dispatcher, func(context.Context, orderPaid) error { panic("boom") })
@@ -121,7 +122,7 @@ func TestPublishRecoversAPanickingListener(t *testing.T) {
 func TestPublishNeverLogsTheEventValue(t *testing.T) {
 	t.Parallel()
 	var sink bytes.Buffer
-	dispatcher := New(slog.New(slog.NewTextHandler(&sink, nil)))
+	dispatcher := New(logging.New(&sink, logging.TextFormat, &logging.Options{NoColor: true}))
 	On(dispatcher, func(context.Context, orderPaid) error { return errors.New("nope") })
 
 	if err := dispatcher.Publish(context.Background(), orderPaid{ID: "secret-value"}); err == nil {

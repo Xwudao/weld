@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -25,7 +27,7 @@ func (w *fakeWriter) Write(p []byte) (int, error) {
 
 // plain returns a text logger with the colors off, so a test can read the record
 // without stripping escapes.
-func plain(w *fakeWriter) *slog.Logger {
+func plain(w *fakeWriter) Logger {
 	return NewWithOptions(w, Options{Format: TextFormat, NoColor: true})
 }
 
@@ -85,7 +87,7 @@ func TestNewUnknownFormatFallsBackToText(t *testing.T) {
 
 func TestNewRespectsHandlerLevel(t *testing.T) {
 	w := &fakeWriter{}
-	logger := New(w, TextFormat, &slog.HandlerOptions{Level: slog.LevelWarn})
+	logger := New(w, TextFormat, &Options{Level: LevelWarn})
 	logger.Info("quiet")
 	logger.Warn("loud")
 	out := w.String()
@@ -169,9 +171,9 @@ func TestNewKeepsRFC3339TimeInJSON(t *testing.T) {
 // was handed.
 func TestNewTextHonoursCallerReplaceAttr(t *testing.T) {
 	w := &fakeWriter{}
-	options := &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-		if a.Key == slog.TimeKey {
-			return slog.Attr{}
+	options := &Options{ReplaceAttr: func(_ []string, a Field) Field {
+		if a.Key == "time" {
+			return Field{}
 		}
 		return a
 	}}
@@ -184,7 +186,7 @@ func TestNewTextHonoursCallerReplaceAttr(t *testing.T) {
 		t.Fatalf("record lost its message:\n%q", out)
 	}
 	if options.ReplaceAttr == nil {
-		t.Fatal("New mutated the caller's HandlerOptions")
+		t.Fatal("New mutated the caller's Options")
 	}
 }
 
@@ -261,7 +263,7 @@ func TestTextRecordWritesTypedValues(t *testing.T) {
 // flatten into dotted keys the way slog flattens them.
 func TestTextRecordFlattensGroups(t *testing.T) {
 	w := &fakeWriter{}
-	plain(w).With("app", "weld").WithGroup("http").Info("m", "status", 200, slog.Group("req", "id", 7))
+	plain(w).With("app", "weld").WithGroup("http").Info("m", "status", 200, Group("req", "id", 7))
 	out := w.String()
 	for _, want := range []string{"app=weld", "http.status=200", "http.req.id=7"} {
 		if !strings.Contains(out, want) {
@@ -308,14 +310,14 @@ func TestTextRecordWritesOneWritePerRecord(t *testing.T) {
 }
 
 func TestParseLevel(t *testing.T) {
-	cases := map[string]slog.Level{
-		"":        slog.LevelInfo,
-		"info":    slog.LevelInfo,
-		"INFO":    slog.LevelInfo,
-		" debug ": slog.LevelDebug,
-		"warn":    slog.LevelWarn,
-		"warning": slog.LevelWarn,
-		"error":   slog.LevelError,
+	cases := map[string]Level{
+		"":        LevelInfo,
+		"info":    LevelInfo,
+		"INFO":    LevelInfo,
+		" debug ": LevelDebug,
+		"warn":    LevelWarn,
+		"warning": LevelWarn,
+		"error":   LevelError,
 	}
 	for name, want := range cases {
 		got, err := ParseLevel(name)
@@ -340,7 +342,7 @@ func TestOptionsFromEnv(t *testing.T) {
 		"NO_COLOR":   "1",
 	}
 	options := OptionsFromEnv(func(key string) string { return env[key] })
-	if options.Format != JSONFormat || options.Level != slog.LevelDebug || !options.AddSource || !options.NoColor {
+	if options.Format != JSONFormat || options.Level != LevelDebug || !options.AddSource || !options.NoColor {
 		t.Fatalf("OptionsFromEnv = %+v", options)
 	}
 }
@@ -350,7 +352,7 @@ func TestOptionsFromEnv(t *testing.T) {
 func TestOptionsFromEnvIgnoresBadValues(t *testing.T) {
 	env := map[string]string{"LOG_FORMAT": "yaml", "LOG_LEVEL": "verbose", "LOG_SOURCE": "yes please"}
 	options := OptionsFromEnv(func(key string) string { return env[key] })
-	if options.Format != TextFormat || options.Level != slog.LevelInfo || options.AddSource || options.NoColor {
+	if options.Format != TextFormat || options.Level != LevelInfo || options.AddSource || options.NoColor {
 		t.Fatalf("OptionsFromEnv = %+v", options)
 	}
 }
@@ -371,8 +373,112 @@ func TestNewFromEnvReadsTheEnvironment(t *testing.T) {
 	}
 }
 
+// recordingHandler verifies that the adapter passes context and source metadata.
+type recordingHandler struct {
+	ctx    context.Context
+	record slog.Record
+}
+
+func (*recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(ctx context.Context, r slog.Record) error {
+	h.ctx, h.record = ctx, r.Clone()
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestContextMethodsPreserveContextLevelAndCaller(t *testing.T) {
+	h := &recordingHandler{}
+	logger := &slogLogger{handler: h}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancellation must not hide diagnostic records
+	methods := []struct {
+		log   func(context.Context, string, ...any)
+		level slog.Level
+	}{
+		{logger.DebugContext, slog.LevelDebug}, {logger.InfoContext, slog.LevelInfo},
+		{logger.WarnContext, slog.LevelWarn}, {logger.ErrorContext, slog.LevelError},
+	}
+	for _, method := range methods {
+		method.log(ctx, "diagnostic", "key", "value")
+		if h.ctx != ctx || h.record.Level != method.level || h.record.Message != "diagnostic" {
+			t.Fatalf("context or record lost: %v", h.record)
+		}
+		frame, _ := runtime.CallersFrames([]uintptr{h.record.PC}).Next()
+		if !strings.HasSuffix(frame.File, "logging_test.go") || !strings.Contains(frame.Function, "TestContextMethods") {
+			t.Fatalf("source points to adapter instead of caller: %+v", frame)
+		}
+	}
+}
+
+type secretValue string
+
+func (secretValue) LogValue() any { return "[REDACTED]" }
+
+func TestValuerRedactsFieldsGroupsAndBoundAttributes(t *testing.T) {
+	for _, format := range []Format{TextFormat, JSONFormat} {
+		w := &fakeWriter{}
+		logger := NewWithOptions(w, Options{Format: format, NoColor: true})
+		logger.With("bound", secretValue("bound-secret")).Info("safe",
+			"direct", secretValue("direct-secret"),
+			Group("nested", Any("secret", secretValue("group-secret"))))
+		for _, secret := range []string{"bound-secret", "direct-secret", "group-secret"} {
+			if strings.Contains(w.String(), secret) {
+				t.Fatalf("leaked %s: %s", secret, w.String())
+			}
+		}
+		if strings.Count(w.String(), "[REDACTED]") != 3 {
+			t.Fatalf("missing redaction: %s", w.String())
+		}
+	}
+}
+
+func TestDerivedLoggerDoesNotMutateParent(t *testing.T) {
+	w := &fakeWriter{}
+	parent := New(w, JSONFormat, nil)
+	parent.WithGroup("child").With("id", 7).Info("child")
+	parent.Info("parent")
+	lines := strings.Split(strings.TrimSpace(w.String()), "\n")
+	if len(lines) != 2 || strings.Contains(lines[1], "child") || strings.Contains(lines[1], "id") {
+		t.Fatalf("derived logger modified parent: %s", w.String())
+	}
+}
+
+func TestLoggerConcurrentUse(t *testing.T) {
+	w := &fakeWriter{}
+	logger := New(w, JSONFormat, nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			logger.With("worker", id).InfoContext(context.Background(), "work")
+		}(i)
+	}
+	wg.Wait()
+	if w.Writes != 10 {
+		t.Fatalf("writes = %d", w.Writes)
+	}
+}
+
+// A backend not based on slog can travel through the same context contract.
+type alternateLogger struct {
+	Logger
+	message string
+}
+
+func (l *alternateLogger) Info(msg string, _ ...any) { l.message = msg }
+func TestContextAcceptsAlternateImplementation(t *testing.T) {
+	logger := &alternateLogger{Logger: Nop()}
+	ctx := WithContext(context.Background(), logger)
+	FromContext(ctx).Info("alternate")
+	if logger.message != "alternate" {
+		t.Fatal("context did not retain custom implementation")
+	}
+}
+
 func TestContextRoundTrip(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	logger := New(&bytes.Buffer{}, TextFormat, nil)
 	ctx := WithContext(context.Background(), logger)
 	if got := FromContext(ctx); got != logger {
 		t.Fatalf("FromContext returned %p, want the stored logger %p", got, logger)

@@ -3,11 +3,12 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"__module__/internal/logging"
 )
 
 // TestLoadReadsStorageFromFile proves the storage section, including the access
@@ -103,7 +104,7 @@ func TestStorageLoadErrorDoesNotLeakSecret(t *testing.T) {
 }
 
 // TestStorageSecretsRedactEverywhere is the credential-safety sentinel for the
-// storage section: the access key and secret must not survive fmt, log/slog,
+// storage section: the access key and secret must not survive fmt, logging,
 // JSON or YAML.
 func TestStorageSecretsRedactEverywhere(t *testing.T) {
 	const sentinel = "sentinel-do-not-log"
@@ -120,9 +121,9 @@ func TestStorageSecretsRedactEverywhere(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	slog.New(slog.NewTextHandler(&buf, nil)).Info("storage", "access_key_id", cfg.Storage.AccessKeyID, "secret_access_key", cfg.Storage.SecretAccessKey)
+	logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true}).Info("storage", "access_key_id", cfg.Storage.AccessKeyID, "secret_access_key", cfg.Storage.SecretAccessKey)
 	if strings.Contains(buf.String(), sentinel) {
-		t.Fatalf("log/slog leaked the storage secret:\n%s", buf.String())
+		t.Fatalf("logging leaked the storage secret:\n%s", buf.String())
 	}
 
 	encoded, err := json.Marshal(cfg)

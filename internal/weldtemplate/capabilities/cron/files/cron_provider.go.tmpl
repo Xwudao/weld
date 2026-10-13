@@ -3,12 +3,13 @@ package di
 import (
 	"context"
 	"errors"
-	"log/slog"
 
 	"github.com/Xwudao/loom"
 
 	"__module__/internal/config"
 	"__module__/internal/cron"
+
+	"__module__/internal/logging"
 )
 
 // This file is the stable integration seam for wiring the cron scheduler into
@@ -26,7 +27,7 @@ import (
 // Add a field to cron.Deps (internal/cron/deps.go) for each dependency your jobs
 // use, and consume it here so Loom constructs it:
 //
-//	func NewCronDeps(logger *slog.Logger, publisher events.Publisher) *cron.Deps {
+//	func NewCronDeps(logger logging.Logger, publisher events.Publisher) *cron.Deps {
 //		return &cron.Deps{Logger: logger, Publisher: publisher}
 //	}
 //
@@ -34,7 +35,7 @@ import (
 // provider consumes it, so a job that publishes makes the graph construct
 // events.Publisher, and a job that needs nothing adds no dependency at all.
 // internal/cron/register.go reads the bundle from its job's second parameter.
-func NewCronDeps(logger *slog.Logger) *cron.Deps {
+func NewCronDeps(logger logging.Logger) *cron.Deps {
 	return &cron.Deps{Logger: logger}
 }
 
@@ -57,7 +58,7 @@ func NewCronDeps(logger *slog.Logger) *cron.Deps {
 // application's jobs are registered, and it registers none by default. The
 // scheduler takes no database or Redis lock, so several replicas each run their
 // own copy of every job.
-func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, server *Server, deps *cron.Deps) (*cron.Scheduler, error) {
+func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *Server, deps *cron.Deps) (*cron.Scheduler, error) {
 	location, err := cfg.Cron.Location()
 	if err != nil {
 		return nil, err
