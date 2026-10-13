@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"strconv"
 	"strings"
 )
 
@@ -15,18 +14,6 @@ import (
 // DecodeJSON. One mebibyte is generous for a JSON API and small enough that a
 // streaming client cannot exhaust memory.
 const DefaultMaxBytes = 1 << 20
-
-// DecodeError is a request-binding failure together with the HTTP transport
-// status it maps to and a message that is safe to send to the client.
-//
-// The status is a real transport status (400, 413, 415), never an invented
-// business code; WriteError turns it into the response envelope.
-type DecodeError struct {
-	Status  int
-	Message string
-}
-
-func (e *DecodeError) Error() string { return e.Message }
 
 // DecodeJSON decodes exactly one JSON value of type T from r.Body.
 //
@@ -69,25 +56,6 @@ func DecodeJSON[T any](r *http.Request, maxBytes int64, validate func(T) error) 
 		}
 	}
 	return value, nil
-}
-
-// QueryInt returns the named query parameter as an int.
-//
-// present reports whether the parameter was given, so a caller can tell "unset"
-// from an explicit zero. A present but non-integer value is a 400 *DecodeError.
-// It exists because a typed integer with absence semantics is genuinely useful;
-// a raw string parameter is read directly with r.URL.Query().Get and a path
-// parameter with r.PathValue, so no further path helper is provided.
-func QueryInt(r *http.Request, name string) (value int, present bool, err error) {
-	raw := r.URL.Query().Get(name)
-	if raw == "" {
-		return 0, false, nil
-	}
-	parsed, parseErr := strconv.Atoi(raw)
-	if parseErr != nil {
-		return 0, true, &DecodeError{Status: http.StatusBadRequest, Message: name + " must be an integer"}
-	}
-	return parsed, true, nil
 }
 
 // checkJSONContentType enforces a JSON media type, accepting the structured

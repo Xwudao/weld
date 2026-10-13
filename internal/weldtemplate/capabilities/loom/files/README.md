@@ -38,7 +38,7 @@ var projectModule = loom.Module(
 | `*cron.Scheduler` | `cron` | `mailsender.New` through `NewMailSender`, defined in the stable `mail_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*mailsender.Sender`. Construction never connects and never sends |
 | `*objectstore.Store` | `storage` | `objectstore.New` through `NewObjectStore`, defined in the stable `storage_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*objectstore.Store`. Construction never connects |
 | `*cron.Scheduler` | `cron` | `cron.New` through `NewScheduler`, defined in the stable `cron_provider.go` seam. Unlike the bindings above, the server graph root consumes it, so Loom always constructs it and its start/stop hooks run with the server. `NewScheduler` takes the server, so the socket is bound before the scheduler starts and the scheduler stops before the server. `NewCronJobs` in `internal/di/cron_jobs.go` injects services and binds their methods before startup. It starts no jobs unless that seam registers them |
-| `*httpserver.Server` | `http` | the composed mux plus its `loom.Hook` start/stop lifecycle |
+| `*httpserver.Server` | `http` | the framework-neutral runtime built with the shared `httpserver.NewHandler`; DI attaches `Start(ctx)` and `Stop(ctx)` to Loom hooks |
 | `*App` | `http` | the server graph root returned by `InitApp` |
 
 `internal/di` is the only package that knows the whole composition. The
@@ -58,9 +58,13 @@ Declare project-specific providers in `internal/di/providers.go`, then run
 Declare them once; every graph can consume them without copying registrations.
 
 HTTP policy wiring lives in `internal/di/http_policies.go`: add service
-parameters to `NewHTTPPolicies` and return named middleware. Route constants and
-mount prefixes remain in `internal/httpserver/policy.go`. Never import business
-services into httpserver, which the business modules themselves reference.
+parameters to `NewHTTPPolicies` and return named middleware. Route constants
+remain in `internal/httpserver/policy.go`; mount prefixes live in
+`internal/httpserver/mounts.go`, and error mapping in `internal/httpserver/errors.go`.
+The default admin policy denies all requests until real authentication and
+administrator authorization are configured. Never import business services into
+httpserver, which the business modules themselves reference. See
+`internal/httpserver/README.md` for handler composition and testing.
 
 ## The database is wired by hand
 
@@ -164,7 +168,7 @@ The server-only `*cron.Scheduler` is never available to a command.
 ### `di_test.go` is module-independent
 
 The regenerated `di_test.go` never names a module: it exercises configuration,
-the pool, the server lifecycle, the middleware chain and the route logging, and
+the pool, the server lifecycle and the middleware chain, and
 it builds those through the generated `newServer` seam rather than through a
 module's `Service`. Each module
 package tests its own routes in `internal/modules/<name>/module_test.go`, a file
@@ -191,6 +195,8 @@ The server binds the listen address synchronously: a port already in use makes
 `lifecycle.Start` fail, and a serve failure is reported to the serve command so
 it stops instead of waiting forever. When the pool is constructed, Loom runs its
 cleanup exactly once whether construction later fails or the lifecycle stops.
+HTTP shutdown honors the lifecycle context; if draining is canceled or exceeds
+its deadline, the runtime closes active connections before returning the error.
 
 Because the graph references concrete capability packages, installing a
 capability regenerates `di.go` and `loom_gen.go` for the new capability set; the

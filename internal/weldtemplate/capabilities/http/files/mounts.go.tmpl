@@ -1,0 +1,13 @@
+package httpserver
+
+// This project-owned seam is written once; weld never regenerates it.
+
+// APIPrefix is the default mount prefix for business modules. Change it to
+// "/api/v2", for example, to version the surface in one place.
+const APIPrefix = "/api"
+
+// ModulePrefix returns each module's mount path. Return "" for a module that
+// owns complete paths, or special-case a module without editing generated di.go.
+func ModulePrefix(name string) string {
+	return APIPrefix + "/" + name
+}

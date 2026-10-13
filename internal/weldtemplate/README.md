@@ -39,7 +39,8 @@ never arriving:
 | `generated` (implied by `di`, never declared) | the Loom generator | re-renders it from the installed capability set |
 
 Use `seam` for every file whose doc comment promises "weld writes this once and
-never regenerates it": `internal/httpserver/middleware.go` and `policy.go`, the
+never regenerates it": `internal/httpserver/middleware.go`, `mounts.go`,
+`policy.go` and `errors.go`, the
 `*_providers.go` wiring, the `register.go` registration files, the `Makefile`,
 `.gitignore`, `config.yml` and `config.example.yml`.
 
@@ -434,21 +435,18 @@ to patch an unmanaged file.
 
 ## Go route composition and the shared HTTP toolkit
 
-The Loom server graph (`internal/di/di.go`) owns `newMux`, the single route
-composition point: it registers the SPA, the JSON API and the installed business
-modules on one mux, and wraps it with the shared middleware chain. The
-`httpx.Router` records every route it registers, and in a development
-environment (`environment: local` or `development`) the graph logs the composed
-table with each route's policies at startup, so the surface and its coverage are
-visible without a request; production stays silent.
-`internal/httpserver/http.go` exposes the test seams:
+The Loom server graph (`internal/di/di.go`) supplies modules and the SPA to
+`httpserver.NewHandler(cfg, logger, policies, routes...)`, the shared production
+and test composition entry in `internal/httpserver/handler.go`. Route callbacks
+receive an `*httpx.Router`, just like a module's Register function. The builder
+installs named policies and project error mapping, registers routes on one mux,
+logs the development surface and applies the project middleware stack. Tests
+inject fake services and guards without opening a socket.
 
-- `NewHandler(cfg, logger, routes ...Route) http.Handler` builds a handler from
-  explicit routes, so tests compose a mux — and the real middleware chain,
-  including the configured CORS policy — without a socket or a capability.
-- `Chain(cfg, logger, handler) http.Handler` applies the project middleware chain
-  to an already-built handler. The server graph wraps its mux with it, so
-  production and tests serve the identical middleware stack.
+`httpx.Router` records each successful registration. In a development environment
+(`environment: local` or `development`) the handler builder logs the route table
+and policy coverage; production stays silent. `Chain(cfg, logger, handler)` is
+the lower-level entry for wrapping an already-built handler.
 
 The stack itself lives in `internal/httpserver/middleware.go`, a project-owned
 file written once and never regenerated. It declares
@@ -475,8 +473,8 @@ composable middleware (`Chain`, `RequestID`, `AccessLog`, `Recover`); and the
 cross-origin policy (`CORS`, `CORSConfig`) the project enables from `config.yml`,
 which answers a preflight before the router, refuses a disallowed origin, method
 or header, echoes the origin instead of `"*"` when credentials are allowed, and
-emits the matching `Vary` headers. It depends
-only on the standard library — binding takes a validator callback, so `httpx`
+emits the matching `Vary` headers. It uses the standard library and the project's
+logging interface — binding takes a validator callback, so `httpx`
 never imports `go-validate` (a DTO that wants it wires it in through the
 callback), and the CORS middleware takes its policy as a value rather than
 reading the project's configuration types. The `AccessLog`
@@ -484,7 +482,7 @@ recorder forwards `Flush` and `Hijack`, so a streaming or SSE response and a
 WebSocket
 upgrade keep working.
 
-`web` and each business module register their handler on the Loom server graph's `newMux`
+`web` and each business module register through the Loom graph's `composeHandler`
 instead of a per-capability route file, so no Go import block has to be patched
 and no `init` performs route registration.
 
@@ -496,7 +494,7 @@ wins on the mux, because an uninstalled API must not answer with the SPA.
 ## The shared response envelope
 
 A DTO that implements `Validate() error` is validated automatically after
-binding, and the `httpx`
+binding (including pointer-receiver validators), and the `httpx`
 typed helpers call it, so the rules run at
 runtime and there is no separate description to keep in sync. `Register`
 declares each route in one place — the method, the relative path, the binding and
@@ -590,5 +588,5 @@ down) and the integration test isolates itself in its own schema with no global
 `DROP TABLE`. For the logging milestone it proves `base` ships the `logging`
 factory and `main` logs a failed command through it (no `fmt.Fprintln`, no
 process default logger), that the `serve` command records the listening and
-shutdown lines through the injected logger while `httpserver.Serve` itself never
-writes to the process streams, and that the Loom graph provides and injects one.
+shutdown lines through the injected logger while the HTTP runtime never
+writes directly to the process streams, and that the Loom graph provides and injects one.

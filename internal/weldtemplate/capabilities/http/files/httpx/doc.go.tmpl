@@ -1,0 +1,22 @@
+// Package httpx is the small HTTP toolkit the generated API and business
+// modules share.
+//
+// It owns three things and nothing else:
+//
+//   - the default JSON response envelope, {code, msg, data}, and the writers
+//     that emit it (JSON, Error) next to the raw writers for responses that must
+//     stay unwrapped (RawJSON, RawText, Bytes, NoContent);
+//   - typed request binding (DecodeJSON, QueryInt, BindQuery) with a configurable
+//     body limit, a content-type check, single-value and unknown-field rejection
+//     and an optional code-first validator callback, plus the Router and typed
+//     endpoint helpers (Get, Post, NoInput, ...) that bind and respond for a
+//     handler;
+//   - the composable net/http middleware and the three middlewares the generated
+//     server installs by default (RequestID, AccessLog, Recover), alongside the
+//     named route policies a module references and the composition root defines.
+//
+// It uses the standard library and the project's logging interface. It does not
+// import the project's go-validate rules: binding takes a validator
+// callback, so a DTO wires its validation in without this package knowing
+// about it, and it defines no policy names of its own.
+package httpx

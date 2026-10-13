@@ -1,0 +1,72 @@
+package httpx
+
+import (
+	"errors"
+	"net/http"
+)
+
+// ErrorHandler maps and observes a typed endpoint failure. It must write the
+// response. Router.WithErrorHandler installs it for the router and its groups.
+type ErrorHandler func(http.ResponseWriter, *http.Request, error)
+
+// DecodeError is a request-binding failure together with the HTTP transport
+// status it maps to and a message that is safe to send to the client.
+//
+// The status is a real transport status (400, 413, 415), never an invented
+// business code; WriteError turns it into the response envelope.
+type DecodeError struct {
+	Status  int
+	Message string
+}
+
+func (e *DecodeError) Error() string { return e.Message }
+
+// HTTPError is a handler failure that controls the response: it carries the
+// transport status and a client-safe message. A handler returns one when it
+// wants a specific status and message; any other error becomes the fixed
+// internal-error envelope, so an unexpected error never leaks its message.
+//
+// The status is a real transport status, never an invented business code, so
+// the envelope's code keeps repeating the status the way JSON and Error write
+// it.
+type HTTPError struct {
+	Status  int
+	Message string
+}
+
+func (e *HTTPError) Error() string { return e.Message }
+
+// NewHTTPError returns an error that maps to the given transport status and
+// client-safe message.
+func NewHTTPError(status int, message string) *HTTPError {
+	return &HTTPError{Status: status, Message: message}
+}
+
+// BadRequest, Unauthorized, Forbidden, NotFound and Conflict are the common
+// mappings, so a handler returns httpx.NotFound("item not found") instead of
+// repeating the constructor.
+func BadRequest(message string) *HTTPError { return NewHTTPError(http.StatusBadRequest, message) }
+func Unauthorized(message string) *HTTPError {
+	return NewHTTPError(http.StatusUnauthorized, message)
+}
+func Forbidden(message string) *HTTPError { return NewHTTPError(http.StatusForbidden, message) }
+func NotFound(message string) *HTTPError  { return NewHTTPError(http.StatusNotFound, message) }
+func Conflict(message string) *HTTPError  { return NewHTTPError(http.StatusConflict, message) }
+
+// WriteError maps err to an error envelope. A *DecodeError carries the status
+// and message binding chose, an *HTTPError the status and message a handler
+// chose, and any other error becomes the fixed internal-error envelope, so an
+// unexpected error never leaks its message.
+func WriteError(w http.ResponseWriter, err error) {
+	var decodeErr *DecodeError
+	if errors.As(err, &decodeErr) {
+		Error(w, decodeErr.Status, decodeErr.Message)
+		return
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		Error(w, httpErr.Status, httpErr.Message)
+		return
+	}
+	Error(w, ErrorStatus, ErrorMsg)
+}

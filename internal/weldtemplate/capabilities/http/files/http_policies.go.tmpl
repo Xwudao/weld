@@ -1,46 +1,28 @@
 package di
 
 import (
-	nethttp "net/http"
-	"strings"
+	"net/http"
 
 	"__module__/internal/httpserver"
 	"__module__/internal/httpx"
 )
 
-// NewHTTPPolicies wires the application's named route policies. Add service
-// parameters here and use them to build middleware, then run make generate.
-// The HTTP graph consumes this provider automatically. Keep business service
-// dependencies here, not in httpserver, to avoid package import cycles.
-//
-// For example, with an auth service that provides middleware:
-//
-//	func NewHTTPPolicies(auth auth.Service) ([]httpserver.NamedPolicy, error) {
-//		return []httpserver.NamedPolicy{
-//			{Name: httpserver.PolicyAdmin, Middleware: auth.AdminGuard()},
-//		}, nil
-//	}
-//
-// Returning an error fails graph construction before the server starts.
-// This file is written once; later weld add commands preserve your edits.
+// NewHTTPPolicies wires named policies. Inject authentication services here,
+// replace AdminGuard with their middleware, then run make generate.
+// Keep service dependencies out of httpserver to avoid package import cycles.
+// This file is written once and remains project-owned.
 func NewHTTPPolicies() ([]httpserver.NamedPolicy, error) {
 	return []httpserver.NamedPolicy{
 		{Name: httpserver.PolicyAdmin, Middleware: AdminGuard()},
 	}, nil
 }
 
-// AdminGuard is a replaceable example, not authentication: it accepts any
-// non-empty bearer token. Replace it with the application's real JWT/session
-// check. Dependencies belong on NewHTTPPolicies, which can close over them.
+// AdminGuard denies all requests until real authentication and administrator
+// authorization are configured. A bearer token alone is never proof of access.
 func AdminGuard() httpx.Middleware {
-	return func(next nethttp.Handler) nethttp.Handler {
-		return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-			authorization := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authorization, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")) == "" {
-				httpx.Error(w, nethttp.StatusUnauthorized, "authentication required")
-				return
-			}
-			next.ServeHTTP(w, r)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			httpx.Error(w, http.StatusForbidden, "administrator policy is not configured")
 		})
 	}
 }

@@ -22,23 +22,20 @@ type envelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// newTestMux mounts the module and defines its admin policy with a test guard,
-// so the routes are exercised in process with no socket and no database.
-func newTestMux() *nethttp.ServeMux {
-	mux := nethttp.NewServeMux()
-	router := httpx.NewRouter(mux).
-		WithPolicy(httpserver.PolicyAdmin, testAdminGuard).
-		Group(testPrefix)
-	Register(router, NewDemoService())
-	return mux
+// newTestMux uses the same handler composition as production, with an
+// explicitly injected test-only policy and demo service.
+func newTestMux() nethttp.Handler {
+	return httpserver.NewHandler(nil, nil, []httpserver.NamedPolicy{
+		{Name: httpserver.PolicyAdmin, Middleware: testAdminGuard},
+	}, func(router *httpx.Router) { Register(router.Group(testPrefix), NewDemoService()) })
 }
 
-// testAdminGuard mirrors the shipped placeholder policy: a non-empty bearer
-// token is accepted and anything else is rejected before the handler runs.
+// testAdminGuard is a test fake, not the shipped fail-closed policy. It accepts
+// only the known test token so tests can exercise administrator handlers.
 func testAdminGuard(next nethttp.Handler) nethttp.Handler {
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		authorization := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authorization, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")) == "" {
+		if authorization != "Bearer test-token" {
 			httpx.Error(w, nethttp.StatusUnauthorized, "authentication required")
 			return
 		}

@@ -1,0 +1,26 @@
+package httpserver
+
+import (
+	"errors"
+	"net/http"
+
+	"__module__/internal/httpx"
+	"__module__/internal/logging"
+)
+
+// errorHandler is the project-owned domain-error mapping seam. Map domain
+// errors here (using errors.Is/As) rather than coupling services to HTTP types.
+// Error types should live in an independent domain package: importing a module
+// that itself imports httpserver would create a package cycle.
+// Unmapped failures are logged with their request ID and redacted for clients.
+func errorHandler(logger logging.Logger) httpx.ErrorHandler {
+	return func(w http.ResponseWriter, r *http.Request, err error) {
+		var transport *httpx.HTTPError
+		var binding *httpx.DecodeError
+		if !errors.As(err, &transport) && !errors.As(err, &binding) && logger != nil {
+			logger.Error("http endpoint failed", "error", err, "path", r.URL.Path,
+				"request_id", httpx.RequestIDFrom(r.Context()))
+		}
+		httpx.WriteError(w, err)
+	}
+}

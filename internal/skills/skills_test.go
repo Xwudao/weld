@@ -95,7 +95,7 @@ func TestRenderListsManagedFilesSorted(t *testing.T) {
 	m.Files = []project.ManagedFile{
 		{Path: "internal/httpserver/server.go", Capability: "http"},
 		{Path: "go.mod", Capability: "base"},
-		{Path: "internal/httpserver/http.go", Capability: "http"},
+		{Path: "internal/httpserver/handler.go", Capability: "http"},
 		{Path: "main.go", Capability: "base"},
 	}
 	body, err := Render(m, template.Load())
@@ -106,7 +106,7 @@ func TestRenderListsManagedFilesSorted(t *testing.T) {
 	if !strings.Contains(text, "### Files weld manages in this project") {
 		t.Fatalf("managed file index missing:\n%s", text)
 	}
-	order := []string{"`go.mod`", "`internal/httpserver/http.go`", "`internal/httpserver/server.go`", "`main.go`"}
+	order := []string{"`go.mod`", "`internal/httpserver/handler.go`", "`internal/httpserver/server.go`", "`main.go`"}
 	previous := -1
 	for _, path := range order {
 		at := strings.Index(text, path)

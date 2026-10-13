@@ -1,6 +1,6 @@
 {
   "name": "cron",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "kind": "add",
   "summary": "Opt-in in-process scheduler: a named job registry with explicit Start/Stop, five-field cron specs or fixed intervals (Every, DailyAt, WeeklyOn, MonthlyOn), overlap skipping, panic recovery and a UTC-default timezone. Jobs are ordinary func(context.Context) error methods, wired to injected services in internal/di/cron_jobs.go before startup. Job errors are logged automatically. Installing it schedules nothing on its own; the scheduler starts and stops with the serve command through the Loom graph.",
   "requires": ["http"],

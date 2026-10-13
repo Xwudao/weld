@@ -225,9 +225,9 @@ func TestAddWebInstallsHTTPDependency(t *testing.T) {
 		"internal/web/web_test.go",
 		"internal/web/dist/.gitkeep",
 		// http capability, installed as a dependency, and its Loom graph
-		"internal/httpserver/http.go",
+		"internal/httpserver/handler.go",
 		"internal/httpserver/server.go",
-		"internal/httpserver/http_test.go",
+		"internal/httpserver/handler_test.go",
 		"internal/app/serve.go",
 		"internal/app/serve_test.go",
 		"internal/di/di.go",
@@ -280,8 +280,8 @@ func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
 	if got, want := strings.Join(result.Installed, ","), "config,loom,http"; got != want {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "internal/httpserver/http.go")); err != nil {
-		t.Fatalf("internal/httpserver/http.go missing: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "internal/httpserver/handler.go")); err != nil {
+		t.Fatalf("internal/httpserver/handler.go missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "internal/app/serve.go")); err != nil {
 		t.Fatalf("serve command missing: %v", err)
@@ -292,7 +292,7 @@ func TestAddHTTPAloneInstallsOnlyHTTP(t *testing.T) {
 	// With only http installed the Loom server graph exists and serves nothing
 	// beyond the middleware chain.
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	if !strings.Contains(di, "loom.Graph[*App](") || !strings.Contains(di, "func composeMux(") {
+	if !strings.Contains(di, "loom.Graph[*App](") || !strings.Contains(di, "func composeHandler(") {
 		t.Fatalf("the Loom server graph is missing:\n%s", di)
 	}
 
@@ -330,7 +330,7 @@ func TestAddWebIsIdempotent(t *testing.T) {
 	add(t, dir, "web")
 
 	before := readFile(t, filepath.Join(dir, "Makefile"))
-	httpBefore := readFile(t, filepath.Join(dir, "internal/httpserver/http.go"))
+	httpBefore := readFile(t, filepath.Join(dir, "internal/httpserver/handler.go"))
 	manifestBefore := readFile(t, filepath.Join(dir, project.ManifestName))
 
 	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "web")
@@ -353,7 +353,7 @@ func TestAddWebIsIdempotent(t *testing.T) {
 	if readFile(t, filepath.Join(dir, "Makefile")) != before {
 		t.Fatal("Makefile changed on repeat add")
 	}
-	if readFile(t, filepath.Join(dir, "internal/httpserver/http.go")) != httpBefore {
+	if readFile(t, filepath.Join(dir, "internal/httpserver/handler.go")) != httpBefore {
 		t.Fatal("httpserver composition changed on repeat add")
 	}
 	if readFile(t, filepath.Join(dir, project.ManifestName)) != manifestBefore {
@@ -423,7 +423,7 @@ func TestAddWithDependenciesInstallsRequirements(t *testing.T) {
 	if err := result.Apply(); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	for _, path := range []string{"internal/config/config.go", "internal/di/di.go", "internal/httpserver/http.go"} {
+	for _, path := range []string{"internal/config/config.go", "internal/di/di.go", "internal/httpserver/handler.go"} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
@@ -477,7 +477,7 @@ func TestAddWebRejectsUnmanagedFile(t *testing.T) {
 	if readFile(t, filepath.Join(dir, project.ManifestName)) != manifestBefore {
 		t.Fatal("manifest changed on conflicting add")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "internal/httpserver/http.go")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "internal/httpserver/handler.go")); !os.IsNotExist(err) {
 		t.Fatal("partial files were written on failure")
 	}
 }

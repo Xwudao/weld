@@ -87,7 +87,7 @@ func TestNewAddListLifecycle(t *testing.T) {
 		t.Fatalf("add web did not write the frontend: %v", err)
 	}
 	// web requires http, which the same command installs without being asked.
-	if _, err := os.Stat(filepath.Join(project, "internal", "httpserver", "http.go")); err != nil {
+	if _, err := os.Stat(filepath.Join(project, "internal", "httpserver", "handler.go")); err != nil {
 		t.Fatalf("add web did not resolve the http dependency: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func TestAddMissingDependenciesRequiresFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add web --with-dependencies: %v", err)
 	}
-	if !strings.Contains(out, "internal/httpserver/http.go") {
+	if !strings.Contains(out, "internal/httpserver/handler.go") {
 		t.Fatalf("add web output = %q", out)
 	}
 }
@@ -539,7 +539,7 @@ func TestAddModuleCommand(t *testing.T) {
 		t.Fatalf("add module did not write the module: %v", err)
 	}
 	// The module needs http, which the same command installs without being asked.
-	if _, err := os.Stat(filepath.Join(dir, "internal", "httpserver", "http.go")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "internal", "httpserver", "handler.go")); err != nil {
 		t.Fatalf("add module did not resolve the http dependency: %v", err)
 	}
 

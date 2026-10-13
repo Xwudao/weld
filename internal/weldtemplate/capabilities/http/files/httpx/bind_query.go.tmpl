@@ -9,7 +9,28 @@ import (
 	"strings"
 )
 
-// BindQuery binds T from the request's path parameters and URL query.
+// QueryInt returns the named query parameter as an int.
+//
+// present reports whether the parameter was given, so a caller can tell "unset"
+// from an explicit zero. A present but non-integer value is a 400 *DecodeError.
+// It exists because a typed integer with absence semantics is genuinely useful;
+// a raw string parameter is read directly with r.URL.Query().Get and a path
+// parameter with r.PathValue, so no further path helper is provided.
+func QueryInt(r *http.Request, name string) (value int, present bool, err error) {
+	values, ok := r.URL.Query()[name]
+	if !ok || len(values) == 0 {
+		return 0, false, nil
+	}
+	parsed, parseErr := strconv.Atoi(values[0])
+	if parseErr != nil {
+		return 0, true, &DecodeError{Status: http.StatusBadRequest, Message: name + " must be an integer"}
+	}
+	return parsed, true, nil
+}
+
+// BindQuery binds a struct or *struct T from path parameters and URL query.
+// Unsupported target types fail explicitly; missing values remain unset and
+// present empty non-string scalar values are rejected.
 //
 // A field is bound only when it carries a `path:"name"` or `query:"name"` tag,
 // so binding is explicit and never guesses a name from a field. A field without
@@ -17,7 +38,7 @@ import (
 // "no parameters" contract.
 //
 // The supported field kinds are string, bool, the sized integer kinds, the
-// unsigned kinds, float64, a []string for a repeated query parameter, and a
+// unsigned kinds, float32/float64, a []string for repeated query parameters, and a
 // pointer to any of those for an optional value. A value that cannot be parsed
 // is a 400 *DecodeError, so a malformed query is rejected exactly the way a
 // malformed JSON body is.
@@ -63,8 +84,14 @@ func bindTagged(dst any, tag string, lookup func(name string) ([]string, bool)) 
 		return errors.New("httpx: bind target must be a non-nil pointer to a struct")
 	}
 	value := pointer.Elem()
+	if value.Kind() == reflect.Pointer && value.Type().Elem().Kind() == reflect.Struct {
+		if value.IsNil() {
+			value.Set(reflect.New(value.Type().Elem()))
+		}
+		value = value.Elem()
+	}
 	if value.Kind() != reflect.Struct {
-		return nil
+		return errors.New("httpx: bind target must be a struct or *struct")
 	}
 	typ := value.Type()
 	for i := 0; i < typ.NumField(); i++ {
@@ -104,24 +131,25 @@ func fieldTagName(field reflect.StructField, tag string) (string, bool) {
 // absent and points at the parsed value otherwise.
 func assignField(field reflect.Value, name string, raw []string) error {
 	if field.Kind() == reflect.Pointer {
-		if len(raw) == 0 || (raw[0] == "" && field.Type().Elem().Kind() != reflect.String) {
+		if len(raw) == 0 {
 			return nil
 		}
 		element := reflect.New(field.Type().Elem())
-		if err := setScalar(element.Elem(), name, raw[0]); err != nil {
+		if err := assignField(element.Elem(), name, raw); err != nil {
 			return err
 		}
 		field.Set(element)
 		return nil
 	}
 	if field.Kind() == reflect.Slice && field.Type().Elem().Kind() == reflect.String {
-		field.Set(reflect.ValueOf(append([]string(nil), raw...)))
+		values := reflect.MakeSlice(field.Type(), len(raw), len(raw))
+		for i, item := range raw {
+			values.Index(i).SetString(item)
+		}
+		field.Set(values)
 		return nil
 	}
 	if len(raw) == 0 {
-		return nil
-	}
-	if raw[0] == "" && field.Kind() != reflect.String {
 		return nil
 	}
 	return setScalar(field, name, raw[0])

@@ -3,6 +3,7 @@ package httpx
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -179,4 +180,108 @@ type hijackRecorder struct {
 func (h *hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	h.hijacked = true
 	return nil, nil, nil
+}
+
+func TestRecoverTracksCommitmentIndependently(t *testing.T) {
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(&writerWrapper{w}, r)
+		})
+	}
+	for _, tc := range []struct {
+		name       string
+		middleware []Middleware
+	}{
+		{"standalone", []Middleware{Recover(nil)}},
+		{"nil access logger", []Middleware{AccessLog(nil), Recover(nil)}},
+		{"wrapper inside", []Middleware{Recover(nil), wrap}},
+		{"reordered", []Middleware{Recover(nil), AccessLog(testLogger(&bytes.Buffer{}))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			handler := Chain(tc.middleware...)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("partial"))
+				panic("failure")
+			}))
+			defer func() {
+				if recover() != http.ErrAbortHandler {
+					t.Error("committed panic did not abort")
+				}
+				if w.Body.String() != "partial" {
+					t.Fatalf("corrupted body: %s", w.Body)
+				}
+			}()
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		})
+	}
+}
+
+type writerWrapper struct{ http.ResponseWriter }
+
+func (w *writerWrapper) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func TestRecoverTracksFlushThroughWrapper(t *testing.T) {
+	handler := Recover(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := http.NewResponseController(&writerWrapper{w}).Flush(); err != nil {
+			t.Fatal(err)
+		}
+		panic("after flush")
+	}))
+	w := httptest.NewRecorder()
+	defer func() {
+		if recover() != http.ErrAbortHandler || !w.Flushed {
+			t.Error("flush commitment not tracked")
+		}
+	}()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+type headerHistory struct {
+	http.ResponseWriter
+	codes []int
+}
+
+func (w *headerHistory) WriteHeader(status int) { w.codes = append(w.codes, status) }
+
+func TestResponseRecorderTracksFinalStatus(t *testing.T) {
+	history := &headerHistory{ResponseWriter: httptest.NewRecorder()}
+	recorder := &responseRecorder{ResponseWriter: history}
+	recorder.WriteHeader(http.StatusEarlyHints)
+	if recorder.status != 0 {
+		t.Fatal("informational response committed final status")
+	}
+	recorder.WriteHeader(http.StatusCreated)
+	recorder.WriteHeader(http.StatusInternalServerError)
+	if recorder.statusCode() != http.StatusCreated || len(history.codes) != 2 {
+		t.Fatalf("status=%d headers=%v", recorder.statusCode(), history.codes)
+	}
+}
+
+func TestResponseRecorderPreservesControllerErrors(t *testing.T) {
+	// A wrapper with no Unwrap/Flusher intentionally hides flush support.
+	underlying := struct{ http.ResponseWriter }{httptest.NewRecorder()}
+	recorder := &responseRecorder{ResponseWriter: underlying}
+	if err := http.NewResponseController(recorder).Flush(); !errors.Is(err, http.ErrNotSupported) {
+		t.Fatalf("Flush = %v", err)
+	}
+	if recorder.status != 0 {
+		t.Fatal("unsupported flush marked response committed")
+	}
+}
+
+func TestAccessLogRecordsAbortedResponse(t *testing.T) {
+	var sink bytes.Buffer
+	handler := Chain(AccessLog(testLogger(&sink)), Recover(nil))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		panic("failure")
+	}))
+	defer func() {
+		if recover() != http.ErrAbortHandler {
+			t.Error("expected abort")
+		}
+		if !strings.Contains(sink.String(), "bytes=7") {
+			t.Fatalf("abort was not access-logged: %s", sink.String())
+		}
+	}()
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 }

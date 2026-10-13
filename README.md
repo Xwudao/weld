@@ -133,13 +133,16 @@ Capabilities:
   binding, and the composable middleware chain; the global stack is declared in
   the stable, project-owned `internal/httpserver/middleware.go` and the route
   policies in `internal/di/http_policies.go`, with service injection; route names
-  and mount prefixes live in `internal/httpserver/policy.go`. The router records every route it
+  live in `internal/httpserver/policy.go`, while mount prefixes live in
+  `internal/httpserver/mounts.go` and error mapping in `internal/httpserver/errors.go`. The router records every route it
   registers (`Routes`, `LogRoutes`, `PrintRoutes`), and the composition logs the
   table with each route's policies at startup in a development environment. Its
-  `Serve` takes the injected
-  `logging.Logger`, and `serve` reads the listen address through the shared
+  managed `Server` takes the injected `logging.Logger`, and `serve` reads the listen address through the shared
   `config` loader. CORS is off until `config.yml`'s `cors` section enables it
-  (see [CORS](#cors)); no authentication or rate limiting is enabled by default.
+  (see [CORS](#cors)); no global authentication or rate limiting is enabled by
+  default. The named administrator policy denies all requests until real
+  authentication and authorization are wired. Generated projects include
+  `internal/httpserver/README.md` with composition, binding and testing examples.
 - `web` (add) — React + TypeScript + Vite frontend, served by `http`.
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository. Requires `loom` but not
@@ -276,14 +279,12 @@ same serve lifecycle. Commands are the only init-time command registration
 point; HTTP routes are not registered at init time.
 2. **Go route composition** — the regenerated Loom server graph in
    `internal/di/di.go` owns the composition, which registers the SPA and the
-   installed business modules on one mux. `internal/httpserver/http.go`
-   exposes `NewHandler(cfg, logger, routes ...Route)` as the injectable test seam
-   and
-   `httpserver.Chain(cfg, logger, handler)` applies the project middleware stack
-   (declared in the stable `internal/httpserver/middleware.go`, reading the
-   cross-origin policy from the configuration). The server graph
-   wraps the mux it composes with `Chain`, so production and tests serve
-   identical middleware. Composition is explicit and in one place: no global
+   installed business modules on one mux. `internal/httpserver/handler.go`
+   exposes `NewHandler(cfg, logger, policies, routes ...Route)` as the shared
+   production/test entry. Each `Route` receives an `*httpx.Router`, just like a
+   business module. The builder defines policies, installs project error mapping,
+   logs development routes and applies the project middleware stack from
+   `internal/httpserver/middleware.go` (including configured CORS). Composition is explicit and in one place: no global
    route registry, no per-capability route file, no init-time route
    registration.
 3. **File markers** — `Makefile` and `.gitignore` regions for the frontend build
@@ -346,7 +347,7 @@ upgrade may do with it:
 |---|---|---|
 | `payload` (the default) | `internal/httpx/*.go`, `README.md` | rewritten while you have not changed it; otherwise reported with a diff |
 | `patched` | `internal/config/config.go` | the newer payload supplies the skeleton and your live marker regions are spliced into it |
-| `seam` | `internal/httpserver/middleware.go`, `internal/httpserver/policy.go`, `internal/di/providers.go`, `internal/di/http_policies.go`, `internal/di/events_listeners.go`, `internal/di/cron_jobs.go`, capability provider seams, `internal/data/seeder/register.go`, the `Makefile`, `.gitignore`, `config.yml` | written once, then yours: **never rewritten**, reported with a diff when the shipped version moves |
+| `seam` | `internal/httpserver/middleware.go`, `internal/httpserver/mounts.go`, `internal/httpserver/policy.go`, `internal/httpserver/errors.go`, `internal/di/providers.go`, `internal/di/http_policies.go`, `internal/di/events_listeners.go`, `internal/di/cron_jobs.go`, capability provider seams, `internal/data/seeder/register.go`, the `Makefile`, `.gitignore`, `config.yml` | written once, then yours: **never rewritten**, reported with a diff when the shipped version moves |
 | `generated` | `internal/di/di.go`, `internal/di/di_test.go` | re-rendered from the graph, never merged, never pruned |
 
 `go.mod` and `go.sum` belong to the Go toolchain: `go mod tidy`, every build and
@@ -547,10 +548,11 @@ What Loom binds, and why it is not ceremonial:
   and is **not** connected at build, test or startup, so no database is needed;
   the constructor returns a cleanup that Loom runs exactly once, whether
   construction later fails or the lifecycle stops normally.
-- `*httpserver.Server` — the composed mux plus its `loom.Hook` start/stop
-  lifecycle. `OnStart` binds the listen address synchronously, so a port already
-  in use fails `Start`; the serve command waits for a signal or a reported serve
-  failure, then stops gracefully.
+- `*httpserver.Server` — the framework-neutral HTTP runtime. DI registers its
+  `Start(ctx)` and `Stop(ctx)` as Loom hooks. Startup binds synchronously; stop
+  honors the application shutdown context and forcibly closes active connections
+  if draining times out. `Addr()` exposes the bound address and `Fail()` reports
+  the serve result. The serve command waits for a signal or a runtime failure.
 - `*cron.Scheduler` (`cron`) — the graph root consumes the scheduler, so it is
   always constructed and its `loom.Hook` start/stop run with the server: the
   socket is bound before the scheduler starts and the scheduler stops before the
@@ -964,7 +966,7 @@ Test conventions:
 
 - No test opens a socket to a service. HTTP behavior is asserted with
   `net/http/httptest` against handlers built from injected routes/fixtures
-  (`httpserver.NewHandler(cfg, logger, routes...)`, and `web.Handler` over an
+  (`httpserver.NewHandler(cfg, logger, policies, routes...)`, and `web.Handler` over an
   `fstest.MapFS`). The generated `internal/httpx` test covers the envelope
   writers, typed binding (content type, body limit, unknown field, trailing
   JSON) and the middleware (order, request id, recovery, Flusher/Hijacker
@@ -972,14 +974,10 @@ Test conventions:
   before the handler, the refused origin, method and header, the safelisted
   header, the actual request's headers, the plain `OPTIONS` left to the router,
   the wildcard never paired with credentials, the case-insensitive match and the
-  `Vary` and max-age output. The generated graph tests bind an ephemeral
-  loopback socket only to prove that an
-  occupied port fails `Start` and that a serve failure is reported, and close it
-  immediately. The generated `internal/httpserver` test occupies a loopback port
-  with `httptest` to prove `Serve` reports the bind failure without logging a
-  listening line, and closes the occupying server; it also proves the composed
-  chain reads the configured `cors` section (a preflight is answered) and sends
-  no CORS header while it is disabled.
+  `Vary` and max-age output. Loopback-only server tests verify occupied-port
+  startup failure, runtime failure reporting, graceful shutdown and forced
+  connection closure when the caller cancels shutdown. Handler tests cover
+  policies, error logging, development route logging and configured CORS.
 - The generated `serve` command is exercised as a Cobra command tree
   (`internal/app/serve_test.go`): the root builds the serve command, the shared
   `--config`/`--addr` flags parse and their precedence resolves, and the

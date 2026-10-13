@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 )
 
@@ -37,7 +38,9 @@ type endpoint struct {
 	open bool
 }
 
-// Option configures one typed endpoint registration.
+// Option configures route registration. Policy/Open apply to both raw and
+// typed routes; status, body-limit and no-content options apply only to typed
+// endpoints.
 type Option func(*endpoint)
 
 // WithStatus sets the transport status of a successful response. It defaults to
@@ -85,6 +88,12 @@ func resolveEndpoint(opts []Option) *endpoint {
 	resolved := &endpoint{status: http.StatusOK, maxBytes: DefaultMaxBytes}
 	for _, opt := range opts {
 		opt(resolved)
+	}
+	if resolved.status < 200 || resolved.status > 599 {
+		panic("httpx: endpoint status must be a final HTTP status (200..599)")
+	}
+	if resolved.status == http.StatusNoContent || resolved.status == http.StatusNotModified {
+		resolved.noContent = true
 	}
 	return resolved
 }
@@ -139,30 +148,44 @@ func register[Req, Resp any](
 	cfg := resolveEndpoint(opts)
 	names := r.routePolicyNames(cfg)
 	path := r.fullPattern(pattern)
-	r.record(method+" "+path, names)
 	r.mux.Handle(method+" "+path, r.wrap(Chain(r.resolvePolicies(names)...)(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		req, err := bind(request, cfg)
 		if err != nil {
-			WriteError(w, err)
+			r.writeError(w, request, err)
 			return
 		}
-		if validator, ok := any(req).(Validator); ok {
-			if err := validator.Validate(); err != nil {
-				Error(w, http.StatusBadRequest, err.Error())
-				return
-			}
+		if err := validateRequest(&req); err != nil {
+			r.writeError(w, request, BadRequest(err.Error()))
+			return
 		}
 		resp, err := handler(request.Context(), req)
 		if err != nil {
-			WriteError(w, err)
+			r.writeError(w, request, err)
 			return
 		}
 		if cfg.noContent {
 			NoContent(w, cfg.noContentStatus())
 			return
 		}
-		JSON(w, cfg.status, resp)
+		body, err := json.Marshal(Envelope{Code: cfg.status, Msg: SuccessMsg, Data: resp})
+		if err != nil {
+			r.writeError(w, request, err)
+			return
+		}
+		writeBody(w, cfg.status, "application/json; charset=utf-8", body)
 	}))))
+	r.record(method+" "+path, names)
+}
+
+// validateRequest supports both value and pointer receiver validators.
+func validateRequest[Req any](req *Req) error {
+	if validator, ok := any(*req).(Validator); ok {
+		return validator.Validate()
+	}
+	if validator, ok := any(req).(Validator); ok {
+		return validator.Validate()
+	}
+	return nil
 }
 
 // noContentStatus is the status a no-content response writes: the configured

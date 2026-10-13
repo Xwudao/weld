@@ -5,82 +5,116 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	nethttp "net/http"
+	"net/http"
+	"sync"
 	"time"
+
+	"__module__/internal/logging"
 )
 
-// readHeaderTimeout bounds how long a client may take to send request headers.
-const readHeaderTimeout = 5 * time.Second
+// Server owns the HTTP runtime. Construct once, Start once, then Stop with the
+// application's shutdown context. It has no dependency on a DI framework.
+type Server struct {
+	HTTP     *http.Server
+	logger   logging.Logger
+	mu       sync.Mutex
+	listener net.Listener
+	started  bool
+	stopped  bool
+	fail     chan error
+	done     chan struct{}
+}
 
-// shutdownTimeout bounds the graceful shutdown a canceled Serve performs.
-const shutdownTimeout = 10 * time.Second
-
-// NewServer builds the HTTP server for handler without starting it.
-//
-// handler is expected to already carry the application middleware chain, which
-// Chain applies; NewHandler and the Loom graph both build their handler through
-// Chain, so every composition serves identical middleware. NewServer is separate from Serve so tests can inspect the
-// configured server without binding a socket.
-func NewServer(addr string, handler nethttp.Handler) *nethttp.Server {
-	return &nethttp.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: readHeaderTimeout,
+// NewServer configures a server without binding a socket. handler must already
+// carry the application middleware (normally built by NewHandler).
+func NewServer(addr string, handler http.Handler, logger logging.Logger) *Server {
+	if handler == nil {
+		handler = http.NewServeMux()
+	}
+	return &Server{
+		HTTP: &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		},
+		logger: logger,
+		fail:   make(chan error, 1),
+		done:   make(chan struct{}),
 	}
 }
 
-// Listen binds addr and returns the listener.
-//
-// The socket is bound synchronously, so an address already in use fails here —
-// before a caller starts any long-running work — and a failed startup never
-// prints a listening line. It is separate from Serve so a command can bind the
-// socket first and only then start work that depends on the server being up.
-func Listen(addr string) (net.Listener, error) {
-	listener, err := net.Listen("tcp", addr)
+// Start binds synchronously: an occupied port fails before a listening log.
+// Failed binds may be retried; a successfully started or stopped server cannot
+// be restarted. The context bounds startup, not the lifetime of the server.
+func (s *Server) Start(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.started || s.stopped {
+		return errors.New("httpserver: server already started or stopped")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.HTTP.Addr)
 	if err != nil {
-		return nil, fmt.Errorf("httpserver: listen on %s: %w", addr, err)
+		return fmt.Errorf("httpserver: listen on %s: %w", s.HTTP.Addr, err)
 	}
-	return listener, nil
-}
-
-// Serve serves handler on a listener bound for addr until the server fails or
-// ctx is canceled.
-//
-// A canceled ctx is a graceful stop: it shuts the server down within
-// shutdownTimeout and returns nil. A serve failure is returned so the caller can
-// report it. Serve deliberately logs nothing: the caller owns the sink, the
-// format and the ordering of the listening and shutdown records relative to the
-// runtimes it starts and stops around the server.
-func Serve(ctx context.Context, addr string, listener net.Listener, handler nethttp.Handler) error {
-	server := NewServer(addr, handler)
-
-	failed := make(chan error, 1)
+	s.listener = listener
+	s.started = true
+	if s.logger != nil {
+		s.logger.Info("__name__ listening", "url", BrowseURL(listener.Addr()))
+	}
 	go func() {
-		err := server.Serve(listener)
-		if errors.Is(err, nethttp.ErrServerClosed) {
+		defer close(s.done)
+		err := s.HTTP.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
-		failed <- err
+		if err != nil && s.logger != nil {
+			s.logger.Error("__name__ serve failed", "error", err)
+		}
+		s.fail <- err
 	}()
-
-	select {
-	case err := <-failed:
-		return err
-	case <-ctx.Done():
-	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		return err
-	}
-	return <-failed
+	return nil
 }
 
-// DisplayAddr turns a listen address into something clickable. A bare ":port"
-// becomes "localhost:port"; anything else is returned unchanged.
-func DisplayAddr(addr string) string {
-	if addr != "" && addr[0] == ':' {
-		return "localhost" + addr
+// Addr returns the actual bound address, including the assigned port for :0.
+// It is nil before Start succeeds.
+func (s *Server) Addr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return nil
 	}
-	return addr
+	return s.listener.Addr()
+}
+
+// Fail delivers the serve result once: nil after graceful shutdown, an error
+// after a runtime failure. Stop does not consume this result.
+func (s *Server) Fail() <-chan error { return s.fail }
+
+// Stop honors the caller's shutdown budget. If draining exceeds it, Close
+// forcibly releases active connections and the shutdown error is returned.
+// Hijacked connections (such as WebSockets) remain the handler's responsibility.
+func (s *Server) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	s.stopped = true
+	started := s.started
+	s.mu.Unlock()
+	if !started {
+		return nil
+	}
+	if s.logger != nil {
+		s.logger.Info("__name__ shutting down")
+	}
+	err := s.HTTP.Shutdown(ctx)
+	if err != nil {
+		err = errors.Join(err, s.HTTP.Close())
+		if s.logger != nil {
+			s.logger.Error("__name__ shutdown failed", "error", err)
+		}
+	}
+	<-s.done
+	return err
 }

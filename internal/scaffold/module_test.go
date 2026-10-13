@@ -50,7 +50,7 @@ func TestAddModuleInstallsHTTPAndConfig(t *testing.T) {
 	}
 	for _, path := range []string{
 		"internal/config/config.go",
-		"internal/httpserver/http.go",
+		"internal/httpserver/handler.go",
 		"internal/modules/widget/dto.go",
 		"internal/modules/widget/service.go",
 		"internal/modules/widget/module.go",
@@ -109,7 +109,7 @@ func TestAddModuleIsIdempotent(t *testing.T) {
 	addModule(t, dir, "widget")
 
 	before := map[string]string{}
-	for _, path := range []string{"internal/modules/widget/module.go", "internal/httpserver/http.go", project.ManifestName} {
+	for _, path := range []string{"internal/modules/widget/module.go", "internal/httpserver/handler.go", project.ManifestName} {
 		before[path] = readFile(t, filepath.Join(dir, path))
 	}
 	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "widget")

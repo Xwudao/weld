@@ -1,0 +1,44 @@
+package httpserver
+
+import (
+	"fmt"
+	"net/http"
+	"strings"
+
+	"__module__/internal/config"
+	"__module__/internal/httpx"
+	"__module__/internal/logging"
+)
+
+// Route installs a surface on the shared application router. Modules can be
+// mounted here with router.Group(ModulePrefix(name)); raw handlers use Handle.
+type Route func(router *httpx.Router)
+
+// Chain applies the project-owned middleware stack, outermost first.
+func Chain(cfg *config.Config, logger logging.Logger, handler http.Handler) http.Handler {
+	return httpx.Chain(middlewareChain(cfg, logger)...)(handler)
+}
+
+// NewHandler is the shared production and test composition entry. It defines
+// policies, configures error mapping, registers routes, logs the development
+// surface and applies the application middleware, without opening a socket.
+func NewHandler(cfg *config.Config, logger logging.Logger, policies []NamedPolicy, routes ...Route) http.Handler {
+	mux := http.NewServeMux()
+	base := httpx.NewRouter(mux).WithErrorHandler(errorHandler(logger))
+	seen := make(map[string]bool, len(policies))
+	for _, policy := range policies {
+		if strings.TrimSpace(policy.Name) == "" || seen[policy.Name] || policy.Middleware == nil {
+			panic(fmt.Sprintf("httpserver: invalid or duplicate policy %q", policy.Name))
+		}
+		seen[policy.Name] = true
+		base = base.WithPolicy(policy.Name, policy.Middleware)
+	}
+	for _, route := range routes {
+		route(base)
+	}
+	if cfg != nil && cfg.Environment.IsDevelopment() && logger != nil {
+		logger.Info("registered routes", "count", len(base.Routes()), "environment", string(cfg.Environment))
+		base.LogRoutes(logger)
+	}
+	return Chain(cfg, logger, mux)
+}

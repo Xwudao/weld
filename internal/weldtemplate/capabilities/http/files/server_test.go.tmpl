@@ -1,0 +1,149 @@
+package httpserver
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"testing"
+	"time"
+
+	"__module__/internal/logging"
+)
+
+func TestNewServerDoesNotListen(t *testing.T) {
+	s := NewServer("127.0.0.1:0", NewHandler(nil, nil, nil), nil)
+	if s.HTTP.Addr != "127.0.0.1:0" || s.HTTP.Handler == nil ||
+		s.HTTP.ReadHeaderTimeout <= 0 || s.HTTP.IdleTimeout <= 0 || s.Addr() != nil {
+		t.Fatalf("unexpected server configuration: %+v", s.HTTP)
+	}
+}
+
+func TestStartReportsOccupiedPort(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	var sink bytes.Buffer
+	logger := logging.New(&sink, logging.TextFormat, &logging.Options{NoColor: true})
+	s := NewServer(occupied.Addr().String(), http.NotFoundHandler(), logger)
+	if err := s.Start(context.Background()); err == nil {
+		defer s.Stop(context.Background())
+		t.Fatal("occupied port accepted")
+	}
+	if sink.Len() != 0 {
+		t.Fatal("failed startup logged listening")
+	}
+}
+
+func TestServerStopsGracefully(t *testing.T) {
+	s := NewServer("127.0.0.1:0", http.NotFoundHandler(), nil)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if s.Addr() == nil {
+		t.Fatal("missing bound address")
+	}
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("second start accepted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-s.Fail():
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("serve goroutine did not stop")
+	}
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("restart accepted")
+	}
+}
+
+func TestServerReportsRuntimeFailure(t *testing.T) {
+	s := NewServer("127.0.0.1:0", http.NotFoundHandler(), nil)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+	if err := s.listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-s.Fail():
+		if err == nil {
+			t.Fatal("runtime failure was discarded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing serve result")
+	}
+}
+
+func TestStopHonorsDeadlineAndClosesActiveConnection(t *testing.T) {
+	entered, disconnected := make(chan struct{}), make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+		close(disconnected)
+	})
+	s := NewServer("127.0.0.1:0", handler, nil)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+	client := &http.Client{Timeout: 3 * time.Second}
+	defer client.CloseIdleConnections()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := client.Get(BrowseURL(s.Addr()))
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("request did not reach handler")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Stop(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop = %v", err)
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("active connection was not closed")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("client did not stop")
+	}
+}
+
+func TestStopBeforeStartAndCanceledStart(t *testing.T) {
+	s := NewServer("127.0.0.1:0", http.NotFoundHandler(), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Start(ctx); err == nil {
+		defer s.Stop(context.Background())
+		t.Fatal("canceled startup succeeded")
+	}
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("stopped server started")
+	}
+}

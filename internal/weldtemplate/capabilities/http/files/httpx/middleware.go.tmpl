@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -83,15 +82,17 @@ func AccessLog(logger logging.Logger) Middleware {
 			}
 			start := time.Now()
 			recorder := &responseRecorder{ResponseWriter: w}
+			defer func() {
+				logger.Info("http request",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", recorder.statusCode(),
+					"bytes", recorder.bytes,
+					"duration", time.Since(start),
+					"request_id", RequestIDFrom(r.Context()),
+				)
+			}()
 			next.ServeHTTP(recorder, r)
-			logger.Info("http request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", recorder.statusCode(),
-				"bytes", recorder.bytes,
-				"duration", time.Since(start),
-				"request_id", RequestIDFrom(r.Context()),
-			)
 		})
 	}
 }
@@ -106,6 +107,9 @@ func AccessLog(logger logging.Logger) Middleware {
 func Recover(logger logging.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Track commitment independently of AccessLog, including when a
+			// different middleware wraps the writer further inside this handler.
+			recorder := &responseRecorder{ResponseWriter: w}
 			defer func() {
 				recovered := recover()
 				if recovered == nil {
@@ -122,15 +126,13 @@ func Recover(logger logging.Logger) Middleware {
 						"stack", string(debug.Stack()),
 					)
 				}
-				// Once the outer access logger has observed a write or flush, HTTP
-				// cannot change the status to 500. Abort the connection rather than
-				// append a JSON error envelope to a partial response (notably SSE).
-				if recorder, ok := w.(*responseRecorder); ok && recorder.status != 0 {
+				// Never append an error envelope to an already committed response.
+				if recorder.status != 0 {
 					panic(http.ErrAbortHandler)
 				}
-				Error(w, http.StatusInternalServerError, ErrorMsg)
+				Error(recorder, http.StatusInternalServerError, ErrorMsg)
 			}()
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(recorder, r)
 		})
 	}
 }
@@ -161,17 +163,15 @@ func newRequestID() string {
 }
 
 // responseRecorder records the transport status and the number of bytes written
-// for AccessLog while preserving the optional interfaces a ResponseWriter may
-// implement.
+// for AccessLog and commitment for Recover, while forwarding the optional
+// interfaces a ResponseWriter may implement.
 //
 // It does not buffer the body: Write passes straight through. Flush and Hijack
 // forward to the wrapped writer, so a streaming or SSE response and a WebSocket
-// upgrade keep working when AccessLog is installed; Push forwards the HTTP/2
-// server-push call. When the wrapped writer does not implement one of those
-// interfaces the wrapper reports it the way net/http's own
-// httptest.ResponseRecorder does (a no-op Flush, an ErrNotSupported Push, a
-// clear Hijack error), and Unwrap exposes the original writer to
-// http.ResponseController.
+// upgrade keep working with middleware installed; Push forwards HTTP/2 server
+// push. FlushError and Hijack preserve ResponseController's errors, including
+// ErrNotSupported; Flush discards its error to satisfy http.Flusher. Unwrap
+// exposes the original writer to http.ResponseController.
 type responseRecorder struct {
 	http.ResponseWriter
 	status int
@@ -179,7 +179,11 @@ type responseRecorder struct {
 }
 
 func (r *responseRecorder) WriteHeader(status int) {
-	if r.status == 0 {
+	if r.status != 0 {
+		return
+	}
+	// Informational responses do not commit the final response; 101 does.
+	if status >= 200 || status == http.StatusSwitchingProtocols {
 		r.status = status
 	}
 	r.ResponseWriter.WriteHeader(status)
@@ -204,22 +208,23 @@ func (r *responseRecorder) statusCode() int {
 }
 
 // Flush forwards to the wrapped writer when it supports flushing.
-func (r *responseRecorder) Flush() {
-	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
-		if r.status == 0 {
-			r.status = http.StatusOK // Flush commits the default response status.
-		}
-		flusher.Flush()
+func (r *responseRecorder) Flush() { _ = r.FlushError() }
+
+// FlushError preserves ResponseController's unsupported/error semantics, even
+// through another wrapper that exposes its underlying writer with Unwrap.
+func (r *responseRecorder) FlushError() error {
+	if err := http.NewResponseController(r.ResponseWriter).Flush(); err != nil {
+		return err
 	}
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return nil
 }
 
 // Hijack forwards to the wrapped writer when it supports hijacking.
 func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hijacker, ok := r.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, errors.New("httpx: underlying ResponseWriter is not a Hijacker")
-	}
-	conn, rw, err := hijacker.Hijack()
+	conn, rw, err := http.NewResponseController(r.ResponseWriter).Hijack()
 	if err == nil && r.status == 0 {
 		r.status = http.StatusSwitchingProtocols // The writer is no longer ours.
 	}

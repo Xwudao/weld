@@ -261,3 +261,164 @@ func TestMaxBytesOptionBoundsBody(t *testing.T) {
 		t.Fatalf("status = %d, want 413", recorder.Code)
 	}
 }
+
+type pointerValidatedInput struct {
+	Name string `query:"name" json:"name"`
+}
+
+func (req *pointerValidatedInput) Validate() error {
+	if req.Name == "" {
+		return errors.New("name is required")
+	}
+	return nil
+}
+
+func TestPointerReceiverValidation(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		mux := http.NewServeMux()
+		router := NewRouter(mux)
+		handler := func(context.Context, pointerValidatedInput) (string, error) {
+			t.Error("invalid input reached handler")
+			return "", nil
+		}
+		if method == http.MethodGet {
+			Get(router, "/test", handler)
+		} else {
+			Post(router, "/test", handler)
+		}
+		req := httptest.NewRequest(method, "/test", strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "name is required") {
+			t.Fatalf("%s: %d %s", method, w.Code, w.Body)
+		}
+	}
+}
+
+func TestPointerDTOBinding(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		mux := http.NewServeMux()
+		router := NewRouter(mux)
+		handler := func(_ context.Context, req *pointerValidatedInput) (string, error) {
+			if req == nil || req.Name != "Ada" {
+				t.Fatalf("request = %+v", req)
+			}
+			return req.Name, nil
+		}
+		if method == http.MethodGet {
+			Get(router, "/test", handler)
+		} else {
+			Post(router, "/test", handler)
+		}
+		req := httptest.NewRequest(method, "/test?name=Ada", strings.NewReader(`{"name":"Ada"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", method, w.Code, w.Body)
+		}
+	}
+}
+
+func TestErrorHandlerInheritedWithoutMutatingParent(t *testing.T) {
+	mux := http.NewServeMux()
+	base := NewRouter(mux)
+	domainErr := errors.New("domain missing")
+	called := 0
+	custom := base.WithErrorHandler(func(w http.ResponseWriter, r *http.Request, err error) {
+		called++
+		if !errors.Is(err, domainErr) {
+			t.Errorf("unexpected error: %v", err)
+		}
+		Error(w, http.StatusNotFound, "mapped")
+	})
+	failing := func(context.Context) (string, error) { return "", domainErr }
+	NoInput(custom.Group("/group"), http.MethodGet, "/custom", failing)
+	NoInput(base, http.MethodGet, "/default", failing)
+	for _, tc := range []struct {
+		path   string
+		status int
+	}{
+		{"/group/custom", http.StatusNotFound}, {"/default", http.StatusInternalServerError},
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if w.Code != tc.status {
+			t.Fatalf("%s: %d", tc.path, w.Code)
+		}
+	}
+	if called != 1 {
+		t.Fatalf("custom handler called %d times", called)
+	}
+}
+
+func TestMarshalFailureUsesErrorHandler(t *testing.T) {
+	mux := http.NewServeMux()
+	called := false
+	router := NewRouter(mux).WithErrorHandler(func(w http.ResponseWriter, r *http.Request, err error) {
+		called = true
+		WriteError(w, err)
+	})
+	NoInput(router, http.MethodGet, "/", func(context.Context) (chan int, error) { return make(chan int), nil })
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !called || w.Code != http.StatusInternalServerError {
+		t.Fatalf("called=%v status=%d", called, w.Code)
+	}
+}
+
+func TestRoutesReturnsDeepCopy(t *testing.T) {
+	router := NewRouter(http.NewServeMux()).WithPolicy("guard", func(next http.Handler) http.Handler { return next })
+	router.Get("/test", func(http.ResponseWriter, *http.Request) {}, Policy("guard"))
+	routes := router.Routes()
+	routes[0].Policies[0] = "mutated"
+	if router.Routes()[0].Policies[0] != "guard" {
+		t.Fatal("route policy copy aliases table")
+	}
+}
+
+func TestFailedRegistrationDoesNotPolluteRouteTable(t *testing.T) {
+	router := NewRouter(http.NewServeMux())
+	router.Get("/test", func(http.ResponseWriter, *http.Request) {})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("duplicate route did not fail")
+			}
+		}()
+		router.Get("/test", func(http.ResponseWriter, *http.Request) {})
+	}()
+	if len(router.Routes()) != 1 {
+		t.Fatal("failed route entered table")
+	}
+}
+
+func TestTypedBodylessStatusOmitsEnvelope(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusNotModified} {
+		mux := http.NewServeMux()
+		NoInput(NewRouter(mux), http.MethodGet, "/", func(context.Context) (string, error) {
+			return "must not be written", nil
+		}, WithStatus(status))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		if w.Code != status || w.Body.Len() != 0 || w.Header().Get("Content-Type") != "" {
+			t.Fatalf("status=%d body=%s headers=%v", w.Code, w.Body, w.Header())
+		}
+	}
+}
+
+func TestInvalidEndpointStatusFailsAtRegistration(t *testing.T) {
+	for _, status := range []int{99, 103, 600} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("status %d accepted", status)
+				}
+			}()
+			NoInput(NewRouter(http.NewServeMux()), http.MethodGet, "/", func(context.Context) (string, error) {
+				return "", nil
+			}, WithStatus(status))
+		}()
+	}
+}

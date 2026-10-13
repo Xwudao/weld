@@ -133,7 +133,7 @@ func TestWebCapabilityRequiresHTTP(t *testing.T) {
 	}
 	var makefile bool
 	for _, patch := range d.Patches {
-		if patch.Path == "internal/httpserver/http.go" {
+		if patch.Path == "internal/httpserver/handler.go" {
 			t.Errorf("web still patches the removed routes extension point: %+v", patch)
 		}
 		if patch.Path == "Makefile" && patch.Marker == "web" {
@@ -170,7 +170,7 @@ func TestHTTPCapabilityOwnsTheServeCommand(t *testing.T) {
 		paths[file.Path] = true
 	}
 	for _, want := range []string{
-		"internal/httpserver/http.go",
+		"internal/httpserver/handler.go",
 		"internal/httpserver/server.go",
 		"internal/app/serve.go",
 	} {
@@ -636,7 +636,7 @@ func TestLoomShipsNoServeOrRoutePayloads(t *testing.T) {
 // the shared flags, enters the generated Loom graph and drives its lifecycle.
 // Startup and shutdown logging belong to the graph's injected logger, so the
 // command never builds its own logger or writes to the process streams, and
-// httpserver/server.go logs nothing directly.
+// httpserver/server.go logs only through the injected logger.
 func TestHTTPCapabilityDrivesTheGraph(t *testing.T) {
 	serveGo, err := fs.ReadFile(FS(), "capabilities/http/files/serve.go.tmpl")
 	if err != nil {
@@ -675,18 +675,18 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 		paths[file.Path] = file.Source
 	}
 	for _, want := range []string{
-		"internal/httpx/httpx.go",
-		"internal/httpx/bind.go",
+		"internal/httpx/response.go",
+		"internal/httpx/bind_json.go",
 		"internal/httpx/bind_query.go",
 		"internal/httpx/router.go",
-		"internal/httpx/route.go",
+		"internal/httpx/endpoint.go",
 		"internal/httpx/middleware.go",
 		"internal/httpx/cors.go",
-		"internal/httpx/httpx_test.go",
-		"internal/httpx/bind_test.go",
+		"internal/httpx/response_test.go",
+		"internal/httpx/bind_json_test.go",
 		"internal/httpx/bind_query_test.go",
 		"internal/httpx/router_test.go",
-		"internal/httpx/route_test.go",
+		"internal/httpx/endpoint_test.go",
 		"internal/httpx/middleware_test.go",
 		"internal/httpx/cors_test.go",
 		"internal/httpserver/middleware.go",
@@ -705,7 +705,7 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 		return string(raw)
 	}
 
-	httpxGo := read(paths["internal/httpx/httpx.go"])
+	httpxGo := read(paths["internal/httpx/response.go"])
 	for _, want := range []string{
 		"type Envelope struct",
 		"func JSON(",
@@ -716,13 +716,13 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 		"func NoContent(",
 	} {
 		if !strings.Contains(httpxGo, want) {
-			t.Errorf("httpx.go is missing %q", want)
+			t.Errorf("response.go is missing %q", want)
 		}
 	}
-	bindGo := read(paths["internal/httpx/bind.go"])
-	for _, want := range []string{"func DecodeJSON[", "func QueryInt(", "type DecodeError struct"} {
+	bindGo := read(paths["internal/httpx/bind_json.go"])
+	for _, want := range []string{"func DecodeJSON["} {
 		if !strings.Contains(bindGo, want) {
-			t.Errorf("bind.go is missing %q", want)
+			t.Errorf("bind_json.go is missing %q", want)
 		}
 	}
 	middlewareGo := read(paths["internal/httpx/middleware.go"])
@@ -737,10 +737,10 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 			t.Errorf("httpx router.go is missing %q", want)
 		}
 	}
-	routeGo := read(paths["internal/httpx/route.go"])
+	routeGo := read(paths["internal/httpx/endpoint.go"])
 	for _, want := range []string{"func NoInput[", "func Get[", "func Post[", "func Policy(", "func Open(", "type Validator interface"} {
 		if !strings.Contains(routeGo, want) {
-			t.Errorf("httpx route.go is missing %q", want)
+			t.Errorf("httpx endpoint.go is missing %q", want)
 		}
 	}
 	corsGo := read(paths["internal/httpx/cors.go"])
@@ -767,8 +767,8 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 	// Binding takes a validator callback rather than importing go-validate, so
 	// the toolkit stays usable by a capability that does not install api.
 	for _, source := range []string{
-		paths["internal/httpx/httpx.go"],
-		paths["internal/httpx/bind.go"],
+		paths["internal/httpx/response.go"],
+		paths["internal/httpx/bind_json.go"],
 		paths["internal/httpx/middleware.go"],
 	} {
 		if strings.Contains(read(source), "github.com/Xwudao/go-validate") {
@@ -788,15 +788,24 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 	if !strings.Contains(read(paths["internal/httpserver/middleware.go"]), "cfg.CORS.Enabled") {
 		t.Error("httpserver/middleware.go does not read the typed cors section")
 	}
-	if !strings.Contains(read(paths["internal/httpserver/http.go"]), "httpx.Chain(middlewareChain(") {
-		t.Error("http.go does not compose the configured middleware chain")
+	if !strings.Contains(read(paths["internal/httpserver/handler.go"]), "httpx.Chain(middlewareChain(") {
+		t.Error("handler.go does not compose the configured middleware chain")
 	}
 	// The project-owned policy file is the one seam for the surface: the API
 	// prefix, the per-module mount it defaults to, the administrator policy name
 	// and the guard. The graph mounts modules through ModulePrefix, so a project
 	// can give a module its own URL space without editing the regenerated graph.
+	for _, want := range []string{"const APIPrefix =", "func ModulePrefix("} {
+		if !strings.Contains(read(paths["internal/httpserver/mounts.go"]), want) {
+			t.Errorf("mounts.go is missing %q", want)
+		}
+	}
+	if !strings.Contains(read(paths["internal/httpx/bind_query.go"]), "func QueryInt(") ||
+		!strings.Contains(read(paths["internal/httpx/errors.go"]), "type DecodeError struct") {
+		t.Error("binding/error helpers are missing")
+	}
 	policy := read(paths["internal/httpserver/policy.go"])
-	for _, want := range []string{"const APIPrefix =", "func ModulePrefix(", "const PolicyAdmin =", "type NamedPolicy struct"} {
+	for _, want := range []string{"const PolicyAdmin =", "type NamedPolicy struct"} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("httpserver/policy.go is missing %q", want)
 		}
@@ -1361,7 +1370,7 @@ func TestCronProviderSeamIsOwnedByCron(t *testing.T) {
 		t.Fatalf("read cron provider template: %v", err)
 	}
 	for _, want := range []string{
-		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *Server) (*cron.Scheduler, error)",
+		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *httpserver.Server) (*cron.Scheduler, error)",
 		"__module__/internal/cron",
 		"loom.Hook",
 	} {

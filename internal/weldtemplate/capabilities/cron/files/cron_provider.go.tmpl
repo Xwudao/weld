@@ -8,6 +8,7 @@ import (
 
 	"__module__/internal/config"
 	"__module__/internal/cron"
+	"__module__/internal/httpserver"
 
 	"__module__/internal/logging"
 )
@@ -37,7 +38,7 @@ import (
 // internal/di/cron_jobs.go binds service methods before lifecycle.Start. The
 // scheduler takes no database or Redis lock, so several replicas each run their
 // own copy of every job.
-func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *Server) (*cron.Scheduler, error) {
+func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *httpserver.Server) (*cron.Scheduler, error) {
 	location, err := cfg.Cron.Location()
 	if err != nil {
 		return nil, err

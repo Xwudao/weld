@@ -21,7 +21,7 @@ import (
 {{- end}}
 	"__module__/internal/config"
 {{- if .Caps.Has "http"}}
-	"__module__/internal/httpx"
+	"__module__/internal/httpserver"
 {{- end}}
 {{- if or (.Caps.Has "http") (.Caps.Has "db")}}
 	"__module__/internal/logging"
@@ -209,43 +209,17 @@ func TestNewConfigRejectsBlankAddr(t *testing.T) {
 }
 
 // newServerForTest builds the managed server through the generated seam with an
-// injected logger and an empty handler, so the bind, serve-failure and
-// graceful-stop lifecycle is exercised without a database, without a global
+// injected logger and an empty handler, so bind and graceful-stop hooks
+// are exercised without a database, without a global
 // logger and without any installed business module.
-func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger logging.Logger) *Server {
+func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger logging.Logger) *httpserver.Server {
 	t.Helper()
-	server, err := newServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger, nethttp.NewServeMux())
-	if err != nil {
-		t.Fatalf("newServer: %v", err)
-	}
-	return server
-}
-
-// TestDevelopmentLogsTheComposedRoutes proves logRoutes logs every registered
-// route in a development environment and stays silent in production. It builds
-// the router directly, so it needs no module.
-func TestDevelopmentLogsTheComposedRoutes(t *testing.T) {
-	var buf bytes.Buffer
-	logger := logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true})
-	router := httpx.NewRouter(nethttp.NewServeMux())
-	router.Get("/ping", func(nethttp.ResponseWriter, *nethttp.Request) {})
-
-	logRoutes(&config.Config{Environment: config.EnvironmentLocal}, logger, router)
-	out := buf.String()
-	if !strings.Contains(out, "registered routes") || !strings.Contains(out, "/ping") {
-		t.Fatalf("a development composition did not log its routes:\n%s", out)
-	}
-
-	buf.Reset()
-	logRoutes(&config.Config{Environment: config.EnvironmentProduction}, logger, router)
-	if buf.Len() != 0 {
-		t.Fatalf("a production composition logged its routes:\n%s", buf.String())
-	}
+	return newServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger, httpserver.NewHandler(nil, logger, nil))
 }
 
 // TestComposedServerAppliesMiddleware proves the generated server serves the
-// project middleware chain: newServer wraps its handler with httpserver.Chain,
-// so even a not-found response carries a request id. It needs no socket.
+// project middleware chain built by httpserver.NewHandler, so even a not-found
+// response carries a request id. It needs no socket.
 func TestComposedServerAppliesMiddleware(t *testing.T) {
 	lifecycle := loom.NewLifecycle()
 	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
@@ -269,32 +243,6 @@ func TestServerBindFailureFailsStart(t *testing.T) {
 	newServerForTest(t, lifecycle, occupied.Addr().String(), discardLogger())
 	if err := lifecycle.Start(context.Background()); err == nil {
 		t.Fatal("Start succeeded on an occupied port")
-	}
-}
-
-// TestServerReportsRuntimeFailure proves a serve failure reaches the command
-// instead of leaving it waiting forever.
-func TestServerReportsRuntimeFailure(t *testing.T) {
-	lifecycle := loom.NewLifecycle()
-	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
-	ctx := context.Background()
-	if err := lifecycle.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = lifecycle.Stop(ctx) }()
-
-	// Closing the bound listener directly is not a graceful shutdown, so Serve
-	// returns an error rather than net/http.ErrServerClosed.
-	if err := server.listener.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	select {
-	case err := <-server.Fail():
-		if err == nil {
-			t.Fatal("expected a serve error, got nil")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the serve failure")
 	}
 }
 

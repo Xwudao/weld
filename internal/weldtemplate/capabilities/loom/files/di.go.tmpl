@@ -55,14 +55,11 @@ import (
 	"context"
 {{- if .Caps.Has "http"}}
 	"errors"
-	"fmt"
-	"net"
 	nethttp "net/http"
 {{- end}}
 	"os"
 {{- if .Caps.Has "http"}}
 	"strings"
-	"time"
 {{- end}}
 
 	"github.com/Xwudao/loom"
@@ -72,7 +69,9 @@ import (
 	"__module__/internal/cron"
 {{- end}}
 	"__module__/internal/httpserver"
+{{- if or (.Caps.Has "web") .Modules}}
 	"__module__/internal/httpx"
+{{- end}}
 {{- range .Modules}}
 	"__module__/internal/modules/{{.Name}}"
 {{- end}}
@@ -343,7 +342,7 @@ var appGraph = loom.Graph[*App](
 // them, so serving never requires a database.
 type App struct {
 	Config *config.Config
-	Server *Server
+	Server *httpserver.Server
 {{- if .Caps.Has "cron"}}
 	Scheduler *cron.Scheduler
 {{- end}}
@@ -351,157 +350,48 @@ type App struct {
 
 // NewApp is the graph root. The scheduler is taken after the server so the
 // server's lifecycle hook is appended first.
-func NewApp(cfg *config.Config{{if .Caps.Has "events"}}, _ *EventListeners{{end}}, server *Server{{if .Caps.Has "cron"}}, scheduler *cron.Scheduler, _ *CronJobs{{end}}) *App {
+func NewApp(cfg *config.Config{{if .Caps.Has "events"}}, _ *EventListeners{{end}}, server *httpserver.Server{{if .Caps.Has "cron"}}, scheduler *cron.Scheduler, _ *CronJobs{{end}}) *App {
 	return &App{Config: cfg, Server: server{{if .Caps.Has "cron"}}, Scheduler: scheduler{{end}}}
 }
 
-// logRoutes logs the composed route table, with the policy guarding each route,
-// when the configuration marks a development environment; it is silent
-// everywhere else, so a production server never logs its surface. The router
-// records every route as it registers it, so the table is complete by the time
-// the composition calls this.
-func logRoutes(cfg *config.Config, logger logging.Logger, router *httpx.Router) {
-	if cfg == nil || !cfg.Environment.IsDevelopment() {
-		return
-	}
-	logger.Info("registered routes", "count", len(router.Routes()), "environment", string(cfg.Environment))
-	router.LogRoutes(logger)
-}
-
-// composeMux composes the application handler from the installed modules.
-//
-// Route composition is explicit here rather than through a global registry, so
-// the dependency graph is the single source of composition. Each module's mount
-// prefix comes from httpserver.ModulePrefix, so changing the version (or giving
-// one module its own URL space) is an edit in the stable project file rather than
-// an edit to this regenerated graph. The named policies are applied from the
-// project's own list (NewHTTPPolicies, in the stable di/http_policies.go),
-// so every module route marked with a policy shares one guard and adding a policy
-// needs no edit here.
-//
-// A development environment logs the composed routes, so the surface and its
-// policy coverage are visible at startup.
-func composeMux(
+// composeHandler uses the same policy, error and middleware composition as tests.
+func composeHandler(
 	cfg *config.Config,
 	logger logging.Logger,
 	policies []httpserver.NamedPolicy,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
-) *nethttp.ServeMux {
-	mux := nethttp.NewServeMux()
+) nethttp.Handler {
+	return httpserver.NewHandler(cfg, logger, policies,
 {{- if .Caps.Has "web"}}
-	mux.Handle("/", web.Handler(httpserver.APIPrefix))
+		func(router *httpx.Router) {
+			router.Handle("/", web.Handler(httpserver.APIPrefix))
+		},
 {{- end}}
-{{- if .Modules}}
-	base := applyPolicies(httpx.NewRouter(mux), policies)
 {{- range .Modules}}
-	{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
+		func(base *httpx.Router) {
+			{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
+		},
 {{- end}}
-	logRoutes(cfg, logger, base)
-{{- end}}
-	return mux
+	)
 }
 
-// applyPolicies defines every named policy the composition declares on router.
-//
-// It is the one place a policy name becomes middleware. A name the composition
-// never declared panics when a route references it, which is the fail-closed
-// behavior: a typo can never serve a route unguarded.
-func applyPolicies(router *httpx.Router, policies []httpserver.NamedPolicy) *httpx.Router {
-	for _, policy := range policies {
-		router = router.WithPolicy(policy.Name, policy.Middleware)
-	}
-	return router
-}
-
-// Server is the managed HTTP server the graph owns.
-type Server struct {
-	HTTP *nethttp.Server
-
-	// logger records the server lifecycle: startup, a serve failure and a
-	// graceful shutdown. It is the graph's injected logger.
-	logger logging.Logger
-	// listener is the socket bound in OnStart. It is retained so the bound
-	// address is inspectable and a test can close it to simulate a serve failure.
-	listener net.Listener
-	// fail reports how the serving goroutine ended: the serve error, or nil
-	// after a graceful shutdown. It is buffered so the goroutine never blocks
-	// when nothing reads it.
-	fail chan error
-}
-
-// Fail reports how the serving goroutine ended. It yields the serve error, or
-// nil when the server stopped gracefully.
-func (s *Server) Fail() <-chan error { return s.fail }
-
-// shutdownTimeout bounds graceful teardown when the lifecycle stops.
-const shutdownTimeout = 10 * time.Second
-
-// Stop gracefully stops the server within the shutdown timeout.
-func (s *Server) Stop() error {
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	return s.HTTP.Shutdown(ctx)
-}
-
-// NewServer builds the HTTP server for the composed handler and registers its
-// start and stop hooks with the lifecycle.
-//
-// OnStart binds the listen address synchronously with net.Listen, so an address
-// already in use fails Start instead of being lost in a background goroutine,
-// then serves in the background. A serve failure is delivered on Fail so the
-// serve command can stop and report it; a graceful shutdown delivers nil. The
-// injected logger records the startup, failure and shutdown transitions.
+// NewServer supplies the composed handler and attaches framework-neutral
+// httpserver lifecycle methods to Loom. All runtime behavior lives there.
 func NewServer(
 	lc *loom.Lifecycle,
 	cfg *config.Config,
 	logger logging.Logger,
 	policies []httpserver.NamedPolicy,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
-) (*Server, error) {
-	return newServer(lc, cfg, logger, composeMux(cfg, logger, policies,{{range .Modules}}
+) *httpserver.Server {
+	return newServer(lc, cfg, logger, composeHandler(cfg, logger, policies,{{range .Modules}}
 		{{.Name}}Service,{{end}}
 	))
 }
 
-func newServer(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, handler nethttp.Handler) (*Server, error) {
-	server := &Server{
-		// The composed mux is wrapped with the same middleware chain the
-		// httpserver package exposes (httpserver.Chain), so the composition serves
-		// the project middleware semantics. The configuration carries the
-		// cross-origin policy that chain reads.
-		HTTP: httpserver.NewServer(cfg.HTTP.Addr, httpserver.Chain(cfg, logger, handler)),
-		logger: logger,
-		fail:   make(chan error, 1),
-	}
-	lc.Append(loom.Hook{
-		OnStart: func(context.Context) error {
-			listener, err := net.Listen("tcp", cfg.HTTP.Addr)
-			if err != nil {
-				return fmt.Errorf("di: listen on %s: %w", cfg.HTTP.Addr, err)
-			}
-			server.listener = listener
-			logger.Info("__name__ listening", "url", httpserver.BrowseURL(listener.Addr()))
-			go func() {
-				err := server.HTTP.Serve(listener)
-				if errors.Is(err, nethttp.ErrServerClosed) {
-					err = nil
-				}
-				if err != nil {
-					logger.Error("__name__ serve failed", "error", err)
-				}
-				server.fail <- err
-			}()
-			return nil
-		},
-		OnStop: func(context.Context) error {
-			logger.Info("__name__ shutting down")
-			if err := server.Stop(); err != nil {
-				logger.Error("__name__ shutdown failed", "error", err)
-				return err
-			}
-			return nil
-		},
-	})
-	return server, nil
+func newServer(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, handler nethttp.Handler) *httpserver.Server {
+	server := httpserver.NewServer(cfg.HTTP.Addr, handler, logger)
+	lc.Append(loom.Hook{OnStart: server.Start, OnStop: server.Stop})
+	return server
 }
 {{- end}}

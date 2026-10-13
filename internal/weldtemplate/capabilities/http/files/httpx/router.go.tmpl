@@ -22,9 +22,10 @@ import (
 // so a development build can log the composed surface and the policies guarding
 // each route (see Routes and LogRoutes).
 type Router struct {
-	mux        *http.ServeMux
-	prefix     string
-	middleware []Middleware
+	errorHandler ErrorHandler
+	mux          *http.ServeMux
+	prefix       string
+	middleware   []Middleware
 	// policies maps a policy name to the middleware a route in that policy must
 	// pass. The composition root defines them; a module only references a name.
 	policies map[string][]Middleware
@@ -70,12 +71,32 @@ func (t *routeTable) add(route Route) {
 func (t *routeTable) all() []Route {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]Route(nil), t.routes...)
+	routes := append([]Route(nil), t.routes...)
+	for i := range routes {
+		routes[i].Policies = append([]string(nil), routes[i].Policies...)
+	}
+	return routes
 }
 
 // NewRouter returns a Router that registers routes on mux.
 func NewRouter(mux *http.ServeMux) *Router {
 	return &Router{mux: mux, routes: &routeTable{}}
+}
+
+// WithErrorHandler derives a router with a custom endpoint error mapper and
+// observer. Groups inherit it; nil restores the redacted default WriteError.
+func (r *Router) WithErrorHandler(handler ErrorHandler) *Router {
+	next := r.clone()
+	next.errorHandler = handler
+	return next
+}
+
+func (r *Router) writeError(w http.ResponseWriter, request *http.Request, err error) {
+	if r.errorHandler != nil {
+		r.errorHandler(w, request, err)
+		return
+	}
+	WriteError(w, err)
 }
 
 // WithPolicy defines a named policy as a middleware chain, outermost first.
@@ -84,6 +105,14 @@ func NewRouter(mux *http.ServeMux) *Router {
 // name with the Policy option. Redefining a name replaces it. The receiver is
 // unchanged, so a caller can build a base and derive mounts from it.
 func (r *Router) WithPolicy(name string, middleware ...Middleware) *Router {
+	if strings.TrimSpace(name) == "" || len(middleware) == 0 {
+		panic("httpx: policy requires a name and middleware")
+	}
+	for _, mw := range middleware {
+		if mw == nil {
+			panic("httpx: nil policy middleware")
+		}
+	}
 	next := r.clone()
 	next.policies[name] = append([]Middleware(nil), middleware...)
 	return next
@@ -126,8 +155,8 @@ func (r *Router) Handle(pattern string, handler http.Handler, opts ...Option) {
 	cfg := resolveEndpoint(opts)
 	names := r.routePolicyNames(cfg)
 	full := r.fullPattern(pattern)
-	r.record(full, names)
 	r.mux.Handle(full, r.wrap(Chain(r.resolvePolicies(names)...)(handler)))
+	r.record(full, names)
 }
 
 // HandleFunc registers a raw handler function under the router's prefix.
@@ -188,12 +217,13 @@ func (r *Router) clone() *Router {
 		policies[name] = chain
 	}
 	return &Router{
-		mux:        r.mux,
-		prefix:     r.prefix,
-		middleware: append([]Middleware(nil), r.middleware...),
-		policies:   policies,
-		required:   append([]string(nil), r.required...),
-		routes:     r.routes,
+		errorHandler: r.errorHandler,
+		mux:          r.mux,
+		prefix:       r.prefix,
+		middleware:   append([]Middleware(nil), r.middleware...),
+		policies:     policies,
+		required:     append([]string(nil), r.required...),
+		routes:       r.routes,
 	}
 }
 

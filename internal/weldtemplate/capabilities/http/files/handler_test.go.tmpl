@@ -3,14 +3,15 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	nethttp "net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"__module__/internal/config"
+	"__module__/internal/httpx"
 
 	"__module__/internal/logging"
 )
@@ -51,7 +52,7 @@ func TestBrowseURLRewritesTheWildcardHost(t *testing.T) {
 }
 
 func TestNewHandlerComposesInjectedRoutes(t *testing.T) {
-	handler := NewHandler(testConfig(), testLogger(), func(mux *nethttp.ServeMux) {
+	handler := NewHandler(testConfig(), testLogger(), nil, func(mux *httpx.Router) {
 		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 			w.WriteHeader(nethttp.StatusTeapot)
 		})
@@ -65,7 +66,7 @@ func TestNewHandlerComposesInjectedRoutes(t *testing.T) {
 
 func TestNewHandlerWithoutRoutesServesNothing(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	NewHandler(testConfig(), testLogger()).ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/", nil))
+	NewHandler(testConfig(), testLogger(), nil).ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/", nil))
 	if recorder.Code != nethttp.StatusNotFound {
 		t.Fatalf("status = %d, want %d", recorder.Code, nethttp.StatusNotFound)
 	}
@@ -75,7 +76,7 @@ func TestNewHandlerWithoutRoutesServesNothing(t *testing.T) {
 // project middleware chain: the request-id middleware echoes an identifier on
 // every response.
 func TestNewHandlerAppliesMiddleware(t *testing.T) {
-	handler := NewHandler(testConfig(), testLogger(), func(mux *nethttp.ServeMux) {
+	handler := NewHandler(testConfig(), testLogger(), nil, func(mux *httpx.Router) {
 		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 			w.WriteHeader(nethttp.StatusOK)
 		})
@@ -93,7 +94,7 @@ func TestNewHandlerAppliesMiddleware(t *testing.T) {
 func TestNewHandlerAppliesTheConfiguredCORSPolicy(t *testing.T) {
 	cfg := testConfig()
 	cfg.CORS = config.CORS{Enabled: true, AllowedOrigins: []string{"https://app.example.com"}}
-	handler := NewHandler(cfg, testLogger(), func(mux *nethttp.ServeMux) {
+	handler := NewHandler(cfg, testLogger(), nil, func(mux *httpx.Router) {
 		mux.HandleFunc("/api/items", func(nethttp.ResponseWriter, *nethttp.Request) {
 			t.Error("the preflight reached the mux")
 		})
@@ -117,7 +118,7 @@ func TestNewHandlerAppliesTheConfiguredCORSPolicy(t *testing.T) {
 // disabled cors section installs no middleware and adds no header, so a
 // same-origin project is unaffected.
 func TestNewHandlerWithoutCORSSendsNoCORSHeader(t *testing.T) {
-	handler := NewHandler(testConfig(), testLogger(), func(mux *nethttp.ServeMux) {
+	handler := NewHandler(testConfig(), testLogger(), nil, func(mux *httpx.Router) {
 		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 			w.WriteHeader(nethttp.StatusOK)
 		})
@@ -139,7 +140,7 @@ func TestNewHandlerWithoutCORSSendsNoCORSHeader(t *testing.T) {
 func TestNewHandlerRecoversAPanic(t *testing.T) {
 	var sink bytes.Buffer
 	logger := logging.New(&sink, logging.TextFormat, &logging.Options{NoColor: true})
-	handler := NewHandler(testConfig(), logger, func(mux *nethttp.ServeMux) {
+	handler := NewHandler(testConfig(), logger, nil, func(mux *httpx.Router) {
 		mux.HandleFunc("/boom", func(nethttp.ResponseWriter, *nethttp.Request) {
 			panic("secret panic detail")
 		})
@@ -157,66 +158,68 @@ func TestNewHandlerRecoversAPanic(t *testing.T) {
 	}
 }
 
-func TestNewServerConfiguresWithoutListening(t *testing.T) {
-	server := NewServer("127.0.0.1:0", NewHandler(testConfig(), testLogger()))
-	if server.Addr != "127.0.0.1:0" {
-		t.Fatalf("Addr = %q", server.Addr)
+func TestNewHandlerPoliciesAndErrorLogging(t *testing.T) {
+	var sink bytes.Buffer
+	logger := logging.New(&sink, logging.TextFormat, &logging.Options{NoColor: true})
+	handler := NewHandler(nil, logger, []NamedPolicy{
+		{Name: "deny", Middleware: func(next nethttp.Handler) nethttp.Handler {
+			return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+				httpx.Error(w, nethttp.StatusForbidden, "denied")
+			})
+		}},
+	}, func(router *httpx.Router) {
+		httpx.NoInput(router, nethttp.MethodGet, "/failure", func(context.Context) (string, error) {
+			return "", errors.New("secret backend failure")
+		})
+		router.Group("/private").Require("deny").Get("/test", func(nethttp.ResponseWriter, *nethttp.Request) {
+			t.Error("policy was bypassed")
+		})
+	})
+	req := httptest.NewRequest(nethttp.MethodGet, "/failure", nil)
+	req.Header.Set(httpx.RequestIDHeader, "trace-123")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 500 || strings.Contains(w.Body.String(), "secret") {
+		t.Fatalf("error response: %d %s", w.Code, w.Body)
 	}
-	if server.Handler == nil {
-		t.Fatal("Handler is nil")
+	if !strings.Contains(sink.String(), "secret backend failure") || !strings.Contains(sink.String(), "trace-123") {
+		t.Fatalf("failure not logged with request ID: %s", sink.String())
 	}
-	if server.ReadHeaderTimeout <= 0 {
-		t.Fatal("ReadHeaderTimeout is not set")
-	}
-}
-
-// TestListenReportsOccupiedPort covers the ordering regression: the socket is
-// bound synchronously, so an address already in use fails before any listening
-// line is printed. The occupying server is closed by the test, so no socket is
-// leaked.
-func TestListenReportsOccupiedPort(t *testing.T) {
-	occupied := httptest.NewServer(NewHandler(testConfig(), testLogger()))
-	defer occupied.Close()
-
-	listener, err := Listen(occupied.Listener.Addr().String())
-	if err == nil {
-		listener.Close()
-		t.Fatal("Listen succeeded on an occupied port")
-	}
-}
-
-// TestDisplayAddrMakesBarePortsClickable pins the address formatting the
-// listening record uses.
-func TestDisplayAddrMakesBarePortsClickable(t *testing.T) {
-	if got := DisplayAddr(":8080"); got != "localhost:8080" {
-		t.Fatalf("DisplayAddr(\":8080\") = %q", got)
-	}
-	if got := DisplayAddr("127.0.0.1:8080"); got != "127.0.0.1:8080" {
-		t.Fatalf("DisplayAddr kept a bare address unchanged: %q", got)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(nethttp.MethodGet, "/private/test", nil))
+	if w.Code != 403 {
+		t.Fatalf("policy status = %d", w.Code)
 	}
 }
 
-// TestServeShutsDownGracefullyOnCancel proves a canceled context stops the
-// server within the shutdown timeout and returns no error, which is what a
-// signal-driven serve relies on.
-func TestServeShutsDownGracefullyOnCancel(t *testing.T) {
-	listener, err := Listen("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	addr := listener.Addr().String()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, addr, listener, NewHandler(testConfig(), testLogger())) }()
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Serve returned %v after a graceful shutdown", err)
+func TestDevelopmentLogsTheComposedRoutes(t *testing.T) {
+	for _, environment := range []config.Environment{config.EnvironmentLocal, config.EnvironmentProduction} {
+		var sink bytes.Buffer
+		logger := logging.New(&sink, logging.TextFormat, &logging.Options{NoColor: true})
+		NewHandler(&config.Config{Environment: environment}, logger, nil, func(router *httpx.Router) {
+			router.Get("/ping", func(nethttp.ResponseWriter, *nethttp.Request) {})
+		})
+		logged := strings.Contains(sink.String(), "/ping")
+		if logged != environment.IsDevelopment() {
+			t.Fatalf("%s: route log=%v", environment, logged)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Serve did not return after the context was canceled")
+	}
+}
+
+func TestNewHandlerRejectsInvalidPolicies(t *testing.T) {
+	pass := func(next nethttp.Handler) nethttp.Handler { return next }
+	for _, policies := range [][]NamedPolicy{
+		{{Name: "", Middleware: pass}},
+		{{Name: "guard"}},
+		{{Name: "guard", Middleware: pass}, {Name: "guard", Middleware: pass}},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("invalid policies accepted")
+				}
+			}()
+			NewHandler(nil, nil, policies)
+		}()
 	}
 }
