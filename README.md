@@ -732,9 +732,11 @@ non-business or multi-business commands:
   cron scheduler. Because the shared providers live in the regenerated module
   rather than in the command graph, a capability installed *after* the command
   graph was written still reaches it — `weld add db` extends `commonModule`,
-  and the stable command graph is not rewritten. Loom prunes every provider a
-  subcommand does not consume, so a short command constructs nothing beyond what
-  its `Deps` asks for, and the generated command package does not import the Loom
+  and the stable command graph is not rewritten. Loom prunes providers outside
+  the group's `Deps` dependency closure. Every real subcommand constructs the
+  entire group's `Deps`, even if it uses only one field; split dependency roots
+  and graphs when subcommands need independent resource sets. The generated
+  command package does not import the Loom
   runtime — it resolves the graph through the shared `internal/commandkit` seam
   only when a real subcommand runs, so help, `version` and unrelated commands
   never build it. Injecting a dependency is a field on `Deps` plus a parameter on

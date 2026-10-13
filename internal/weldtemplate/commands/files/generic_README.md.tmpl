@@ -16,15 +16,18 @@ the group resolves its dependencies from the command-specific graph in
 `internal/di/__modname___graph.go`. That graph includes `commonModule`, the
 shared provider set `di.go` declares (configuration, logger and the installed
 db/redis/mail/storage/events bindings), plus the `Deps` root, and Loom prunes every
-provider a subcommand does not consume, so the group never constructs the HTTP
-server, the scheduler or a database pool.
+provider outside the group's `Deps` dependency closure.
+Every real subcommand resolves all fields and transitive dependencies of `Deps`,
+even if it uses only one field. A database pool is constructed when that root
+requires it; the default graph excludes HTTP and cron. Split dependency roots
+and graphs when subcommands need independent resource sets.
 
 ## How it is wired
 
 `internal/app/__modname___command.go` registers the group through
 `app.RegisterCommand` and delegates `Build` to `di.Init__ModName__`. A real
 subcommand calls `commandkit.Run`, which builds and starts the graph for that one
-invocation and stops it within a bounded deadline; help, `version` and every
+invocation and calls Stop with a 10-second deadline (Stop must cooperate with its context); help, `version` and every
 unrelated command never resolve it. `internal/commandkit` is the shared seam and
 the command package never imports Loom itself.
 

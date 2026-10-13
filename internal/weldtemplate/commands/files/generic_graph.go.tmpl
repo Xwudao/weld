@@ -12,9 +12,10 @@
 // written still reaches the command. The root consumes only the providers the
 // fields on __modname__.Deps name — the worked example asks for the shared
 // logger — so Loom prunes every provider the command does not use. Resolving the
-// group therefore never constructs the HTTP server, the application root, the
-// cron scheduler or a database pool, and there is no process-wide singleton:
-// each graph keeps its own instance cache.
+// group constructs only Deps and its transitive dependencies. Every real
+// subcommand resolves this same root, regardless of which fields it uses.
+// The default graph excludes HTTP and cron; a database pool is constructed only
+// if Deps depends on it, directly or transitively. Each graph has its own cache.
 package di
 
 import (
@@ -22,9 +23,8 @@ import (
 	"github.com/Xwudao/loom"
 )
 
-// __modname__Graph produces Init__ModName__. Only the providers a real
-// __modname__ subcommand needs are constructed; the rest are declared through
-// commonModule and pruned otherwise.
+// __modname__Graph produces Init__ModName__. Only providers reachable from
+// the group's Deps root are constructed; other commonModule providers are pruned.
 var __modname__Graph = loom.Graph[*__modname__.Deps](
 	loom.Name("Init__ModName__"),
 	loom.WithContext(),

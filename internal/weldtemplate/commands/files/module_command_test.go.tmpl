@@ -3,6 +3,7 @@ package __modname__
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -96,6 +97,33 @@ func TestStatusUsesAnInjectedDependency(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "ok") {
 		t.Fatalf("status output = %q, want the worked-example line", out.String())
+	}
+}
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestOutputFailureStillStopsTheGraph(t *testing.T) {
+	for _, name := range []string{"greet", "status"} {
+		t.Run(name, func(t *testing.T) {
+			writeErr := errors.New("output failed")
+			lifecycle := &stubLifecycle{}
+			cmd := NewCommand(func(context.Context) (*Deps, commandkit.Lifecycle, error) {
+				return stubDeps(), lifecycle, nil
+			})
+			cmd.SetOut(failingWriter{err: writeErr})
+			cmd.SetErr(io.Discard)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetArgs([]string{name})
+			if err := cmd.Execute(); !errors.Is(err, writeErr) {
+				t.Fatalf("command error = %v, want output failure", err)
+			}
+			if !lifecycle.started || !lifecycle.stopped {
+				t.Fatal("output failure did not start and stop the graph")
+			}
+		})
 	}
 }
 

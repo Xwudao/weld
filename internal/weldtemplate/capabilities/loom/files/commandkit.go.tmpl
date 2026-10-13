@@ -5,8 +5,9 @@
 // and calls Run from a subcommand's RunE, so building the root command, showing
 // help or running an unrelated command never constructs the graph. Run starts
 // the graph, hands the resolved dependencies to the subcommand and stops the
-// graph within a bounded deadline, so a provider's cleanup always runs and a
-// teardown failure is joined onto the subcommand's error.
+// graph with a teardown deadline. Stop must cooperate with its context; this
+// deadline is not a hard execution limit. A teardown failure is joined onto the
+// subcommand's error.
 //
 // A command package depends on this file, not on the Loom runtime, so it never
 // imports github.com/Xwudao/loom and its tests can supply a stub Build.
@@ -18,13 +19,14 @@ import (
 	"time"
 )
 
-// stopTimeout bounds lifecycle teardown after a subcommand has run, so a
-// provider that registers an OnStop hook or a cleanup cannot hang the command.
+// stopTimeout is the cooperative deadline passed to Stop. A lifecycle or hook
+// that ignores its context can still block beyond this deadline.
 const stopTimeout = 10 * time.Second
 
 // Lifecycle is the start/stop contract of the resolved dependency graph. The
 // generated graph's *loom.Lifecycle satisfies it; this package deliberately does
-// not import Loom, so a command depends only on Start and Stop.
+// not import Loom, so a command depends only on Start and Stop. Stop must be
+// safe after a failed Start and should honor its context's deadline.
 type Lifecycle interface {
 	Start(context.Context) error
 	Stop(context.Context) error
@@ -32,11 +34,14 @@ type Lifecycle interface {
 
 // Build resolves a group's dependencies on demand. internal/app delegates it to
 // the generated internal/di initializer, so nothing a command package writes
-// constructs the graph.
+// constructs the graph. On success, Build must return a non-nil Lifecycle.
+// On failure, Build owns rollback of any resources already constructed; Run
+// returns the error without calling Start or Stop. Loom's generated initializer
+// performs this rollback and joins cleanup failures into its returned error.
 type Build[D any] func(context.Context) (D, Lifecycle, error)
 
 // Run resolves the graph, starts it, runs fn with the resolved dependencies and
-// stops it within a bounded deadline, joining any teardown failure onto fn's
+// calls Stop with a cooperative deadline, joining any teardown failure onto fn's
 // error. Call it once per subcommand, from RunE:
 //
 //	func newWidgetCommand(build commandkit.Build[*Deps]) *cobra.Command {
@@ -55,14 +60,14 @@ func Run[D any](ctx context.Context, build Build[D], fn func(context.Context, D)
 	if err != nil {
 		return err
 	}
-	// Start the resolved graph before use. A failed start still gets a bounded
-	// stop of whatever started, and both errors are preserved.
+	// Start the resolved graph before use. A failed start still gets a Stop
+	// with a teardown deadline, and both errors are preserved.
 	if err := lifecycle.Start(ctx); err != nil {
 		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
 		defer cancel()
 		return errors.Join(err, lifecycle.Stop(stopCtx))
 	}
-	// Stop within a bounded deadline and join any stop failure onto the
+	// Pass Stop a teardown deadline and join any stop failure onto the
 	// subcommand's own error, so a failed teardown is never swallowed.
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)

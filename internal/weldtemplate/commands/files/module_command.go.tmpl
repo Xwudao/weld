@@ -19,7 +19,9 @@ import (
 )
 
 // Deps is the dependency set the group's subcommands consume and the root of the
-// command's Loom graph.
+// command's Loom graph. Every real subcommand resolves the entire Deps set,
+// including transitive dependencies, even when it uses only one field. Split
+// dependency roots and graphs when subcommands need independent resource sets.
 //
 // Service is the module's business layer, the same interface the HTTP handler
 // uses, so a subcommand and a route share one implementation. Add one field for
@@ -30,7 +32,7 @@ import (
 //     That covers *config.Config, logging.Logger and, when installed, the Redis,
 //     mail and storage bindings, plus a data.Repository the project registered
 //     in providers.go: Loom injects
-//     them and prunes them until a subcommand consumes them.
+//     them and prunes them while Deps does not depend on them.
 //   - A dependency no provider declares needs a provider in
 //     internal/di/__modname___graph.go, for example loom.Provide(NewThing), with
 //     the same field here and the same parameter on NewDeps.
@@ -82,8 +84,8 @@ func newGreetCommand(build commandkit.Build[*Deps]) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), response.Message)
-				return nil
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), response.Message)
+				return err
 			})
 		},
 	}
@@ -101,8 +103,8 @@ func newStatusCommand(build commandkit.Build[*Deps]) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return commandkit.Run(cmd.Context(), build, func(ctx context.Context, deps *Deps) error {
 				deps.Logger.Info("__modname__ status", "module", "__modname__")
-				fmt.Fprintln(cmd.OutOrStdout(), "__modname__ ok")
-				return nil
+				_, err := fmt.Fprintln(cmd.OutOrStdout(), "__modname__ ok")
+				return err
 			})
 		},
 	}

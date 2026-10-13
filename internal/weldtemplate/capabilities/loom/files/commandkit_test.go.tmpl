@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // stubLifecycle records how the graph was driven and can fail either phase.
@@ -12,10 +13,92 @@ type stubLifecycle struct {
 	stopped  bool
 	startErr error
 	stopErr  error
+	stopFn   func(context.Context)
 }
 
 func (l *stubLifecycle) Start(context.Context) error { l.started = true; return l.startErr }
-func (l *stubLifecycle) Stop(context.Context) error  { l.stopped = true; return l.stopErr }
+func (l *stubLifecycle) Stop(ctx context.Context) error {
+	l.stopped = true
+	if l.stopFn != nil {
+		l.stopFn(ctx)
+	}
+	return l.stopErr
+}
+
+func TestRunBuildFailure(t *testing.T) {
+	buildErr := errors.New("build failed")
+	lifecycle := &stubLifecycle{}
+	ran := false
+	err := Run(context.Background(), func(context.Context) (*string, Lifecycle, error) {
+		return nil, lifecycle, buildErr
+	}, func(context.Context, *string) error {
+		ran = true
+		return nil
+	})
+	if !errors.Is(err, buildErr) {
+		t.Fatalf("Run error = %v, want build failure", err)
+	}
+	if ran || lifecycle.started || lifecycle.stopped {
+		t.Fatal("Run must leave rollback to Build on construction failure")
+	}
+}
+
+func TestRunTeardownContext(t *testing.T) {
+	for _, failStart := range []bool{false, true} {
+		t.Run(map[bool]string{false: "run", true: "start failure"}[failStart], func(t *testing.T) {
+			type contextKey struct{}
+			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "value"))
+			cancel()
+			lifecycle := &stubLifecycle{stopFn: func(stopCtx context.Context) {
+				if err := stopCtx.Err(); err != nil {
+					t.Fatalf("Stop inherited cancellation: %v", err)
+				}
+				if got := stopCtx.Value(contextKey{}); got != "value" {
+					t.Fatalf("Stop context value = %v", got)
+				}
+				deadline, ok := stopCtx.Deadline()
+				if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > stopTimeout {
+					t.Fatalf("Stop deadline = %v, present = %v", deadline, ok)
+				}
+			}}
+			if failStart {
+				lifecycle.startErr = errors.New("start failed")
+			}
+			err := Run(ctx, func(context.Context) (*string, Lifecycle, error) {
+				return nil, lifecycle, nil
+			}, func(runCtx context.Context, _ *string) error {
+				if runCtx != ctx {
+					t.Fatal("Run replaced the execution context")
+				}
+				return nil
+			})
+			if !errors.Is(err, lifecycle.startErr) {
+				t.Fatalf("Run error = %v, want %v", err, lifecycle.startErr)
+			}
+			if !lifecycle.stopped {
+				t.Fatal("Stop was not called")
+			}
+		})
+	}
+}
+
+func TestRunStopsOnPanic(t *testing.T) {
+	lifecycle := &stubLifecycle{}
+	panicValue := errors.New("command panic")
+	defer func() {
+		if got := recover(); got != panicValue {
+			t.Fatalf("panic = %v, want original panic", got)
+		}
+		if !lifecycle.stopped {
+			t.Fatal("panic did not stop the graph")
+		}
+	}()
+	_ = Run(context.Background(), func(context.Context) (*string, Lifecycle, error) {
+		return nil, lifecycle, nil
+	}, func(context.Context, *string) error {
+		panic(panicValue)
+	})
+}
 
 // TestRunStartsRunsAndStops proves a successful subcommand resolves the graph
 // once, runs with the resolved value, and stops the graph afterwards.
@@ -40,8 +123,8 @@ func TestRunStartsRunsAndStops(t *testing.T) {
 	}
 }
 
-// TestRunStopsWhenStartFails proves a failed start still gets a bounded stop of
-// whatever started, with both errors preserved.
+// TestRunStopsWhenStartFails proves a failed start still gets a Stop call,
+// with both errors preserved.
 func TestRunStopsWhenStartFails(t *testing.T) {
 	startErr := errors.New("start failed")
 	stopErr := errors.New("stop failed")

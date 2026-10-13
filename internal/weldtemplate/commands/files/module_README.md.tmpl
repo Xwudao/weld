@@ -20,16 +20,19 @@ require). The group resolves its dependencies from the command-specific graph in
 `internal/di/__modname___graph.go`. That graph binds `__modname__.NewService`
 (the same factory the HTTP server graph binds) and includes `commonModule`, the
 shared provider set `di.go` declares (configuration, logger and the installed
-db/redis/mail/storage/events bindings); Loom prunes every provider a subcommand does not
-consume, so the group never constructs the HTTP server, the scheduler or a
-database pool. A capability installed after this command still reaches it,
+db/redis/mail/storage/events bindings); Loom prunes providers outside the group's
+`Deps` dependency closure.
+Every real subcommand resolves all fields and transitive dependencies of `Deps`,
+even if it uses only one field. A database pool is constructed when that root
+requires it; the default graph excludes HTTP and cron. Split dependency roots
+and graphs when subcommands need independent resource sets. A capability installed after this command still reaches it,
 because the shared providers live in `commonModule` rather than in this stable
 graph.
 
 `internal/app/__modname___command.go` registers the group through
 `app.RegisterCommand` and delegates `Build` to `di.Init__ModName__`. Each
 subcommand calls `commandkit.Run`, which builds and starts the graph for that one
-invocation and stops it within a bounded deadline. Keep the module's `Service`
+invocation and calls Stop with a 10-second deadline (Stop must cooperate with its context). Keep the module's `Service`
 interface and `NewService` symbol stable; `internal/di/loom_gen.go` is generated
 by Loom and must never be edited.
 
