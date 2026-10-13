@@ -47,7 +47,7 @@ func TestHTTPExportAndClientCommands(t *testing.T) {
 	if out, err := run(t, args...); err != nil || !strings.Contains(out, "3 operation(s)") {
 		t.Fatalf("client: %s %v", out, err)
 	}
-	for _, name := range []string{"client_gen.go", "types_gen.go"} {
+	for _, name := range []string{"client_gen.go", "types_gen.go", "errors_gen.go"} {
 		data, err := os.ReadFile(filepath.Join(output, name))
 		if err != nil {
 			t.Fatal(err)

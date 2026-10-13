@@ -9,7 +9,9 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Xwudao/weld/internal/project"
@@ -69,7 +71,8 @@ func Export(ctx context.Context, dir string, opts ExportOptions) (*Contract, err
 		return nil, fmt.Errorf("HTTP server package not found")
 	}
 	c := &Contract{Version: Version, Service: m.Name}
-	ex := &exporter{contract: c, httpx: m.Module + "/internal/httpx", defs: map[string]Definition{}, named: map[*types.Named]string{}, owners: map[string]*types.Named{}}
+	ex := &exporter{contract: c, httpx: m.Module + "/internal/httpx", defs: map[string]Definition{}, named: map[*types.Named]string{}, owners: map[string]*types.Named{}, packages: map[*types.Package]*packages.Package{}}
+	packages.Visit(pkgs, func(p *packages.Package) bool { ex.packages[p.Types] = p; return true }, nil)
 	for _, p := range pkgs {
 		if p == server {
 			continue
@@ -109,6 +112,7 @@ type exporter struct {
 	defs     map[string]Definition
 	named    map[*types.Named]string
 	owners   map[string]*types.Named
+	packages map[*types.Package]*packages.Package
 }
 
 type mount struct {
@@ -527,12 +531,17 @@ func (e *exporter) typeOf(t types.Type, depth int) (Type, error) {
 		if n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == "time" && n.Obj().Name() == "Time" {
 			return Type{Kind: "time"}, nil
 		}
+		// Newer Go releases alias json.RawMessage to jsontext.Value.
+		if n.Obj().Pkg() != nil && ((n.Obj().Pkg().Path() == "encoding/json" && n.Obj().Name() == "RawMessage") || (n.Obj().Pkg().Path() == "encoding/json/jsontext" && n.Obj().Name() == "Value")) {
+			return Type{Kind: "raw"}, nil
+		}
+		hasCodec := false
 		for _, mt := range []types.Type{n, types.NewPointer(n)} {
 			set := types.NewMethodSet(mt)
 			for i := 0; i < set.Len(); i++ {
 				switch set.At(i).Obj().Name() {
 				case "MarshalJSON", "UnmarshalJSON", "MarshalText", "UnmarshalText":
-					return Type{}, fmt.Errorf("%s has custom serialization; v1 cannot copy its wire behavior", n)
+					hasCodec = true
 				}
 			}
 		}
@@ -555,7 +564,13 @@ func (e *exporter) typeOf(t types.Type, depth int) (Type, error) {
 		}
 		e.named[n] = name
 		e.owners[name] = n
-		underlying, err := e.typeOf(n.Underlying(), depth+1)
+		var underlying Type
+		var err error
+		if hasCodec {
+			underlying, err = e.weldEnum(n)
+		} else {
+			underlying, err = e.typeOf(n.Underlying(), depth+1)
+		}
 		if err != nil {
 			return Type{}, err
 		}
@@ -581,28 +596,62 @@ func (e *exporter) typeOf(t types.Type, depth int) (Type, error) {
 	case *types.Slice:
 		elem, err := e.typeOf(t.Elem(), depth+1)
 		return Type{Kind: "slice", Elem: &elem}, err
+	case *types.Array:
+		elem, err := e.typeOf(t.Elem(), depth+1)
+		return Type{Kind: "array", Elem: &elem, Len: t.Len()}, err
 	case *types.Map:
-		key, ok := t.Key().(*types.Basic)
-		if !ok || key.Kind() != types.String {
-			return Type{}, fmt.Errorf("JSON maps require plain string keys")
+		key, err := e.typeOf(t.Key(), depth+1)
+		if err != nil {
+			return Type{}, fmt.Errorf("map key: %w", err)
 		}
 		elem, err := e.typeOf(t.Elem(), depth+1)
-		return Type{Kind: "map", Elem: &elem}, err
+		return Type{Kind: "map", Key: &key, Elem: &elem}, err
 	case *types.Struct:
 		out := Type{Kind: "struct"}
 		for i := 0; i < t.NumFields(); i++ {
 			f := t.Field(i)
 			if !f.Exported() {
+				if f.Embedded() {
+					return Type{}, fmt.Errorf("unexported embedded DTO field %s is unsupported; export the embedded type", f.Name())
+				}
 				continue
 			}
-			if f.Embedded() {
-				return Type{}, fmt.Errorf("embedded DTO field %s is unsupported in v1; use explicit named fields", f.Name())
+			tag := t.Tag(i)
+			if !f.Embedded() && reflect.StructTag(tag).Get("json") == "-" && reflect.StructTag(tag).Get("path") == "" && reflect.StructTag(tag).Get("query") == "" {
+				continue
 			}
 			ft, err := e.typeOf(f.Type(), depth+1)
 			if err != nil {
 				return Type{}, fmt.Errorf("field %s: %w", f.Name(), err)
 			}
-			out.Fields = append(out.Fields, Field{Name: f.Name(), Type: ft, Tag: t.Tag(i)})
+			fieldName := f.Name()
+			if f.Embedded() {
+				base := ft
+				if base.Kind == "pointer" && base.Elem != nil {
+					base = *base.Elem
+				}
+				if base.Kind != "ref" {
+					return Type{}, fmt.Errorf("embedded special-codec field %s is unsupported", f.Name())
+				}
+				fieldName = base.Name
+				under := types.Unalias(f.Type())
+				if ptr, ok := under.(*types.Pointer); ok {
+					under = ptr.Elem()
+				}
+				if _, ok := under.Underlying().(*types.Struct); !ok {
+					jt := reflect.StructTag(tag).Get("json")
+					if strings.Split(jt, ",")[0] == "" {
+						replacement := "json:" + strconv.Quote(f.Name()+jt)
+						original := "json:" + strconv.Quote(jt)
+						if strings.Contains(tag, original) {
+							tag = strings.Replace(tag, original, replacement, 1)
+						} else {
+							tag = replacement + " " + tag
+						}
+					}
+				}
+			}
+			out.Fields = append(out.Fields, Field{Name: fieldName, Type: ft, Tag: tag, Embedded: f.Embedded()})
 		}
 		return out, nil
 	default:

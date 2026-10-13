@@ -90,9 +90,11 @@ func TestGeneratorRejectsInvalidPackageAndKeepsRuntimeTemplateFormatted(t *testi
 	}
 	// The checked-in runtime is itself Go source and should not rely on the
 	// final generator formatting pass to fix its indentation.
-	formatted, err := format.Source([]byte(clientRuntime))
-	if err != nil || string(formatted) != clientRuntime {
-		t.Fatal("unformatted runtime template", err)
+	for _, source := range []string{clientRuntime, errorsRuntime} {
+		formatted, err := format.Source([]byte(source))
+		if err != nil || string(formatted) != source {
+			t.Fatal("unformatted runtime template", err)
+		}
 	}
 	files, err := Generate(simpleContract(), "client")
 	if err != nil {

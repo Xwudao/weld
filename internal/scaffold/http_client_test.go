@@ -24,6 +24,16 @@ func TestHTTPGeneratedClientAcrossProjects(t *testing.T) {
 	if err := os.WriteFile(servicePath, []byte(service), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	modulePath := filepath.Join(dir, "internal/modules/widget/module.go")
+	module := strings.Replace(readFile(t, modulePath), "func Register(router *httpx.Router, service Service) {", "func Register(router *httpx.Router, service Service) {\n httpx.NoInput(router, nethttp.MethodGet, \"/detailed\", handleDetailed, httpx.Operation(\"widget_detailed\"))", 1)
+	if err := os.WriteFile(modulePath, []byte(module), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handlerPath := filepath.Join(dir, "internal/modules/widget/handler.go")
+	handler := readFile(t, handlerPath) + "\nfunc handleDetailed(context.Context)(struct{},error){return struct{}{},httpx.BadRequest(\"invalid item\").WithDetails(map[string]string{\"field\":\"name\"})}\n"
+	if err := os.WriteFile(handlerPath, []byte(handler), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	contract, err := httpcontract.Export(context.Background(), dir, httpcontract.ExportOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -93,11 +103,16 @@ func TestGeneratedClientCallsActualTypedHandlers(t *testing.T) {
  if _,err:=client.WidgetIndex(context.Background());err!=nil{t.Fatal(err)}
  _,err=client.WidgetCreateItem(context.Background(),catalog.WidgetCreateRequest{Name:" "})
  var api *catalog.APIError
- if !errors.As(err,&api) || api.Status!=400 {t.Fatalf("validation error=%v",err)}
+ if !errors.As(err,&api) || api.Status!=400 || api.Operation!="widget_create_item" || api.RequestID=="" {t.Fatalf("validation error=%+v",api)}
  anonymous,err:=catalog.New(server.URL);if err!=nil{t.Fatal(err)}
  _,err=anonymous.WidgetCreateItem(context.Background(),catalog.WidgetCreateRequest{Name:"widget"})
- if !errors.As(err,&api) || api.Status!=401 {t.Fatalf("authorization error=%v",err)}
+ if !errors.As(err,&api) || api.Status!=401 || api.RequestID=="" {t.Fatalf("authorization error=%+v",api)}
  ctx,cancel:=context.WithCancel(context.Background());cancel()
  if _,err:=client.WidgetIndex(ctx);!errors.Is(err,context.Canceled){t.Fatalf("cancel error=%v",err)}
+ var transport *catalog.TransportError
+ _,cancelErr:=client.WidgetIndex(ctx)
+ if !errors.As(cancelErr,&transport) || transport.Operation!="widget_index" {t.Fatalf("transport error=%v",cancelErr)}
+ _,err=client.WidgetDetailed(context.Background())
+ if !errors.As(err,&api) || api.Status!=400 || api.RequestID=="" || api.Operation!="widget_detailed" || string(api.Details)!=` + "`" + `{"field":"name"}` + "`" + ` {t.Fatalf("detailed error=%+v",api)}
 }
 `

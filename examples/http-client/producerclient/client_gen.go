@@ -66,32 +66,29 @@ func New(baseURL string, options ...Option) (*Client, error) {
 	return c, nil
 }
 
-// APIError is a non-success response. Message is the server's envelope message;
-// a non-envelope response receives a generic message, never an HTML body.
-type APIError struct {
-	Status  int
-	Code    int
-	Message string
-}
-
-func (e *APIError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.Status, e.Message)
-}
-
 const maxResponseBytes = 8 << 20
 
-func (c *Client) do(ctx context.Context, method, path string, input, output any, status int, noContent bool) error {
+type responseEnvelope struct {
+	Code           *int            `json:"code"`
+	Message        string          `json:"msg"`
+	Data           json.RawMessage `json:"data"`
+	Details        json.RawMessage `json:"details"`
+	RequestID      string          `json:"request_id"`
+	RequestIDCamel string          `json:"requestId"`
+}
+
+func (c *Client) do(ctx context.Context, info requestInfo, path string, input, output any, status int, noContent bool) error {
 	var body io.Reader
 	if input != nil {
 		data, err := json.Marshal(input)
 		if err != nil {
-			return fmt.Errorf("client: encode request: %w", err)
+			return info.requestError("encode", err)
 		}
 		body = bytes.NewReader(data)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	request, err := http.NewRequestWithContext(ctx, info.method, c.baseURL+path, body)
 	if err != nil {
-		return fmt.Errorf("client: create request: %w", err)
+		return info.requestError("create", err)
 	}
 	request.Header = c.headers.Clone()
 	request.Header.Set("Accept", "application/json")
@@ -100,43 +97,83 @@ func (c *Client) do(ctx context.Context, method, path string, input, output any,
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("client: send request: %w", err)
+		return info.transportError("send", 0, "", err)
 	}
 	defer response.Body.Close()
+	id := response.Header.Get("X-Request-ID")
+	var api *APIError
+	if response.StatusCode != status && (response.StatusCode < 200 || response.StatusCode >= 300) {
+		message := http.StatusText(response.StatusCode)
+		if message == "" {
+			message = "request failed"
+		}
+		api = &APIError{Operation: info.operation, Method: info.method, Route: info.route, Status: response.StatusCode, Code: response.StatusCode, Message: message, RequestID: id, Headers: response.Header.Clone()}
+	}
+	failure := func(err error) error {
+		if api != nil {
+			api.Err = err
+			return api
+		}
+		return err
+	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
-		return fmt.Errorf("client: read response: %w", err)
+		return failure(info.transportError("read", response.StatusCode, id, err))
 	}
 	if len(data) > maxResponseBytes {
-		return fmt.Errorf("client: response exceeds %d bytes", maxResponseBytes)
+		return failure(info.protocolError("limit", response.StatusCode, status, id, fmt.Errorf("response exceeds %d bytes", maxResponseBytes)))
 	}
-	var envelope struct {
-		Code    int             `json:"code"`
-		Message string          `json:"msg"`
-		Data    json.RawMessage `json:"data"`
-	}
+	var envelope responseEnvelope
 	decoded := json.Unmarshal(data, &envelope)
-	if response.StatusCode != status && (response.StatusCode < 200 || response.StatusCode >= 300) {
-		apiError := &APIError{Status: response.StatusCode, Code: response.StatusCode, Message: http.StatusText(response.StatusCode)}
-		if decoded == nil && envelope.Code != 0 {
-			apiError.Code, apiError.Message = envelope.Code, envelope.Message
+	if decoded == nil && id == "" {
+		id = envelope.RequestID
+		if id == "" {
+			id = envelope.RequestIDCamel
 		}
-		return apiError
+	}
+	if api != nil {
+		api.RequestID = id
+		if decoded == nil && envelope.Code != nil {
+			api.Code = *envelope.Code
+			if envelope.Message != "" {
+				api.Message = envelope.Message
+			}
+			if len(envelope.Data) > 0 && string(envelope.Data) != "null" {
+				api.Data = envelope.Data
+			}
+			if len(envelope.Details) > 0 && string(envelope.Details) != "null" {
+				api.Details = envelope.Details
+			} else {
+				api.Details = api.Data
+			}
+		} else {
+			if decoded == nil {
+				decoded = fmt.Errorf("missing envelope code")
+			}
+			api.Err = info.protocolError("envelope", response.StatusCode, status, id, decoded)
+		}
+		return api
 	}
 	if response.StatusCode != status {
-		return fmt.Errorf("client: unexpected HTTP status %d (want %d)", response.StatusCode, status)
+		return info.protocolError("status", response.StatusCode, status, id, nil)
 	}
 	if noContent {
 		return nil
 	}
 	if decoded != nil {
-		return fmt.Errorf("client: decode response envelope: %w", decoded)
+		return info.protocolError("envelope", response.StatusCode, status, id, decoded)
 	}
-	if envelope.Code != response.StatusCode || len(envelope.Data) == 0 {
-		return fmt.Errorf("client: invalid response envelope")
+	if envelope.Code == nil || *envelope.Code != response.StatusCode || len(envelope.Data) == 0 {
+		return info.protocolError("envelope", response.StatusCode, status, id, fmt.Errorf("invalid response envelope"))
+	}
+	if string(envelope.Data) == "null" {
+		target := reflect.ValueOf(output)
+		if target.Kind() != reflect.Pointer || (target.Elem().Kind() != reflect.Pointer && target.Elem().Kind() != reflect.Slice && target.Elem().Kind() != reflect.Map && target.Elem().Type() != reflect.TypeOf(json.RawMessage{})) {
+			return info.protocolError("data", response.StatusCode, status, id, fmt.Errorf("null response for a non-nullable DTO"))
+		}
 	}
 	if err := json.Unmarshal(envelope.Data, output); err != nil {
-		return fmt.Errorf("client: decode response data: %w", err)
+		return info.protocolError("data", response.StatusCode, status, id, err)
 	}
 	return nil
 }
@@ -225,33 +262,36 @@ func scalar(v reflect.Value) (string, error) {
 // WidgetCreateItem calls POST /api/widget/admin/items.
 func (c *Client) WidgetCreateItem(ctx context.Context, request WidgetCreateRequest) (WidgetItem, error) {
 	var response WidgetItem
-	path := "/api/widget/admin/items"
+	info := requestInfo{operation: "widget_create_item", method: "POST", route: "/api/widget/admin/items"}
+	path := info.route
 	var err error
 	path, err = requestPath(path, request, false)
 	if err != nil {
-		return response, err
+		return response, info.requestError("bind", err)
 	}
-	errCall := c.do(ctx, "POST", path, request, &response, 201, false)
+	errCall := c.do(ctx, info, path, request, &response, 201, false)
 	return response, errCall
 }
 
 // WidgetGreet calls GET /api/widget/greet.
 func (c *Client) WidgetGreet(ctx context.Context, request WidgetRequest) (WidgetResponse, error) {
 	var response WidgetResponse
-	path := "/api/widget/greet"
+	info := requestInfo{operation: "widget_greet", method: "GET", route: "/api/widget/greet"}
+	path := info.route
 	var err error
 	path, err = requestPath(path, request, true)
 	if err != nil {
-		return response, err
+		return response, info.requestError("bind", err)
 	}
-	errCall := c.do(ctx, "GET", path, nil, &response, 200, false)
+	errCall := c.do(ctx, info, path, nil, &response, 200, false)
 	return response, errCall
 }
 
 // WidgetIndex calls GET /api/widget.
 func (c *Client) WidgetIndex(ctx context.Context) (WidgetResponse, error) {
 	var response WidgetResponse
-	path := "/api/widget"
-	errCall := c.do(ctx, "GET", path, nil, &response, 200, false)
+	info := requestInfo{operation: "widget_index", method: "GET", route: "/api/widget"}
+	path := info.route
+	errCall := c.do(ctx, info, path, nil, &response, 200, false)
 	return response, errCall
 }

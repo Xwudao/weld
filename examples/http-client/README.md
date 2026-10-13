@@ -56,8 +56,11 @@ func (c *Client) WidgetIndex(ctx context.Context) (WidgetResponse, error)
 ```
 
 Wire DTOs are copied with their JSON/query/path tags; service dependencies and
-validation methods are not copied. Non-success responses return `*APIError`,
-which supports `errors.As`. The client unwraps `{code,msg,data}` automatically.
+validation methods are not copied. Non-success responses return `*APIError`, with operation, request ID, JSON
+Details/Data and response Headers. Local, network and protocol failures return
+`*RequestError`, `*TransportError` and `*ProtocolError`. All support errors.As;
+underlying causes remain available through errors.Is/Unwrap. The client unwraps
+`{code,msg,data}` automatically.
 
 ## Regenerate this checked-in sample
 
@@ -73,10 +76,14 @@ go run ./cmd/weld client add producerclient \
 
 - Only typed routes declared directly in installed modules' `Register` functions.
 - Static paths, options, Group/Require and simple ModulePrefix expressions.
-- Scalars, structs, pointers, slices, string-keyed maps and `time.Time`.
+- Scalars/aliases, structs, pointers, slices, fixed arrays, json.RawMessage,
+  exported anonymous fields, unchanged weld enums and time.Time. Map keys may
+  be strings, integers, weld enums or time.Time.
 - Raw endpoints are reported as skipped. Dynamic route helpers/control flow,
-  wildcard paths, embedded/interface/generic DTOs and custom serialization are
-  rejected instead of guessed.
+  wildcard paths, unexported/special-codec embeddings, interface/generic DTOs
+  and arbitrary custom serialization are rejected instead of guessed.
+- New exports use contract version 2; this original version 1 snapshot remains
+  supported so it also demonstrates refreshing an existing client.
 - This is a snapshot. Re-export with `http export --force` after API changes,
   then repeat `client add`. No OpenAPI, service discovery, automatic retry,
   version negotiation or API compatibility analysis.

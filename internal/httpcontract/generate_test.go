@@ -38,6 +38,7 @@ func TestGeneratedClientBuildsAndExercisesTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFixture(t, dir, "client_test.go", string(formatted))
+	writeFixture(t, dir, "errors_test.go", generatedErrorTests)
 	cmd := exec.Command("go", "test", "-race", "./...")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOWORK=off")

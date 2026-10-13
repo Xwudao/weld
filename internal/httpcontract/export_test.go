@@ -158,7 +158,7 @@ func TestExportRejectsUnsupportedSource(t *testing.T) {
 		{"dynamic routes", strings.Replace(fixtureModule, `hx.Get(first, "/{id}", handleFetch(service), hx.Operation("fetch"))`, `if time.Now().Unix()>0 { hx.Get(first, "/{id}", handleFetch(service), hx.Operation("fetch")) }`, 1), "dynamic Register control flow"},
 		{"custom serialization", strings.Replace(fixtureModule, "func handleFetch", `func (r Result) MarshalJSON()([]byte,error){return nil,nil}
 func handleFetch`, 1), "custom serialization"},
-		{"anonymous embedded DTO", strings.Replace(fixtureModule, "Name string `json:\"name\"`\n Created", "Body\n Name string `json:\"name\"`\n Created", 1), "embedded DTO field"},
+		{"unexported embedded DTO", strings.Replace(fixtureModule, "type Result struct {", "type hidden struct { Value string }; type Result struct { hidden", 1), "unexported embedded DTO field"},
 		{"unknown operation expression", strings.Replace(fixtureModule, `hx.Operation("fetch")`, `hx.Operation(time.Now().String())`, 1), "not statically evaluable"},
 	}
 	for _, tc := range cases {

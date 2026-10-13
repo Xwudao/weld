@@ -99,7 +99,11 @@ func runClientAdd(cmd *cobra.Command, args []string) error {
 	for name, data := range files {
 		artifacts[filepath.Join(out, name)] = data
 	}
-	if err := applyHTTPArtifacts(cmd, dir, artifacts, force, true); err != nil {
+	stale, err := obsoleteClientEnums(dir, out, files)
+	if err != nil {
+		return err
+	}
+	if err := applyHTTPArtifacts(cmd, dir, artifacts, force, true, stale...); err != nil {
 		return err
 	}
 	verb := "Generated"
@@ -110,12 +114,46 @@ func runClientAdd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// Only obsolete enum files carrying the client ownership marker are removed.
+func obsoleteClientEnums(dir, out string, files map[string][]byte) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(dir, out))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var stale []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasPrefix(name, "enum_") || !strings.HasSuffix(name, "_gen.go") || files[name] != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, out, name))
+		if err != nil {
+			return nil, err
+		}
+		if bytes.HasPrefix(data, []byte(httpcontract.ClientHeader+"\n")) {
+			stale = append(stale, filepath.Join(out, name))
+		}
+	}
+	return stale, nil
+}
+
 // Preflight every file before writing any, then use the existing atomic write
 // and rollback helper. Dry runs execute the exact same validation and planning.
-func applyHTTPArtifacts(cmd *cobra.Command, dir string, files map[string][]byte, force, generated bool) error {
+func applyHTTPArtifacts(cmd *cobra.Command, dir string, files map[string][]byte, force, generated bool, deleteFiles ...string) error {
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)
+	}
+	deletes := map[string]bool{}
+	for _, name := range deleteFiles {
+		if _, exists := files[name]; exists {
+			return fmt.Errorf("cannot write and delete %s", name)
+		}
+		names = append(names, name)
+		deletes[name] = true
 	}
 	sort.Strings(names)
 	var operations []project.Operation
@@ -137,6 +175,19 @@ func applyHTTPArtifacts(cmd *cobra.Command, dir string, files map[string][]byte,
 			return fmt.Errorf("refusing to overwrite symlink %s", path)
 		}
 		existing, err := os.ReadFile(path)
+		if deletes[name] {
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if !bytes.HasPrefix(existing, []byte(httpcontract.ClientHeader+"\n")) {
+				return fmt.Errorf("refusing to delete hand-owned file %s", path)
+			}
+			operations = append(operations, project.Operation{Path: name, Delete: true})
+			continue
+		}
 		if err == nil {
 			if bytes.Equal(existing, files[name]) {
 				continue
@@ -154,7 +205,11 @@ func applyHTTPArtifacts(cmd *cobra.Command, dir string, files map[string][]byte,
 	if dryRun {
 		fmt.Fprintf(cmd.OutOrStdout(), "Plan (%d change(s), dry run):\n", len(operations))
 		for _, op := range operations {
-			fmt.Fprintf(cmd.OutOrStdout(), "  write %s\n", filepath.Join(dir, op.Path))
+			action := "write"
+			if op.Delete {
+				action = "delete"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", action, filepath.Join(dir, op.Path))
 		}
 		return nil
 	}

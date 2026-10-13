@@ -12,9 +12,10 @@ import (
 // SuccessMsg for a success response and a short, client-safe message otherwise;
 // data is the payload, or null when there is none (every error response).
 type Envelope struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data any    `json:"data"`
+	Code    int    `json:"code"`
+	Msg     string `json:"msg"`
+	Data    any    `json:"data"`
+	Details any    `json:"details,omitempty"`
 }
 
 // SuccessMsg is the message every success envelope carries.
@@ -42,12 +43,22 @@ func Error(w http.ResponseWriter, status int, message string) {
 	writeEnvelope(w, status, message, nil)
 }
 
+// ErrorWithDetails writes an error envelope with explicitly client-safe JSON
+// details. Unknown errors are never passed here automatically.
+func ErrorWithDetails(w http.ResponseWriter, status int, message string, details any) {
+	writeEnvelopeDetails(w, status, message, nil, details)
+}
+
 // internalErrorBody is the constant body writeEnvelope falls back to when data
 // cannot be marshalled. It is a literal so it cannot itself fail.
 var internalErrorBody = []byte(`{"code":500,"msg":"internal error","data":null}`)
 
 func writeEnvelope(w http.ResponseWriter, status int, message string, data any) {
-	body, err := json.Marshal(Envelope{Code: status, Msg: message, Data: data})
+	writeEnvelopeDetails(w, status, message, data, nil)
+}
+
+func writeEnvelopeDetails(w http.ResponseWriter, status int, message string, data, details any) {
+	body, err := json.Marshal(Envelope{Code: status, Msg: message, Data: data, Details: details})
 	if err != nil {
 		// The envelope's own fields cannot fail, but data can (a channel, a
 		// func, a cyclic value). Substitute the constant body rather than write

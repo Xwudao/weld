@@ -13,7 +13,7 @@ import (
 	"unicode"
 )
 
-const Version = 1
+const Version = 2
 const MaxContractBytes = 8 << 20
 
 // Contract is a portable snapshot, independent of the exporting Go module.
@@ -45,16 +45,25 @@ type Definition struct {
 
 // Type is intentionally limited to ordinary JSON-compatible Go data types.
 type Type struct {
-	Kind   string  `json:"kind"` // basic, ref, pointer, slice, map, struct, time
-	Name   string  `json:"name,omitempty"`
-	Elem   *Type   `json:"elem,omitempty"`
-	Fields []Field `json:"fields,omitempty"`
+	Kind   string      `json:"kind"` // basic, ref, pointer, slice, array, map, struct, time, raw, enum
+	Name   string      `json:"name,omitempty"`
+	Elem   *Type       `json:"elem,omitempty"`
+	Key    *Type       `json:"key,omitempty"`
+	Fields []Field     `json:"fields,omitempty"`
+	Len    int64       `json:"len,omitempty"`
+	Values []EnumValue `json:"values,omitempty"`
+}
+
+type EnumValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type Field struct {
-	Name string `json:"name"`
-	Type Type   `json:"type"`
-	Tag  string `json:"tag,omitempty"`
+	Name     string `json:"name"`
+	Type     Type   `json:"type"`
+	Tag      string `json:"tag,omitempty"`
+	Embedded bool   `json:"embedded,omitempty"`
 }
 
 var basicTypes = map[string]bool{
@@ -62,7 +71,9 @@ var basicTypes = map[string]bool{
 	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true, "float32": true, "float64": true,
 }
 
-var reservedTypes = map[string]bool{"Client": true, "Option": true, "APIError": true, "New": true, "WithHTTPClient": true, "WithHeader": true, "WithBearerToken": true}
+var mapKeyTypes = map[string]bool{"string": true, "int": true, "int8": true, "int16": true, "int32": true, "int64": true, "uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true}
+
+var reservedTypes = map[string]bool{"Client": true, "Option": true, "APIError": true, "New": true, "WithHTTPClient": true, "WithHeader": true, "WithBearerToken": true, "RequestError": true, "TransportError": true, "ProtocolError": true}
 
 func exported(name string) bool {
 	return token.IsIdentifier(name) && unicode.IsUpper([]rune(name)[0])
@@ -118,7 +129,7 @@ func (c *Contract) JSON() ([]byte, error) {
 }
 
 func (c *Contract) Validate() error {
-	if c.Version != Version {
+	if c.Version != Version && c.Version != 1 {
 		return fmt.Errorf("unsupported HTTP contract version %d", c.Version)
 	}
 	if c.Service == "" || len(c.Operations) == 0 {
@@ -134,7 +145,22 @@ func (c *Contract) Validate() error {
 		}
 		defs[d.Name] = d.Type
 	}
+	symbols := map[string]bool{}
+	for name := range reservedTypes {
+		symbols[name] = true
+	}
+	for name := range defs {
+		symbols[name] = true
+	}
 	for _, d := range c.Types {
+		if d.Type.Kind == "enum" {
+			for _, name := range enumSymbols(d) {
+				if !exported(name) || symbols[name] {
+					return fmt.Errorf("duplicate or invalid enum symbol %q", name)
+				}
+				symbols[name] = true
+			}
+		}
 		if err := validateType(d.Type, defs, 0); err != nil {
 			return fmt.Errorf("DTO %s: %w", d.Name, err)
 		}
@@ -209,8 +235,39 @@ func validateType(t Type, defs map[string]Type, depth int) error {
 		if _, ok := defs[t.Name]; !ok {
 			return fmt.Errorf("unknown DTO %q", t.Name)
 		}
-	case "time":
+	case "time", "raw":
+	case "enum":
+		if len(t.Values) == 0 {
+			return fmt.Errorf("enum needs declared values")
+		}
+		seen := map[string]bool{}
+		for _, v := range t.Values {
+			if !exported(v.Name) || seen[v.Value] {
+				return fmt.Errorf("invalid enum constant %q or duplicate wire value", v.Name)
+			}
+			seen[v.Value] = true
+		}
+	case "array":
+		if t.Len < 0 || t.Len > 1<<20 {
+			return fmt.Errorf("array length must be between 0 and 1048576")
+		}
+		if t.Elem == nil {
+			return fmt.Errorf("array needs an element type")
+		}
+		return validateType(*t.Elem, defs, depth+1)
 	case "pointer", "slice", "map":
+		if t.Kind == "map" && t.Key != nil {
+			if err := validateType(*t.Key, defs, depth+1); err != nil {
+				return fmt.Errorf("map key: %w", err)
+			}
+			key := *t.Key
+			for i := 0; key.Kind == "ref" && i < 64; i++ {
+				key = defs[key.Name]
+			}
+			if key.Kind != "enum" && key.Kind != "time" && (key.Kind != "basic" || !mapKeyTypes[key.Name]) {
+				return fmt.Errorf("map keys must be strings, integers, weld enums or time.Time")
+			}
+		}
 		if t.Elem == nil {
 			return fmt.Errorf("%s needs an element type", t.Kind)
 		}
@@ -222,6 +279,15 @@ func validateType(t Type, defs map[string]Type, depth int) error {
 				return fmt.Errorf("invalid or duplicate field %q", f.Name)
 			}
 			seen[f.Name] = true
+			if f.Embedded {
+				ft := f.Type
+				if ft.Kind == "pointer" && ft.Elem != nil {
+					ft = *ft.Elem
+				}
+				if ft.Kind != "ref" || ft.Name != f.Name {
+					return fmt.Errorf("embedded field %s must reference its named DTO", f.Name)
+				}
+			}
 			if err := validateType(f.Type, defs, depth+1); err != nil {
 				return fmt.Errorf("field %s: %w", f.Name, err)
 			}
@@ -248,6 +314,8 @@ func validateSize(t Type, defs map[string]Type, state map[string]uint8) error {
 			return err
 		}
 		state[t.Name] = 2
+	case "array":
+		return validateSize(*t.Elem, defs, state)
 	case "struct":
 		for _, f := range t.Fields {
 			if err := validateSize(f.Type, defs, state); err != nil {
@@ -311,10 +379,10 @@ func validateBinding(t Type, defs map[string]Type, pattern, binding string) erro
 				if err != nil {
 					return err
 				}
-				if ft.Kind != "basic" || ft.Name != "string" {
+				if (ft.Kind != "basic" || ft.Name != "string") && ft.Kind != "enum" {
 					return fmt.Errorf("field %s: query slices must contain strings", f.Name)
 				}
-			} else if ft.Kind != "basic" {
+			} else if ft.Kind != "basic" && ft.Kind != "enum" {
 				return fmt.Errorf("field %s: %s needs a scalar", f.Name, tag)
 			}
 			if tag == "path" {

@@ -828,7 +828,8 @@ weld http export --dir ./producer
 weld client add producer --dir ./consumer --from ../producer/weld-api.json
 ```
 
-The output is `consumer/internal/clients/producer/{client_gen,types_gen}.go`:
+The output includes `consumer/internal/clients/producer/{client_gen,types_gen,errors_gen}.go`
+(and enum helper files when needed):
 
 ```go
 client, err := producer.New("http://producer:8080",
@@ -856,11 +857,31 @@ registrations, static Group/Require and simple ModulePrefix expressions.
 Select one module with `--module widget`; `--prefix /external/widget` supplies
 an explicit mount when its prefix is dynamic.
 
-Ordinary structs, scalars, pointers, slices, string-keyed maps and time.Time
-are supported. Raw routes are listed as skipped. Dynamic registration helpers,
-wildcard paths, embedded/interface/generic DTOs and custom serialization are
-rejected. Export is a transport snapshot, not validation, OpenAPI, service
+DTOs support scalars/aliases, structs, pointers, slices, fixed arrays,
+json.RawMessage, time.Time, and maps keyed by strings, integers, weld enums or
+time.Time. Exported anonymous fields preserve Go JSON promotion, shadowing and
+ambiguity rules; path/query binding still uses only explicit top-level tags.
+Unchanged weld enums copy constants, parsing and strict text/JSON decoding.
+Ignored JSON fields without path/query bindings are not copied. Fixed arrays
+are limited to 1,048,576 elements. Raw routes are listed as skipped. Dynamic
+registration helpers, wildcard paths, unexported or special-codec embeddings,
+interface/generic DTOs and arbitrary custom serialization are rejected.
+New exports use contract version 2; the generator still accepts version 1 snapshots. Export is a transport snapshot, not validation, OpenAPI, service
 discovery or compatibility analysis.
+
+Errors are structured: `RequestError` for local binding/encoding/construction,
+`TransportError` for network/read failures, `ProtocolError` for invalid success
+responses, and `APIError` for non-success HTTP statuses. Each records the
+operation/method/route template; response errors also record status and request
+ID. `errors.Is`/`errors.As` preserve underlying causes, including cancellation,
+deadlines and JSON decoder errors. `APIError` exposes JSON Details/Data and
+response Headers, while its Error string never dumps raw response bodies or
+request URLs. Known HTTP failure statuses survive body read/size/parse errors.
+
+Server handlers can explicitly send safe structured details with
+`httpx.BadRequest("invalid item").WithDetails(map[string]string{"field": "name"})`.
+Unknown failures stay redacted. Refresh existing producers with
+`weld upgrade http` to obtain this optional server API.
 
 After an API change, re-export with `http export --force`, then repeat
 `client add`. Generated client files are tool-owned and rewritten; keep custom

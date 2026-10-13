@@ -32,9 +32,21 @@ func (e *DecodeError) Error() string { return e.Message }
 type HTTPError struct {
 	Status  int
 	Message string
+	// Details is explicitly client-safe structured information, never an
+	// underlying error, stack trace or automatic dump of internal state.
+	Details any
 }
 
 func (e *HTTPError) Error() string { return e.Message }
+
+// WithDetails returns a copy with client-safe structured details. It does not
+// mutate a shared error. If details cannot encode as JSON, the response is a
+// redacted 500, just like a failed success payload.
+func (e *HTTPError) WithDetails(details any) *HTTPError {
+	copy := *e
+	copy.Details = details
+	return &copy
+}
 
 // NewHTTPError returns an error that maps to the given transport status and
 // client-safe message.
@@ -65,7 +77,7 @@ func WriteError(w http.ResponseWriter, err error) {
 	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
-		Error(w, httpErr.Status, httpErr.Message)
+		ErrorWithDetails(w, httpErr.Status, httpErr.Message, httpErr.Details)
 		return
 	}
 	Error(w, ErrorStatus, ErrorMsg)

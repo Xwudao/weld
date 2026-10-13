@@ -116,7 +116,8 @@ weld client add producer --dir ../consumer --from ../producer/weld-api.json
 ```
 
 The consumer gets `internal/clients/producer/client_gen.go` and
-`types_gen.go`, depending only on the standard library:
+`types_gen.go`, `errors_gen.go` and optional enum helpers, depending only on
+the standard library:
 
 ```go
 client, err := producer.New("http://localhost:8080",
@@ -149,17 +150,57 @@ Use `--module widget --prefix /external/widget` for an explicit mount override.
 Without Operation, named handlers receive a fallback ID based on module and
 handler names; anonymous handlers require Operation.
 
-Supported DTOs include scalars, structs, pointers, slices (including byte
-slices), string-keyed maps, recursive pointer DTOs and time.Time. Embedded
-fields, interface/generic DTOs, custom serialization (including custom-codec
-enums), dynamic registration helpers/control flow and wildcard paths are
-rejected explicitly. Raw routes are listed as skipped, not guessed.
+DTOs support scalars/aliases, structs, pointers, slices (including byte slices),
+fixed arrays (up to 1,048,576 elements), json.RawMessage, recursive pointer DTOs
+and time.Time. Maps may use string, integer, weld enum or time.Time keys.
+Exported anonymous fields retain standard Go JSON promotion/conflict rules;
+path/query binding does not recursively flatten embeddings. Unchanged weld
+enums copy constants, helpers and strict JSON/text decoding. Interface/generic
+DTOs, unexported or special-codec embeddings, arbitrary custom serialization,
+dynamic registration helpers/control flow and wildcard paths are rejected
+explicitly. New contracts use version 2; version 1 snapshots remain readable. Raw routes are listed as skipped, not guessed.
 Only installed HTTP business modules are exported, not arbitrary DI callbacks
 or custom middleware transformations of success responses.
 
+### Structured errors
+
+The generated client has four error types usable with `errors.As`:
+
+- `RequestError`: local bind/encode/create failure.
+- `TransportError`: send/read failure; Unwrap preserves context/net causes,
+  and Timeout reports a deadline/timeout.
+- `ProtocolError`: status mismatch, response limit, envelope or DTO decode
+  failure. Null data for a non-nullable response is a protocol error.
+- `APIError`: non-success HTTP status, with Code, Message, RequestID,
+  Details/Data as json.RawMessage, and cloned response Headers. Details falls
+  back to Data for older error envelopes.
+
+Errors carry Operation, Method and Route (the contract template, not a
+credential-bearing request URL). Response errors retain HTTP status and request
+ID; header X-Request-ID wins over body request_id/requestId. Known HTTP errors
+remain APIError even when their body is unreadable, oversized or malformed;
+Unwrap exposes the secondary transport/protocol cause. Raw bodies, error
+details, decoder messages and actual request URLs are not printed by Error().
+APIError prints only the explicit server message or a generic status message.
+
+A handler can send details explicitly:
+
+```go
+return Item{}, httpx.BadRequest("invalid item").WithDetails(
+	map[string]string{"field": "name"},
+)
+```
+
+WithDetails returns a copy, not a mutation of a shared HTTPError.
+Only put client-safe values there. Unknown errors still get a redacted 500;
+details that fail JSON encoding also become a redacted 500.
+Middleware can use `httpx.ErrorWithDetails(w, status, message, details)`.
+Existing producers need `weld upgrade http` before using these optional APIs.
+
 Re-export a changed contract with `weld http export --force`, then repeat
 `weld client add` to refresh the generated files. Generated clients are
-tool-owned and rewritten; keep custom wrappers in separate files. Hand-owned
+tool-owned and rewritten; obsolete tool-owned enum files are removed on refresh.
+Keep custom wrappers in separate files. Hand-owned
 files are refused unless `--force` is supplied. Both commands support
 `--dry-run`. This is a transport snapshot, not validation rules, service
 discovery or an API compatibility checker.
