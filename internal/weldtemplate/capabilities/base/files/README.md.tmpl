@@ -50,6 +50,11 @@ weld add db    # PostgreSQL: SQL migrations, sqlc queries and a repository (no H
 weld add redis # an opt-in Redis client with typed connection config (no HTTP)
 ```
 
+The web frontend requires pnpm and Node.js `^20.19.0 || >=22.12.0` (Vite 8).
+Type checking uses `tsgo` (`pnpm --prefix web run type-check`). The native React
+Compiler is enabled through `oxc-transform-react` (experimental), using the
+compiler runtime built into React 19.
+
 `weld add web` installs `http`, which owns the `serve` command and the HTTP
 server, and then the frontend it serves. `weld add module <name>` installs the
 same `http` capability and adds one business JSON module under `/api/<name>`; it

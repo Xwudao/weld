@@ -143,7 +143,7 @@ Capabilities:
   default. The named administrator policy denies all requests until real
   authentication and authorization are wired. Generated projects include
   `internal/httpserver/README.md` with composition, binding and testing examples.
-- `web` (add) — React + TypeScript + Vite frontend, served by `http`.
+- `web` (add) — React + TypeScript + Vite frontend, served by `http`. Requires pnpm and Node.js 20.19+ or 22.12+ (Vite 8).
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository. Requires `loom` but not
   `http`: it adds a pruned binding and no server.
