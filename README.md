@@ -818,6 +818,59 @@ user file that happens to share the name is never clobbered. Use a pointer
 (`*Status`) for an optional field: the zero value `""` is not a valid value and
 `ParseStatus` fails closed on anything undeclared.
 
+## Typed HTTP clients between projects (preview)
+
+Export the producer's typed module routes without starting its services, then
+generate a standard-library-only client in the consumer:
+
+```sh
+weld http export --dir ./producer
+weld client add producer --dir ./consumer --from ../producer/weld-api.json
+```
+
+The output is `consumer/internal/clients/producer/{client_gen,types_gen}.go`:
+
+```go
+client, err := producer.New("http://producer:8080",
+	producer.WithHTTPClient(httpClient),
+	producer.WithBearerToken(token),
+)
+if err != nil {
+	return err
+}
+response, err := client.WidgetGreet(ctx, producer.WidgetRequest{Name: "Ada"})
+```
+
+The client encodes path/query/JSON, unwraps `{code,msg,data}`, preserves context
+cancellation and returns `*producer.APIError` for a non-success response.
+The producer's DTO shapes are copied; its services, internal imports and
+validation code are not. Policy names are informational, not credential rules.
+The default administrator guard still rejects all requests until wired.
+
+Give routes stable unique IDs with `httpx.Operation("widget_greet")`.
+Existing named handlers can export without that option (using a module/handler
+name fallback); anonymous handlers require an explicit ID.
+Export uses AST/Go type analysis and executes neither constructors nor init
+functions. Source must type-check. V1 supports direct, straight-line typed
+registrations, static Group/Require and simple ModulePrefix expressions.
+Select one module with `--module widget`; `--prefix /external/widget` supplies
+an explicit mount when its prefix is dynamic.
+
+Ordinary structs, scalars, pointers, slices, string-keyed maps and time.Time
+are supported. Raw routes are listed as skipped. Dynamic registration helpers,
+wildcard paths, embedded/interface/generic DTOs and custom serialization are
+rejected. Export is a transport snapshot, not validation, OpenAPI, service
+discovery or compatibility analysis.
+
+After an API change, re-export with `http export --force`, then repeat
+`client add`. Generated client files are tool-owned and rewritten; keep custom
+wrappers in separate files. Hand-owned collisions require `--force`.
+Both commands support `--dry-run`. Paths are relative to `--dir`, with an
+absolute `--from` also allowed.
+
+See [the runnable client example](examples/http-client/README.md) for actual
+generated files and a two-project walkthrough.
+
 ## Configuration
 
 `config` is a first-class, shared capability, not a base dependency: the base

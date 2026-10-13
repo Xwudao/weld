@@ -87,15 +87,15 @@ const Name = "__modname__"
 //	admin.Post("/create", handler)
 func Register(router *httpx.Router, service Service) {
 	// GET {prefix}/ — public, no input.
-	httpx.NoInput(router, nethttp.MethodGet, "", handleIndex(service))
+	httpx.NoInput(router, nethttp.MethodGet, "", handleIndex(service), httpx.Operation("__modname___index"))
 
 	// GET {prefix}/greet?name=Ada — public, query binding.
-	httpx.Get(router, "/greet", handleGreet(service))
+	httpx.Get(router, "/greet", handleGreet(service), httpx.Operation("__modname___greet"))
 
 	// POST {prefix}/admin/items — administrator. The named policy rejects an
 	// unauthenticated caller before the handler runs; the JSON body is bound and
 	// validated, then handleCreateItem creates the item.
-	httpx.Post(router, "/admin/items", handleCreateItem(service), httpx.Policy(httpserver.PolicyAdmin), httpx.WithStatus(nethttp.StatusCreated))
+	httpx.Post(router, "/admin/items", handleCreateItem(service), httpx.Operation("__modname___create_item"), httpx.Policy(httpserver.PolicyAdmin), httpx.WithStatus(nethttp.StatusCreated))
 
 	// GET {prefix}/health — the raw escape hatch: a response that must not be
 	// wrapped in the JSON envelope. The raw Get method keeps the method out of the

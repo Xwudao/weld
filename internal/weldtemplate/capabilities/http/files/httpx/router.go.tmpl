@@ -44,6 +44,8 @@ type Router struct {
 // Route describes one route registered on the composition's mux. It is what
 // Router.Routes returns so a development build can print the composed surface.
 type Route struct {
+	// Operation is the optional stable interface ID used by contract export.
+	Operation string
 	// Method is the HTTP method, or "*" when the pattern carried no method.
 	Method string
 	// Pattern is the full path pattern registered on the mux, including any
@@ -156,7 +158,7 @@ func (r *Router) Handle(pattern string, handler http.Handler, opts ...Option) {
 	names := r.routePolicyNames(cfg)
 	full := r.fullPattern(pattern)
 	r.mux.Handle(full, r.wrap(Chain(r.resolvePolicies(names)...)(handler)))
-	r.record(full, names)
+	r.record(full, names, cfg.operation)
 }
 
 // HandleFunc registers a raw handler function under the router's prefix.
@@ -318,7 +320,7 @@ func joinPath(prefix, path string) string {
 }
 
 // record adds one registered route to the shared table.
-func (r *Router) record(pattern string, policies []string) {
+func (r *Router) record(pattern string, policies []string, operation string) {
 	if r.routes == nil {
 		return
 	}
@@ -326,7 +328,7 @@ func (r *Router) record(pattern string, policies []string) {
 	if !ok {
 		method = "*"
 	}
-	r.routes.add(Route{Method: method, Pattern: path, Policies: append([]string(nil), policies...)})
+	r.routes.add(Route{Operation: operation, Method: method, Pattern: path, Policies: append([]string(nil), policies...)})
 }
 
 // Routes returns the routes registered on the composition's mux, in

@@ -408,6 +408,21 @@ func TestTypedBodylessStatusOmitsEnvelope(t *testing.T) {
 	}
 }
 
+func TestOperationRecordsMetadataWithoutChangingTransport(t *testing.T) {
+	mux := http.NewServeMux()
+	router := NewRouter(mux)
+	NoInput(router, http.MethodGet, "/named", func(context.Context) (string, error) { return "ok", nil }, Operation("module_named"))
+	routes := router.Routes()
+	if len(routes) != 1 || routes[0].Operation != "module_named" {
+		t.Fatalf("route metadata=%+v", routes)
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/named", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "\"data\":\"ok\"") {
+		t.Fatalf("response=%d %s", w.Code, w.Body)
+	}
+}
+
 func TestInvalidEndpointStatusFailsAtRegistration(t *testing.T) {
 	for _, status := range []int{99, 103, 600} {
 		func() {

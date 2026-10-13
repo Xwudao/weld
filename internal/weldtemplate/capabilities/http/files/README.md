@@ -97,6 +97,73 @@ commitment aborts rather than appending an error envelope. ResponseController
 works through wrappers exposing `Unwrap`; access logging also records aborted
 responses.
 
+## Typed clients between projects (preview)
+
+In the producer, give typed routes stable unique IDs:
+
+```go
+httpx.Post(router, "/items", handleCreate,
+	httpx.Operation("widget_create_item"),
+	httpx.WithStatus(http.StatusCreated),
+)
+```
+
+Then export and generate in the consumer:
+
+```sh
+weld http export --out weld-api.json
+weld client add producer --dir ../consumer --from ../producer/weld-api.json
+```
+
+The consumer gets `internal/clients/producer/client_gen.go` and
+`types_gen.go`, depending only on the standard library:
+
+```go
+client, err := producer.New("http://localhost:8080",
+	producer.WithHTTPClient(httpClient),
+	producer.WithBearerToken(token),
+)
+if err != nil {
+	return err
+}
+item, err := client.WidgetCreateItem(ctx, producer.WidgetCreateRequest{
+	Name: "widget",
+})
+```
+
+The client binds path/query tags, encodes JSON, unwraps the success envelope,
+and returns a typed `*producer.APIError` for a non-success response.
+Context cancellation is preserved. It never retries requests automatically.
+Defaults are a 30-second HTTP timeout, an 8 MiB response limit and no redirects.
+An injected HTTP client controls its own redirect policy.
+Authentication is configured explicitly; a policy name does not prove which
+credential mechanism it uses. The default administrator guard still denies
+requests until wired.
+
+Export uses static Go type analysis: constructors, package init functions and
+DI graphs are never executed. Source must type-check; run `go mod tidy` first
+if dependencies are missing. V1 supports direct typed registrations in
+straight-line module `Register` functions, static Group/Require derivations,
+constant paths/options and simple constant/if/switch ModulePrefix mounts.
+Use `--module widget --prefix /external/widget` for an explicit mount override.
+Without Operation, named handlers receive a fallback ID based on module and
+handler names; anonymous handlers require Operation.
+
+Supported DTOs include scalars, structs, pointers, slices (including byte
+slices), string-keyed maps, recursive pointer DTOs and time.Time. Embedded
+fields, interface/generic DTOs, custom serialization (including custom-codec
+enums), dynamic registration helpers/control flow and wildcard paths are
+rejected explicitly. Raw routes are listed as skipped, not guessed.
+Only installed HTTP business modules are exported, not arbitrary DI callbacks
+or custom middleware transformations of success responses.
+
+Re-export a changed contract with `weld http export --force`, then repeat
+`weld client add` to refresh the generated files. Generated clients are
+tool-owned and rewritten; keep custom wrappers in separate files. Hand-owned
+files are refused unless `--force` is supplied. Both commands support
+`--dry-run`. This is a transport snapshot, not validation rules, service
+discovery or an API compatibility checker.
+
 ## Runtime without Loom
 
 ```go

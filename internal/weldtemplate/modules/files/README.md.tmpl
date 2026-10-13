@@ -46,14 +46,14 @@ closure hides the surface and makes the logic untestable on its own.
 inlined (the bodies are in `handler.go`), and paths are relative to the mount the
 composition root gives it:
 
-- `GET {prefix}/` — `httpx.NoInput`, a public route with no parameters.
+- `GET {prefix}` — `httpx.NoInput`, a public route with no parameters.
 - `GET {prefix}/greet?name=Ada` — `httpx.Get`, which binds the query into
   `Request`.
 - `POST {prefix}/admin/items` — `httpx.Post` with
   `httpx.Policy(httpserver.PolicyAdmin)`. The named policy rejects an
   unauthenticated caller before the handler, the JSON body is bound, and
   `CreateRequest.Validate` runs before the handler.
-- `GET {prefix}/health` — `router.HandleFunc`, the raw escape hatch for a
+- `GET {prefix}/health` — `router.Get`, the raw escape hatch for a
   response that must stay unwrapped.
 
 The module declares no mount prefix and no guard. `internal/httpserver.ModulePrefix`
@@ -72,9 +72,9 @@ and every module shares it.
 and close over them in the policy middleware, then run `make generate`.
 The graph injects the dependencies and applies the policies automatically.
 
-The default `di.AdminGuard` is only a placeholder: it requires a non-empty
-bearer token and authenticates nobody. Replace it with the application's real
-JWT/session/role check. An `httpx.Middleware` runs before the handler and before
+The default `di.AdminGuard` denies all requests, including those with bearer
+tokens, until real authentication and administrator authorization are configured.
+Replace it with the application's JWT/session/role check. An `httpx.Middleware` runs before the handler and before
 body binding; pass identity through request context or reject with
 `httpx.Error`. Keep business service imports out of `httpserver`, avoiding
 a cycle with modules that use its policy constants.
@@ -94,6 +94,23 @@ Handlers write through `internal/httpx`, the shared toolkit:
   maps it.
 - `httpx.RawText`, `httpx.Bytes` and `httpx.RawJSON` write a response that must
   stay unwrapped.
+
+## Calling this module from another Go project
+
+The typed routes have stable `httpx.Operation("__modname___...")` IDs. Export
+their request/response shapes without starting the application:
+
+```sh
+weld http export --module __modname__ --out weld-api.json
+# In the consuming project (--from is relative to that project's --dir):
+weld client add peer --from ../producer/weld-api.json
+```
+
+The generated client lives in `internal/clients/peer`, copies only wire DTOs,
+and never imports this module or its services. Set the runtime base URL and
+credentials when constructing the client. DTO validation stays on the server.
+Raw routes are reported as skipped. See `internal/httpserver/README.md` for
+preview limitations and a full calling example.
 
 ## Replaceable example, not persistence
 

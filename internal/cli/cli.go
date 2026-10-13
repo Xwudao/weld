@@ -85,6 +85,8 @@ func newRootCommand() *cobra.Command {
 		newSeedCommand(),
 		newDeployCommand(),
 		newConfigCommand(),
+		newHTTPCommand(),
+		newClientCommand(),
 		newVersionCommand(),
 	)
 	return root

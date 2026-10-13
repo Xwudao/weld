@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "service": "producer",
+  "operations": [
+    {
+      "name": "widget_create_item",
+      "module": "widget",
+      "method": "POST",
+      "path": "/api/widget/admin/items",
+      "binding": "json",
+      "request": {
+        "kind": "ref",
+        "name": "WidgetCreateRequest"
+      },
+      "response": {
+        "kind": "ref",
+        "name": "WidgetItem"
+      },
+      "status": 201,
+      "policies": [
+        "admin"
+      ]
+    },
+    {
+      "name": "widget_greet",
+      "module": "widget",
+      "method": "GET",
+      "path": "/api/widget/greet",
+      "binding": "query",
+      "request": {
+        "kind": "ref",
+        "name": "WidgetRequest"
+      },
+      "response": {
+        "kind": "ref",
+        "name": "WidgetResponse"
+      },
+      "status": 200
+    },
+    {
+      "name": "widget_index",
+      "module": "widget",
+      "method": "GET",
+      "path": "/api/widget",
+      "binding": "none",
+      "response": {
+        "kind": "ref",
+        "name": "WidgetResponse"
+      },
+      "status": 200
+    }
+  ],
+  "types": [
+    {
+      "name": "WidgetCreateRequest",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "Name",
+            "type": {
+              "kind": "basic",
+              "name": "string"
+            },
+            "tag": "json:\"name\""
+          }
+        ]
+      }
+    },
+    {
+      "name": "WidgetItem",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "ID",
+            "type": {
+              "kind": "basic",
+              "name": "string"
+            },
+            "tag": "json:\"id\""
+          },
+          {
+            "name": "Name",
+            "type": {
+              "kind": "basic",
+              "name": "string"
+            },
+            "tag": "json:\"name\""
+          }
+        ]
+      }
+    },
+    {
+      "name": "WidgetRequest",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "Name",
+            "type": {
+              "kind": "basic",
+              "name": "string"
+            },
+            "tag": "query:\"name\""
+          }
+        ]
+      }
+    },
+    {
+      "name": "WidgetResponse",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "Module",
+            "type": {
+              "kind": "basic",
+              "name": "string"
+            },
+            "tag": "json:\"module\""
+          },
+          {
+            "name": "Message",
+            "type": {
+              "kind": "basic",
+              "name": "string"
+            },
+            "tag": "json:\"message\""
+          }
+        ]
+      }
+    }
+  ],
+  "skipped": [
+    "widget: raw Router.Get at module.go:103"
+  ]
+}

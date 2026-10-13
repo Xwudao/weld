@@ -28,6 +28,7 @@ type Validator interface {
 
 // endpoint holds the resolved per-route options.
 type endpoint struct {
+	operation string
 	status    int
 	noContent bool
 	maxBytes  int64
@@ -42,6 +43,13 @@ type endpoint struct {
 // typed routes; status, body-limit and no-content options apply only to typed
 // endpoints.
 type Option func(*endpoint)
+
+// Operation assigns a stable interface ID for weld HTTP contract/client export.
+// Use a unique name across modules, e.g. "widget_create_item". It affects
+// metadata only, never routing, binding or authorization.
+func Operation(name string) Option {
+	return func(e *endpoint) { e.operation = name }
+}
 
 // WithStatus sets the transport status of a successful response. It defaults to
 // 200.
@@ -174,7 +182,7 @@ func register[Req, Resp any](
 		}
 		writeBody(w, cfg.status, "application/json; charset=utf-8", body)
 	}))))
-	r.record(method+" "+path, names)
+	r.record(method+" "+path, names, cfg.operation)
 }
 
 // validateRequest supports both value and pointer receiver validators.
