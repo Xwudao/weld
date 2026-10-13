@@ -1,8 +1,8 @@
 {
   "name": "events",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "kind": "add",
-  "summary": "Opt-in in-process event dispatcher: typed Publish/On keyed on the event's concrete Go type, synchronous delivery in registration order, panic isolation and joined listener errors. The stable Loom seam selects delivery with its asyncEvents switch: synchronous, or the in-process, best-effort events.Async mode behind a bounded channel with explicit backpressure (TryPublish, or events.TryPublish through the Publisher interface, reports a full queue) that still loses buffered events on exit. Installing it dispatches nothing until a listener is registered in internal/events/register.go.",
+  "summary": "Opt-in in-process event dispatcher: typed Publish/On keyed on the event's concrete Go type, synchronous delivery in registration order, panic isolation and joined listener errors. The stable Loom seam selects delivery with its asyncEvents switch: synchronous, or the in-process, best-effort events.Async mode behind a bounded channel with explicit backpressure (TryPublish, or events.TryPublish through the Publisher interface, reports a full queue) that still loses buffered events on exit. Business listeners are wired in the stable internal/di/events_listeners.go seam, automatically consumed by the HTTP application graph before startup; services may also publish without a construction cycle. The low-level internal/events/register.go seam remains supported.",
   "requires": ["loom"],
   "files": [
     { "path": "internal/events/dispatcher.go", "source": "files/dispatcher.go.tmpl" },
@@ -10,6 +10,10 @@
     { "path": "internal/events/async.go", "source": "files/async.go.tmpl" },
     { "path": "internal/events/async_test.go", "source": "files/async_test.go.tmpl" },
     { "path": "internal/events/recorder.go", "source": "files/recorder.go.tmpl" },
+    { "path": "internal/events/registration.go", "source": "files/registration.go.tmpl" },
+    { "path": "internal/events/registration_test.go", "source": "files/registration_test.go.tmpl" },
+    { "path": "internal/di/events_bindings.go", "source": "files/events_bindings.go.tmpl", "when": ["loom"] },
+    { "path": "internal/di/events_listeners.go", "source": "files/events_listeners.go.tmpl", "role": "seam", "when": ["loom"] },
     { "path": "internal/events/register.go", "source": "files/register.go.tmpl", "role": "seam" },
     { "path": "internal/events/README.md", "source": "files/README.md" },
     { "path": "internal/di/events_provider.go", "source": "files/events_provider.go.tmpl", "role": "seam", "when": ["loom"] }

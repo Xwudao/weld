@@ -1,29 +1,58 @@
 # internal/events
 
-The event dispatcher of this project. `weld add events` installs an in-process
-publish/subscribe seam; it does **not** register a single listener. Listeners are
-declared in `internal/events/register.go`, a stable file weld writes once and
-never regenerates, so the listeners you add there survive every later
-`weld add`.
+The project's in-process publish/subscribe dispatcher. Installing it registers
+no business listener. Add listeners in **`internal/di/events_listeners.go`**,
+a file weld writes once and never overwrites.
 
-## Where listeners are declared
+## Publish in A, consume in B
 
-`Register` in `internal/events/register.go` is the one place to add them:
+Define the shared event in a domain package, not in the dispatcher:
 
 ```go
-func Register(d *events.Dispatcher) error {
-	events.On(d, func(ctx context.Context, event ItemCreated) error {
-		return mailer.SendWelcome(ctx, event.ID)
-	})
-	return nil
+// internal/domain/item.go
+package domain
+
+type ItemCreated struct { ID string }
+```
+
+A depends on `events.Publisher` and publishes after its transaction commits:
+
+```go
+return s.publisher.Publish(ctx, domain.ItemCreated{ID: item.ID})
+```
+
+B exposes a normal service method, which other callers can also call directly:
+
+```go
+func (s *service) HandleItemCreated(ctx context.Context, event domain.ItemCreated) error {
+    return s.DoSomething(ctx, event.ID)
 }
 ```
 
-The default implementation registers nothing, which is why installing the
-capability dispatches nothing by itself. Registration is explicit: nothing scans
-the project, and the event's **concrete Go type** is the key, so `On[ItemCreated]`
-receives exactly what is published as `ItemCreated`. A typo is a compile error,
-not an event nobody handles.
+Add that method to B's exported Service interface if its constructor returns an
+interface. Then **add B as a parameter and one On call** in the wiring file:
+
+```go
+// internal/di/events_listeners.go
+func NewEventListeners(d *events.Dispatcher, b bmodule.Service) (*EventListeners, error) {
+    events.On(d, b.HandleItemCreated)
+    return &EventListeners{}, nil
+}
+```
+
+Add the domain/service imports as needed, then run `make generate`.
+B's provider must be declared in the graph; `weld add module` already declares
+HTTP module services. Do not edit generated `di.go` or `loom_gen.go`.
+
+The HTTP application runs this registration automatically **before startup**.
+B may itself depend on `events.Publisher`: creation and binding are separate,
+so there is no construction cycle. Sync and async publishers use the same
+dispatcher. Do not register listeners in each request or service constructor.
+
+Registration is explicit, not scanned. The event's concrete Go type is the key:
+`On[ItemCreated]` receives `ItemCreated`, not `*ItemCreated`.
+The older `internal/events/register.go` remains supported for low-level
+listeners; keep business service imports out of that package.
 
 ## Delivery is synchronous, and that is the point
 
@@ -112,22 +141,33 @@ to the wiring.
 
 ## How it is wired
 
-The dispatcher is an available Loom binding, not part of the default
-composition. `NewEventDispatcher` in the stable `internal/di/events_provider.go`
-seam builds it and runs `Register`, but nothing in the generated graph depends on
-`events.Publisher`, so Loom prunes it: an application that publishes nothing
-constructs no publisher and starts no worker.
+`NewEventDispatcher` creates the Publisher as before.
+`NewEventListenerDispatcher` extracts that same in-process dispatcher (including
+the inner dispatcher of Async), and `NewEventListeners` binds business services
+to it. The HTTP graph root consumes the registration result automatically.
+Registration failures fail graph construction before lifecycle.Start.
 
-To switch it on, make a provider the graph already consumes depend on
-`events.Publisher` — for example edit a business module's `service.go` so its
-`NewService` takes one:
+The HTTP graph therefore constructs the publisher even with no listeners.
+Synchronous delivery is still the default and starts no background worker.
+Async delivery remains opt-in through `asyncEvents`.
 
-```go
-func NewService(publisher events.Publisher) *service { ... }
-```
+Command and seed graphs **do not automatically consume server business
+listeners**: that would construct unrelated services for short commands.
+They still prune an unused Publisher. If a command needs local event consumption,
+declare its consumer providers and `loom.Provide(NewEventListeners)` in its
+stable `internal/di/<name>_graph.go`, then have a DI root wrapper consume
+`*EventListeners` before constructing the command's dependency root. Server
+services needed by that seam must also be available to that command graph.
 
-Loom then constructs the dispatcher, calls `Register` and injects it. A listener
-that cannot register fails startup, not the first request.
+A custom Publisher without an in-process dispatcher fails local listener
+wiring explicitly; Recorder is for isolated service tests, not listener wiring.
+
+### Existing projects
+
+Re-add/upgrade the events capability to install the new wiring files and
+regenerate the HTTP graph. Existing `events_provider.go` and `register.go`
+edits are preserved. Move a business listener from register.go to the new
+DI seam rather than copying it, otherwise it will execute twice.
 
 ## Tests
 

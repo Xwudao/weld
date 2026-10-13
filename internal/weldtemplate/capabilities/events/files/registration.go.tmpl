@@ -1,0 +1,17 @@
+package events
+
+// DispatcherOf returns the in-process dispatcher used by publisher. Registration
+// on it reaches the same listeners in synchronous and asynchronous modes.
+// Other Publisher implementations (including Recorder) do not support local
+// listener registration.
+func DispatcherOf(publisher Publisher) (*Dispatcher, bool) {
+	switch publisher := publisher.(type) {
+	case *Dispatcher:
+		return publisher, publisher != nil
+	case *Async:
+		if publisher != nil && publisher.inner != nil {
+			return publisher.inner, true
+		}
+	}
+	return nil, false
+}

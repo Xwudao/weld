@@ -160,7 +160,8 @@ Capabilities:
   every listener for that type synchronously, in registration order, joining
   their errors and isolating a panic. Requires `loom` but not `http`; installing
   it dispatches nothing until you register a listener in
-  `internal/events/register.go`. It is not a queue (see
+  `internal/di/events_listeners.go` (automatically wired before HTTP startup).
+  It is not a queue (see
   [`weld add events`](#weld-add-events)).
 - `mail` (add) — an opt-in SMTP sender with typed, secret-redacted
   configuration and an explicit TLS policy. Requires `loom` but not `http`;
@@ -606,8 +607,14 @@ What lands in the project:
 - `internal/events/recorder.go` — `Recorder`, a `Publisher` that records instead
   of delivering, so a test asserts what a handler published with no listener and
   no graph.
-- `internal/events/register.go` — the stable, user-editable registration file.
-  `weld add events` writes it once and never regenerates it.
+- `internal/di/events_listeners.go` — the stable business listener seam. Add
+  service parameters and `events.On` calls, then run `make generate`; the HTTP
+  graph automatically runs it before startup. Consumer services can also inject
+  Publisher without a DI construction cycle.
+- `internal/di/events_bindings.go` and `internal/events/registration.go` — expose
+  the publisher's same dispatcher for registration in both delivery modes.
+- `internal/events/register.go` — the legacy low-level registration seam, still
+  supported and preserved. Prefer the DI seam for business service listeners.
 - `internal/di/events_provider.go` — the stable Loom provider seam, written when
   `loom` is installed. It returns the `events.Publisher` interface and selects the
   delivery mode from the `asyncEvents` switch at the top of the file (false by
@@ -627,12 +634,24 @@ durable queue**. Moving slow or unreliable work behind a durable queue is a queu
 capability's job; because callers depend on `events.Publisher` rather than the
 concrete type, that change stays in the wiring.
 
-Installing it dispatches nothing: `internal/events/register.go` registers no
-listener, and the Loom graph prunes the publisher until a provider the graph
-consumes depends on `events.Publisher` — for example by adding the parameter to a
-business module's `NewService`, after which the graph constructs the publisher
-and runs `Register`. A listener that fails to register fails startup, not the
-first request.
+Installing it registers no business listener and publishes nothing. To consume
+an event in B, add B's service to the wiring function and bind its method:
+
+```go
+// internal/di/events_listeners.go
+func NewEventListeners(d *events.Dispatcher, b bmodule.Service) (*EventListeners, error) {
+    events.On(d, b.HandleCreated)
+    return &EventListeners{}, nil
+}
+```
+
+Then run `make generate`. B's provider must be declared (HTTP module providers
+are declared by `weld add module`). B's handler remains a normal method that
+other code can call directly. The HTTP graph constructs the publisher and
+registers listeners before startup; a registration error fails startup, not the
+first request. Command/seed graphs still prune unused publishers and do not
+implicitly consume server listeners. Existing `events_provider.go` and
+`register.go` edits are preserved when upgrading to the new DI seam.
 
 ## `weld add module` (stage 5)
 

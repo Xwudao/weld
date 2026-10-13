@@ -1,0 +1,58 @@
+package events
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+func TestDispatcherOf(t *testing.T) {
+	d := New(nil)
+	a := NewAsync(d, nil)
+	for _, publisher := range []Publisher{d, a} {
+		got, ok := DispatcherOf(publisher)
+		if !ok || got != d {
+			t.Fatalf("DispatcherOf(%T) = %p, %v", publisher, got, ok)
+		}
+	}
+	var nilDispatcher *Dispatcher
+	var nilAsync *Async
+	for _, publisher := range []Publisher{nil, nilDispatcher, nilAsync, NewAsync(nil, nil), &Recorder{}} {
+		if got, ok := DispatcherOf(publisher); ok || got != nil {
+			t.Fatalf("DispatcherOf(%T) = %p, %v", publisher, got, ok)
+		}
+	}
+}
+
+func TestRegisterThroughAsyncPublisher(t *testing.T) {
+	d := New(nil)
+	a := NewAsync(d, nil)
+	dispatcher, ok := DispatcherOf(a)
+	if !ok {
+		t.Fatal("missing dispatcher")
+	}
+	delivered := make(chan int, 1)
+	On(dispatcher, func(_ context.Context, event int) error {
+		delivered <- event
+		return nil
+	})
+	a.Start(context.Background())
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := a.Stop(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := a.Publish(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-delivered:
+		if got != 42 {
+			t.Fatalf("got %d", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener was not registered on the publisher's dispatcher")
+	}
+}

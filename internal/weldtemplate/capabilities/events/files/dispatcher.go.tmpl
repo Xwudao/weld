@@ -73,9 +73,9 @@ func New(logger logging.Logger) *Dispatcher {
 // is ignored, so registration in a package that was handed no dispatcher is
 // harmless.
 //
-// On is called during startup, from the stable registration file
-// (internal/events/register.go), so a panic there fails startup rather than the
-// first request.
+// Call On during graph construction in internal/di/events_listeners.go (or
+// the low-level internal/events/register.go), before startup and first publish.
+// Register once, not on each request.
 func On[T any](d *Dispatcher, listener Listener[T]) {
 	if d == nil || listener == nil {
 		return

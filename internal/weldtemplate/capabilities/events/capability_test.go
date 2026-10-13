@@ -80,6 +80,9 @@ func TestEventsCapabilityRequiresLoomWithoutHTTP(t *testing.T) {
 		"internal/events/register.go",
 		"internal/events/README.md",
 		"internal/di/events_provider.go",
+		"internal/di/events_listeners.go",
+		"internal/di/events_bindings.go",
+		"internal/events/registration.go",
 	} {
 		if _, ok := paths[want]; !ok {
 			t.Errorf("events does not ship %s", want)
@@ -153,6 +156,7 @@ func TestEventsRegistrationSeamIsStableAndExplicit(t *testing.T) {
 		"capabilities/events/files/dispatcher.go.tmpl",
 		"capabilities/events/files/events_provider.go.tmpl",
 		"capabilities/events/files/register.go.tmpl",
+		"capabilities/events/files/events_listeners.go.tmpl",
 	} {
 		raw, err := fs.ReadFile(weldtemplate.FS(), source)
 		if err != nil {

@@ -1,6 +1,11 @@
 package events
 
-// Register installs the application's event listeners on d. It is the stable,
+// Register installs low-level event listeners on d. For listeners that call
+// business services, prefer internal/di/events_listeners.go: add a service
+// parameter there and bind its method with events.On. Do not import a service
+// that depends on events into this package, which would create an import cycle.
+//
+// This is the legacy stable,
 // user-editable seam for events: `weld add events` writes this file once and
 // never regenerates it, so the listeners you add here survive every later
 // `weld add`.

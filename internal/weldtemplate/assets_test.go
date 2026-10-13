@@ -2121,7 +2121,7 @@ func TestPayloadRolesAreDeclared(t *testing.T) {
 		"base":    {"Makefile", ".gitignore"},
 		"config":  {"config.yml", "config.example.yml"},
 		"cron":    {"internal/cron/deps.go", "internal/cron/register.go", "internal/di/cron_provider.go"},
-		"events":  {"internal/events/register.go", "internal/di/events_provider.go"},
+		"events":  {"internal/events/register.go", "internal/di/events_provider.go", "internal/di/events_listeners.go"},
 		"http":    {"internal/httpserver/middleware.go", "internal/httpserver/policy.go"},
 		"loom":    {"internal/di/repository_providers.go"},
 		"mail":    {"internal/di/mail_provider.go"},

@@ -31,34 +31,19 @@ var asyncEvents = false
 // HTTP server's shutdown timeout so a stuck listener can never hang the process.
 const eventShutdownTimeout = 10 * time.Second
 
-// NewEventDispatcher is the Loom provider for the application event publisher,
-// and this file is the stable integration seam for wiring events into the Loom
-// application.
+// NewEventDispatcher constructs the application's Publisher. Keep business
+// services out of its parameters: they may themselves depend on Publisher.
+// Bind their listener methods in internal/di/events_listeners.go instead;
+// the HTTP application graph runs that seam automatically before startup.
 //
-// weld writes this file once, when both the events and loom capabilities are
-// installed, and never rewrites it while it regenerates the graph (di.go,
-// loom_gen.go): edits below survive every later `weld add`.
+// This file is written once and preserved by later weld add/upgrade commands.
+// The low-level events.Register seam is still called for compatibility.
+// NewEventListenerDispatcher exposes this publisher's dispatcher to the
+// business wiring seam, so sync and async delivery use the same listeners.
 //
-// The publisher is an available binding, not part of the default composition:
-// the graph declares NewEventDispatcher, but nothing depends on
-// events.Publisher, so Loom prunes it and an application that publishes nothing
-// constructs no publisher and starts no worker. To use it, make a provider the
-// graph already consumes depend on events.Publisher — for example edit the
-// service.go of one of your business modules so its NewService takes
-// events.Publisher. Loom then constructs the publisher and runs
-// internal/events/register.go, so a listener that fails to register fails
-// startup rather than the first publish.
-//
-// The return type is the events.Publisher interface, so the graph binds the
-// interface whatever this returns: the synchronous *events.Dispatcher by
-// default, or the asynchronous *events.Async when asyncEvents is true. When the
-// asynchronous publisher is selected this also registers the Loom lifecycle hook
-// that starts the workers on Start and drains them on Stop, so the workers live
-// exactly as long as the application and a short command starts none.
-//
-// Depend on events.Publisher rather than a concrete type. A component that needs
-// the queue statistics can call events.StatsOf(publisher); it reports whether the
-// chosen publisher was asynchronous.
+// Commands prune the publisher unless their root consumes events.Publisher.
+// In async mode the lifecycle starts workers on Start and drains them on Stop.
+// Services should depend on events.Publisher, not on the concrete dispatcher.
 func NewEventDispatcher(lc *loom.Lifecycle, logger logging.Logger) (events.Publisher, error) {
 	dispatcher := events.New(logger)
 	if err := events.Register(dispatcher); err != nil {

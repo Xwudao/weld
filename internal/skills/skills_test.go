@@ -429,6 +429,7 @@ func TestRenderEventsNamesItsSeamsAndItsLimits(t *testing.T) {
 	for _, want := range []string{
 		"**events** v0.1.0",
 		"`internal/events/register.go`",
+		"`internal/di/events_listeners.go`",
 		"`internal/di/events_provider.go`",
 		"`events.Publisher`",
 		"`events.Recorder`",

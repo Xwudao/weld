@@ -1,0 +1,25 @@
+package di
+
+import "__module__/internal/events"
+
+// EventListeners marks completed listener registration. The server graph consumes
+// it automatically; do not edit di.go or register listeners in service constructors.
+type EventListeners struct{}
+
+// NewEventListeners is the application's business listener wiring seam.
+// Add a service parameter, then bind its method with events.On:
+//
+//	func NewEventListeners(d *events.Dispatcher, b bmodule.Service) (*EventListeners, error) {
+//		events.On(d, b.HandleCreated)
+//		return &EventListeners{}, nil
+//	}
+//
+// Run make generate after changing the signature. The service's NewService must
+// be declared in the graph (weld add module does this for HTTP modules).
+// Services may themselves depend on events.Publisher: the publisher is already
+// constructed before this function runs, so that does not create a DI cycle.
+// Registration finishes before lifecycle.Start starts HTTP, cron or async workers.
+// This file is written once and preserved by later weld add/upgrade commands.
+func NewEventListeners(d *events.Dispatcher) (*EventListeners, error) {
+	return &EventListeners{}, nil
+}

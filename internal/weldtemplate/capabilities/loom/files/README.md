@@ -105,6 +105,16 @@ needs the events publisher or a repository consumes it there rather than through
 a global or a signature change. The scheduler starts no jobs until
 `internal/cron/register.go` registers them. See `internal/cron/README.md`.
 
+### Business event listeners are wired automatically
+
+After `weld add events`, add consuming service parameters and `events.On` calls
+in `internal/di/events_listeners.go`, then run `make generate`. The HTTP graph
+consumes `*EventListeners` automatically before startup. A consuming service may
+also inject `events.Publisher`; registration is separate from publisher creation.
+The original `internal/events/register.go` is still supported for low-level
+listeners. Command/seed graphs do not automatically register server listeners.
+See `internal/events/README.md` for a publish-in-A, consume-in-B example.
+
 Never wire providers into `di.go`: it is regenerated from the installed
 capability set, and an edit there is erased by the next capability install.
 

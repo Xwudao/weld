@@ -755,7 +755,7 @@ Capabilities:
                     on the event's concrete Go type, synchronous delivery in
                     registration order, panic isolation and joined listener
                     errors; installing it dispatches nothing until you register
-                    a listener in internal/events/register.go (requires loom)
+                    a listener in internal/di/events_listeners.go (requires loom)
   redis  (add)      Opt-in Redis client with typed connection config; installing
                     it never connects Redis to a service (requires base, config)
   mail   (add)      Opt-in SMTP sender with typed, secret-redacted config;
@@ -862,7 +862,7 @@ the repositories you wire in internal/di/seed_providers.go; it seeds nothing
 until you register a seeder. redis likewise requires only base (and config): it
 installs a lazy client the caller owns and never wires Redis into a service on
 its own. events requires loom and installs a dispatcher that publishes nothing
-until you register a listener in internal/events/register.go. loom is required
+until you register a listener in internal/di/events_listeners.go. loom is required
 by every capability beyond the bare CLI, requires
 config, regenerates its graph when any capability it feeds is installed, and
 raises the project's Go floor to 1.25.
