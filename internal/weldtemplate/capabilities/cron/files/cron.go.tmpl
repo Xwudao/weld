@@ -50,11 +50,11 @@ import (
 // Job is a unit of scheduled work.
 //
 // The context is cancelled when the scheduler stops, so a job that respects it
-// can return promptly during shutdown. deps is the bundle the scheduler was
-// built with (WithDeps); the pointer is never nil, so a job that needs nothing
-// can ignore it. A Job is an ordinary function, so a test invokes it directly
-// without a scheduler or a wall clock.
-type Job func(ctx context.Context, deps *Deps)
+// can return promptly during shutdown. Dependencies are captured by a service
+// method or closure when registered in internal/di/cron_jobs.go. A Job is an
+// ordinary function, so tests invoke it without a scheduler or a wall clock.
+// Returning an error logs the job name and failure; it does not retry the job.
+type Job func(ctx context.Context) error
 
 // Schedule says when a job runs.
 //
@@ -128,7 +128,6 @@ var (
 type Scheduler struct {
 	logger logging.Logger
 	runner *robfigcron.Cron
-	deps   *Deps
 
 	mu      sync.Mutex
 	entries map[string]entry
@@ -150,7 +149,6 @@ type Option func(*settings)
 
 type settings struct {
 	location *time.Location
-	deps     *Deps
 }
 
 // WithLocation sets the timezone schedules are interpreted in. A nil location
@@ -159,17 +157,6 @@ func WithLocation(location *time.Location) Option {
 	return func(s *settings) {
 		if location != nil {
 			s.location = location
-		}
-	}
-}
-
-// WithDeps sets the dependency bundle handed to every job. A nil bundle keeps
-// the empty default, so a scheduler built without a graph still runs jobs that
-// need nothing.
-func WithDeps(deps *Deps) Option {
-	return func(s *settings) {
-		if deps != nil {
-			s.deps = deps
 		}
 	}
 }
@@ -186,7 +173,7 @@ func New(logger logging.Logger, options ...Option) *Scheduler {
 	if logger == nil {
 		logger = logging.Nop()
 	}
-	configured := settings{location: time.UTC, deps: &Deps{}}
+	configured := settings{location: time.UTC}
 	for _, option := range options {
 		option(&configured)
 	}
@@ -209,7 +196,6 @@ func New(logger logging.Logger, options ...Option) *Scheduler {
 	return &Scheduler{
 		logger:  logger,
 		runner:  runner,
-		deps:    configured.deps,
 		entries: make(map[string]entry),
 		baseCtx: context.Background(),
 	}
@@ -289,7 +275,7 @@ func (s *Scheduler) Register(name string, schedule Schedule, job Job) error {
 	if _, exists := s.entries[name]; exists {
 		return fmt.Errorf("%w: %q", ErrJobExists, name)
 	}
-	run := s.wrap(job)
+	run := s.wrap(name, job)
 	id, err := s.add(schedule, run)
 	if err != nil {
 		return fmt.Errorf("cron: register %q: %w", name, err)
@@ -361,16 +347,16 @@ func (s *Scheduler) add(schedule Schedule, run func()) (robfigcron.EntryID, erro
 	return s.runner.AddFunc(expr, run)
 }
 
-// wrap adapts a Job to robfig's func(), supplying the scheduler's current base
-// context and dependency bundle. The context is read on each run so a restart
-// after Stop hands the jobs the new context; the bundle is fixed at construction.
-func (s *Scheduler) wrap(job Job) func() {
+// wrap adapts a Job to robfig's func(). Read the current context on every run
+// so jobs receive the new context when the scheduler restarts after Stop.
+func (s *Scheduler) wrap(name string, job Job) func() {
 	return func() {
 		s.mu.Lock()
 		ctx := s.baseCtx
-		deps := s.deps
 		s.mu.Unlock()
-		job(ctx, deps)
+		if err := job(ctx); err != nil {
+			s.logger.Error("cron job failed", "job", name, "error", err)
+		}
 	}
 }
 

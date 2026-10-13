@@ -239,7 +239,7 @@ func TestLoomCommandGraphDeclaresOptionalBindingsButPrunes(t *testing.T) {
 	addCommand(t, dir, "orders")
 
 	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-	for _, want := range []string{"loom.Provide(NewPool)", "repositoryModule"} {
+	for _, want := range []string{"loom.Provide(NewPool)", "projectModule"} {
 		if !strings.Contains(di, want) {
 			t.Errorf("commonModule does not declare %q:\n%s", want, di)
 		}
@@ -373,11 +373,11 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	editInPlace(t, commandPath, "\t\"example.com/demo/internal/commandkit\"\n", "\t\"example.com/demo/internal/commandkit\"\n\t\"example.com/demo/internal/data\"\n")
 
 	// Register the repository in the project-owned seam. The generated graph
-	// includes repositoryModule but declares no default data.Repository.
-	providersPath := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	// includes projectModule but declares no default data.Repository.
+	providersPath := filepath.Join(dir, "internal", "di", "providers.go")
 	editInPlace(t, providersPath,
-		"var repositoryModule = loom.Module()",
-		"var repositoryModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
+		"var projectModule = loom.Module()",
+		"var projectModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
 	editInPlace(t, providersPath,
 		"import \"github.com/Xwudao/loom\"",
 		"import (\n\t\"example.com/demo/internal/data\"\n\n\t\"github.com/Xwudao/loom\"\n)")
@@ -435,11 +435,11 @@ func TestAddCapabilityRefreshesGeneratedDITest(t *testing.T) {
 		"\t\"strings\"\n\n\t\"example.com/demo/internal/data\"\n")
 
 	// Register the repository in the project-owned seam: the generated graph
-	// includes repositoryModule but declares no default data.Repository.
-	providersPath := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	// includes projectModule but declares no default data.Repository.
+	providersPath := filepath.Join(dir, "internal", "di", "providers.go")
 	editInPlace(t, providersPath,
-		"var repositoryModule = loom.Module()",
-		"var repositoryModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
+		"var projectModule = loom.Module()",
+		"var projectModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
 	editInPlace(t, providersPath,
 		"import \"github.com/Xwudao/loom\"",
 		"import (\n\t\"example.com/demo/internal/data\"\n\n\t\"github.com/Xwudao/loom\"\n)")
@@ -579,11 +579,11 @@ func TestLoomModuleServiceSignatureChangeCompiles(t *testing.T) {
 				"\t\"strings\"\n\n\t\"example.com/demo/internal/data\"\n")
 
 			// Register the repository in the project-owned seam: the generated
-			// graph includes repositoryModule but declares no default repository.
-			providersPath := filepath.Join(dir, "internal", "di", "repository_providers.go")
+			// graph includes projectModule but declares no default repository.
+			providersPath := filepath.Join(dir, "internal", "di", "providers.go")
 			editInPlace(t, providersPath,
-				"var repositoryModule = loom.Module()",
-				"var repositoryModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
+				"var projectModule = loom.Module()",
+				"var projectModule = loom.Module(\n\tloom.As[data.Repository](NewRepository),\n)")
 			editInPlace(t, providersPath,
 				"import \"github.com/Xwudao/loom\"",
 				"import (\n\t\"example.com/demo/internal/data\"\n\n\t\"github.com/Xwudao/loom\"\n)")

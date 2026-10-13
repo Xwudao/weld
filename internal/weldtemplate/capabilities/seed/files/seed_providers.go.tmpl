@@ -28,8 +28,8 @@ import (
 // The pool is a deliberate dependency: Loom resolves it only because this
 // provider consumes it, so the pool and the database settings are constructed
 // for the seed command alone and no long-running command needs a credential. To
-// consume a repository registered in repositoryModule instead, change the
-// parameter to that repository's type (repository_providers.go).
+// consume a repository registered in projectModule instead, change the
+// parameter to that repository's type (providers.go).
 func NewSeedDeps(pool *pgxpool.Pool) *seeder.Deps {
 	return &seeder.Deps{
 		Items: data.NewRepository(pool),

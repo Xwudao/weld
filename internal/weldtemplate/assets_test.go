@@ -796,7 +796,7 @@ func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
 	// and the guard. The graph mounts modules through ModulePrefix, so a project
 	// can give a module its own URL space without editing the regenerated graph.
 	policy := read(paths["internal/httpserver/policy.go"])
-	for _, want := range []string{"const APIPrefix =", "func ModulePrefix(", "const PolicyAdmin =", "func AdminGuard()"} {
+	for _, want := range []string{"const APIPrefix =", "func ModulePrefix(", "const PolicyAdmin =", "type NamedPolicy struct"} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("httpserver/policy.go is missing %q", want)
 		}
@@ -897,7 +897,7 @@ func TestLoomCapabilityRequiresConfigAndDeclaresGraph(t *testing.T) {
 		"tools/loom/go.sum",
 		"internal/commandkit/commandkit.go",
 		"internal/commandkit/commandkit_test.go",
-		"internal/di/repository_providers.go",
+		"internal/di/providers.go",
 	} {
 		if !paths[want] {
 			t.Errorf("loom capability does not ship %s", want)
@@ -921,50 +921,50 @@ func TestLoomCapabilityRequiresConfigAndDeclaresGraph(t *testing.T) {
 }
 
 // TestLoomShipsRepositoryProviderSeam guards the project-owned repository seam:
-// the loom capability ships internal/di/repository_providers.go unconditionally,
-// it declares the empty repositoryModule the generated commonModule includes, it
+// the loom capability ships internal/di/providers.go unconditionally,
+// it declares the empty projectModule the generated commonModule includes, it
 // imports no data package (so a project without db still compiles), and the
 // generated graph registers no data.Repository by default.
 func TestLoomShipsRepositoryProviderSeam(t *testing.T) {
 	fsys := FS()
-	seam, err := fs.ReadFile(fsys, "capabilities/loom/files/repository_providers.go.tmpl")
+	seam, err := fs.ReadFile(fsys, "capabilities/loom/files/providers.go.tmpl")
 	if err != nil {
 		t.Fatalf("read repository providers template: %v", err)
 	}
 	seamText := string(seam)
 	for _, want := range []string{
-		"var repositoryModule = loom.Module()",
+		"var projectModule = loom.Module()",
 		"github.com/Xwudao/loom",
 		"loom.As[data.Repository](NewRepository)",
 	} {
 		if !strings.Contains(seamText, want) {
-			t.Errorf("repository_providers.go template is missing %q:\n%s", want, seamText)
+			t.Errorf("providers.go template is missing %q:\n%s", want, seamText)
 		}
 	}
 	// The seam must not import the data package itself: a project without db
 	// compiles it as the empty module. Only the code matters; the example in the
 	// doc comment may name data.
 	rendered := []byte(strings.ReplaceAll(seamText, "__module__", "example.com/demo"))
-	file, err := parser.ParseFile(token.NewFileSet(), "repository_providers.go", rendered, parser.ImportsOnly)
+	file, err := parser.ParseFile(token.NewFileSet(), "providers.go", rendered, parser.ImportsOnly)
 	if err != nil {
-		t.Fatalf("repository_providers.go template does not parse: %v\n%s", err, seamText)
+		t.Fatalf("providers.go template does not parse: %v\n%s", err, seamText)
 	}
 	for _, spec := range file.Imports {
 		if strings.Contains(spec.Path.Value, "internal/data") {
-			t.Errorf("repository_providers.go imports data; a no-db project must not need it: %s", spec.Path.Value)
+			t.Errorf("providers.go imports data; a no-db project must not need it: %s", spec.Path.Value)
 		}
 	}
 
 	d := readDescriptor(t, "loom")
 	var seamFile bool
 	for _, file := range d.Files {
-		if file.Path != "internal/di/repository_providers.go" {
+		if file.Path != "internal/di/providers.go" {
 			continue
 		}
-		seamFile = file.Source == "files/repository_providers.go.tmpl" && len(file.When) == 0 && len(file.WhenAbsent) == 0
+		seamFile = file.Source == "files/providers.go.tmpl" && len(file.When) == 0 && len(file.WhenAbsent) == 0
 	}
 	if !seamFile {
-		t.Errorf("loom repository_providers.go is not declared with source files/repository_providers.go.tmpl and no guard: %+v", d.Files)
+		t.Errorf("loom providers.go is not declared with source files/providers.go.tmpl and no guard: %+v", d.Files)
 	}
 
 	graph, err := fs.ReadFile(fsys, "capabilities/loom/files/di.go.tmpl")
@@ -972,8 +972,8 @@ func TestLoomShipsRepositoryProviderSeam(t *testing.T) {
 		t.Fatalf("read di template: %v", err)
 	}
 	graphText := string(graph)
-	if !strings.Contains(graphText, "repositoryModule,") {
-		t.Error("di template commonModule does not include repositoryModule")
+	if !strings.Contains(graphText, "projectModule,") {
+		t.Error("di template commonModule does not include projectModule")
 	}
 	if strings.Contains(graphText, "loom.As[data.Repository](NewRepository)") {
 		t.Error("di template still binds data.Repository by default; the items API is in-memory")
@@ -1263,8 +1263,7 @@ func TestCronCapabilityRequiresHTTP(t *testing.T) {
 	}
 	for _, want := range []string{
 		"internal/cron/cron.go",
-		"internal/cron/deps.go",
-		"internal/cron/register.go",
+		"internal/di/cron_jobs.go",
 		"internal/cron/README.md",
 		"internal/config/cron.go",
 		"internal/config/cron_test.go",
@@ -1321,19 +1320,19 @@ func TestCronCapabilityRequiresHTTP(t *testing.T) {
 		t.Fatalf("read cron provider: %v", err)
 	}
 	providerText := string(provider)
-	for _, want := range []string{"cron.New", "cron.Register", "cron.WithDeps", "NewCronDeps", "scheduler.Start", "scheduler.Stop", "loom.Hook"} {
+	for _, want := range []string{"cron.New", "scheduler.Start", "scheduler.Stop", "loom.Hook"} {
 		if !strings.Contains(providerText, want) {
 			t.Errorf("cron provider is missing %q:\n%s", want, providerText)
 		}
 	}
-	register, err := fs.ReadFile(FS(), "capabilities/cron/files/register.go.tmpl")
+	register, err := fs.ReadFile(FS(), "capabilities/cron/files/cron_jobs.go.tmpl")
 	if err != nil {
 		t.Fatalf("read cron register: %v", err)
 	}
-	if !strings.Contains(string(register), "func Register(s *Scheduler) error") {
+	if !strings.Contains(string(register), "func NewCronJobs(s *cron.Scheduler) (*CronJobs, error)") {
 		t.Errorf("cron register file does not expose Register:\n%s", register)
 	}
-	if !strings.Contains(string(register), "return nil") {
+	if !strings.Contains(string(register), "return &CronJobs{}, nil") {
 		t.Errorf("cron register file registers jobs by default:\n%s", register)
 	}
 
@@ -1343,7 +1342,7 @@ func TestCronCapabilityRequiresHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read loom di template: %v", err)
 	}
-	for _, want := range []string{`{{- if .Caps.Has "cron"}}`, "loom.Provide(NewCronDeps)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
+	for _, want := range []string{`{{- if .Caps.Has "cron"}}`, "loom.Provide(NewCronJobs)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
 		if !strings.Contains(string(graph), want) {
 			t.Errorf("loom di template is missing %q", want)
 		}
@@ -1362,7 +1361,7 @@ func TestCronProviderSeamIsOwnedByCron(t *testing.T) {
 		t.Fatalf("read cron provider template: %v", err)
 	}
 	for _, want := range []string{
-		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *Server, deps *cron.Deps) (*cron.Scheduler, error)",
+		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *Server) (*cron.Scheduler, error)",
 		"__module__/internal/cron",
 		"loom.Hook",
 	} {
@@ -1910,7 +1909,7 @@ func TestCommandGraphIsLoomAware(t *testing.T) {
 		// command graph: snapshotting them here would make a capability installed
 		// later unavailable to the command forever.
 		for _, forbidden := range []string{
-			"InitApp", "NewServer", "NewScheduler", "NewCronDeps", "Scheduler",
+			"InitApp", "NewServer", "NewScheduler", "NewCronJobs", "Scheduler",
 			"NewConfigLoader", "NewConfig)", "NewLogger",
 			"NewPool", "NewRepository", "data.Repository",
 			"NewRedisClient", "NewMailSender", "NewObjectStore", "NewEventDispatcher",
@@ -2120,10 +2119,10 @@ func TestPayloadRolesAreDeclared(t *testing.T) {
 	seams := map[string][]string{
 		"base":    {"Makefile", ".gitignore"},
 		"config":  {"config.yml", "config.example.yml"},
-		"cron":    {"internal/cron/deps.go", "internal/cron/register.go", "internal/di/cron_provider.go"},
-		"events":  {"internal/events/register.go", "internal/di/events_provider.go", "internal/di/events_listeners.go"},
-		"http":    {"internal/httpserver/middleware.go", "internal/httpserver/policy.go"},
-		"loom":    {"internal/di/repository_providers.go"},
+		"cron":    {"internal/di/cron_jobs.go", "internal/di/cron_provider.go"},
+		"events":  {"internal/di/events_provider.go", "internal/di/events_listeners.go"},
+		"http":    {"internal/httpserver/middleware.go", "internal/httpserver/policy.go", "internal/di/http_policies.go"},
+		"loom":    {"internal/di/providers.go"},
 		"mail":    {"internal/di/mail_provider.go"},
 		"redis":   {"internal/di/redis_provider.go"},
 		"seed":    {"internal/data/seeder/register.go", "internal/di/seed_providers.go"},

@@ -22,7 +22,7 @@ type Service interface {
 // binds (`loom.Provide(__modname__.NewService)`), so you may change its
 // signature to take the dependencies your implementation needs. Take a narrow
 // repository interface — the db capability's data.Repository, registered in
-// internal/di/repository_providers.go, or an interface this package declares —
+// internal/di/providers.go, or an interface this package declares —
 // rather than a raw *pgxpool.Pool: the pool is an implementation detail, and an
 // interface keeps the package testable and free of the database dependency.
 // This package's own tests build the demo through NewDemoService instead, so

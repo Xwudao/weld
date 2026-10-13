@@ -33,13 +33,13 @@ explicit path; an unrelated startup never calls them.
 The project's Loom graph declares `*pgxpool.Pool` as an available binding and
 ships `NewRepository`, but it registers no `data.Repository` by default: the
 generated graph claims no
-production consumer. Register a repository in `internal/di/repository_providers.go`,
+production consumer. Register a repository in `internal/di/providers.go`,
 the project-owned seam `commonModule` includes, rather than editing the
 regenerated `internal/di/di.go`:
 
 ```go
-// internal/di/repository_providers.go
-var repositoryModule = loom.Module(
+// internal/di/providers.go
+var projectModule = loom.Module(
 	loom.As[data.Repository](NewRepository),
 )
 ```

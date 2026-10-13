@@ -1,6 +1,6 @@
 {
   "name": "http",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "kind": "add",
   "summary": "HTTP server lifecycle, the shared JSON/middleware toolkit, a composable handler builder, a configuration-driven CORS policy and one serve command.",
   "requires": ["loom"],
@@ -9,6 +9,7 @@
     { "path": "internal/httpserver/server.go", "source": "files/server.go.tmpl" },
     { "path": "internal/httpserver/middleware.go", "source": "files/middleware.go.tmpl", "role": "seam" },
     { "path": "internal/httpserver/policy.go", "source": "files/policy.go.tmpl", "role": "seam" },
+    { "path": "internal/di/http_policies.go", "source": "files/http_policies.go.tmpl", "role": "seam" },
     { "path": "internal/httpserver/http_test.go", "source": "files/http_test.go.tmpl" },
     { "path": "internal/httpx/httpx.go", "source": "files/httpx/httpx.go.tmpl" },
     { "path": "internal/httpx/bind.go", "source": "files/httpx/bind.go.tmpl" },

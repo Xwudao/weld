@@ -17,27 +17,8 @@ import (
 // capabilities are installed, and never rewrites it while it regenerates the
 // graph (di.go, loom_gen.go): edits below survive every later `weld add`.
 //
-// It has two providers. NewCronDeps builds the dependency bundle every job
-// receives; NewScheduler builds the scheduler itself.
-
-// NewCronDeps constructs the dependency bundle the server graph binds and hands
-// to every scheduled job, and this is the seam for wiring dependencies into
-// jobs.
-//
-// Add a field to cron.Deps (internal/cron/deps.go) for each dependency your jobs
-// use, and consume it here so Loom constructs it:
-//
-//	func NewCronDeps(logger logging.Logger, publisher events.Publisher) *cron.Deps {
-//		return &cron.Deps{Logger: logger, Publisher: publisher}
-//	}
-//
-// The parameters are deliberate: Loom resolves each one only because this
-// provider consumes it, so a job that publishes makes the graph construct
-// events.Publisher, and a job that needs nothing adds no dependency at all.
-// internal/cron/register.go reads the bundle from its job's second parameter.
-func NewCronDeps(logger logging.Logger) *cron.Deps {
-	return &cron.Deps{Logger: logger}
-}
+// Job registration lives separately in internal/di/cron_jobs.go. The scheduler
+// constructor does not depend on the business services that its jobs invoke.
 
 // NewScheduler is the cron scheduler provider the Loom graph binds.
 //
@@ -52,21 +33,16 @@ func NewCronDeps(logger logging.Logger) *cron.Deps {
 // server shuts down. Hooks run in registration order on start and reverse order
 // on stop.
 //
-// deps is passed through to every job (cron.WithDeps), so jobs receive the
-// bundle NewCronDeps built. The scheduler starts no work by itself:
-// internal/cron/register.go is the stable, user-editable file where the
-// application's jobs are registered, and it registers none by default. The
+// The scheduler starts no work by itself. NewCronJobs in the stable
+// internal/di/cron_jobs.go binds service methods before lifecycle.Start. The
 // scheduler takes no database or Redis lock, so several replicas each run their
 // own copy of every job.
-func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *Server, deps *cron.Deps) (*cron.Scheduler, error) {
+func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger logging.Logger, server *Server) (*cron.Scheduler, error) {
 	location, err := cfg.Cron.Location()
 	if err != nil {
 		return nil, err
 	}
-	scheduler := cron.New(logger, cron.WithLocation(location), cron.WithDeps(deps))
-	if err := cron.Register(scheduler); err != nil {
-		return nil, err
-	}
+	scheduler := cron.New(logger, cron.WithLocation(location))
 	lc.Append(loom.Hook{
 		OnStart: func(ctx context.Context) error {
 			scheduler.Start(ctx)

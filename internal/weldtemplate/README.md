@@ -254,12 +254,11 @@ scheduler is constructed and its lifecycle hooks run with the server (the socket
 is bound before it starts and it stops before the server).
 
 `cron` requires `http` (and therefore `loom`). It ships an in-process
-scheduler (`internal/cron`) with a stable, user-editable registration file
-(`internal/cron/register.go`) that declares no jobs, so installing the capability
-schedules nothing. Each job receives a `cron.Deps` bundle: `internal/cron/deps.go`
-is the stable seam to add a field, and `NewCronDeps` in the stable
-`internal/di/cron_provider.go` constructs it, so a job gets the application's
-dependencies without a signature change or a service locator. The stable
+scheduler (`internal/cron`) with a stable business wiring file
+(`internal/di/cron_jobs.go`) that declares no jobs. Add service parameters to
+`NewCronJobs` and register their ordinary `func(context.Context) error` methods,
+then run `make generate`. The HTTP graph consumes registration automatically
+before startup; scheduler errors are logged with the job name. The stable
 `cron_provider.go` seam also builds the scheduler, and because the Loom server
 graph root consumes it the scheduler is constructed and its start/stop hooks run
 with `serve` — after the socket is bound
@@ -526,7 +525,7 @@ and a README. `weld add module --with-dependencies` installs `http` (and the
 and registers the module on the composed mux — no separate route file is
 written. Because the graph binds `NewService`, it may take a dependency (for
 example `NewService(repo data.Repository)` after `weld add db` and registering
-the repository in `internal/di/repository_providers.go`), and the
+the repository in `internal/di/providers.go`), and the
 regenerated composition test serves the module through a generated fake so it
 does not depend on the constructor's signature. The generated service is a
 replaceable in-memory example, not persistence. Unlike generated capability

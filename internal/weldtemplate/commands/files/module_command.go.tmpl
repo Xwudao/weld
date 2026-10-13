@@ -29,7 +29,7 @@ import (
 //   - A dependency the shared commonModule already provides needs nothing else.
 //     That covers *config.Config, logging.Logger and, when installed, the Redis,
 //     mail and storage bindings, plus a data.Repository the project registered
-//     in repository_providers.go: Loom injects
+//     in providers.go: Loom injects
 //     them and prunes them until a subcommand consumes them.
 //   - A dependency no provider declares needs a provider in
 //     internal/di/__modname___graph.go, for example loom.Provide(NewThing), with

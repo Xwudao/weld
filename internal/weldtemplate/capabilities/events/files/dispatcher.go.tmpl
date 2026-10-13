@@ -73,8 +73,8 @@ func New(logger logging.Logger) *Dispatcher {
 // is ignored, so registration in a package that was handed no dispatcher is
 // harmless.
 //
-// Call On during graph construction in internal/di/events_listeners.go (or
-// the low-level internal/events/register.go), before startup and first publish.
+// Call On during graph construction in internal/di/events_listeners.go,
+// before startup and first publish.
 // Register once, not on each request.
 func On[T any](d *Dispatcher, listener Listener[T]) {
 	if d == nil || listener == nil {

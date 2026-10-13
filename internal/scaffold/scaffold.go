@@ -541,7 +541,7 @@ func reconcileInstalled(req Request, manifest *project.Manifest, result *Result)
 // seam that is absent on disk.
 //
 // The regenerated graph references the stable seams by name (for example the
-// loom capability's repositoryModule in internal/di/repository_providers.go), so
+// loom capability's projectModule in internal/di/providers.go), so
 // a project scaffolded by an older weld must gain such a file before di.go is
 // regenerated to reference it, and adding a module to such a project regenerates
 // di.go the same way. The rule is narrow on purpose: only a capability that

@@ -26,7 +26,6 @@ func TestAddEventsInstallsLoomAndDispatcher(t *testing.T) {
 		"internal/events/async.go",
 		"internal/events/async_test.go",
 		"internal/events/recorder.go",
-		"internal/events/register.go",
 		"internal/events/README.md",
 		"internal/di/events_provider.go",
 		"internal/di/events_listeners.go",
@@ -64,7 +63,7 @@ func TestAddEventsIsIdempotentAndKeepsTheRegistrationSeam(t *testing.T) {
 	dir := create(t, root)
 	add(t, dir, "events")
 
-	paths := []string{"internal/di/events_listeners.go", "internal/events/register.go"}
+	paths := []string{"internal/di/events_listeners.go"}
 	const listener = "\t// my listener\n"
 	for _, path := range paths {
 		edited(t, dir, path, readFile(t, filepath.Join(dir, path))+listener)
@@ -213,62 +212,5 @@ func TestBusinessListenersFromGeneratedGraph(t *testing.T) {
 	edited(t, dir, "internal/di/business_events_test.go", formatGo(strings.ReplaceAll(test, "__module__", mod)))
 	if !buildAndTestGeneratedProject(t, dir) {
 		t.Skip("cannot resolve generated project dependencies")
-	}
-}
-
-// TestAddEventsDispatchesInTheGeneratedProject is the end-to-end proof: a
-// listener registered through the Loom provider runs when the application
-// publishes, in a project generated here and compiled with the real toolchain.
-func TestAddEventsDispatchesInTheGeneratedProject(t *testing.T) {
-	t.Parallel()
-	loomToolAvailable(t)
-	root := t.TempDir()
-	dir := create(t, root)
-	add(t, dir, "events")
-
-	// Register a listener the way a project does, and assert delivery from the
-	// generated package's own test run.
-	edited(t, dir, "internal/events/register.go", `package events
-
-import "context"
-
-// Note is the event the registered listener records.
-type Note struct{ Text string }
-
-var delivered []string
-
-func Register(d *Dispatcher) error {
-	On(d, func(_ context.Context, event Note) error {
-		delivered = append(delivered, event.Text)
-		return nil
-	})
-	return nil
-}
-
-// Delivered returns the events the registered listener observed.
-func Delivered() []string { return delivered }
-`)
-	edited(t, dir, "internal/events/register_gen_test.go", `package events
-
-import (
-	"context"
-	"testing"
-)
-
-func TestRegisteredListenerRunsOnPublish(t *testing.T) {
-	d := New(nil)
-	if err := Register(d); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	if err := d.Publish(context.Background(), Note{Text: "hello"}); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-	if got := Delivered(); len(got) != 1 || got[0] != "hello" {
-		t.Fatalf("delivered = %v", got)
-	}
-}
-`)
-	if !buildAndTestGeneratedProject(t, dir) {
-		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 	}
 }

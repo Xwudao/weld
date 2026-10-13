@@ -1,103 +1,24 @@
 package httpserver
 
-import (
-	nethttp "net/http"
-	"strings"
+import "__module__/internal/httpx"
 
-	"__module__/internal/httpx"
-)
-
-// APIPrefix is the default mount prefix for the business modules (see
-// ModulePrefix).
-//
-// It is the one place the HTTP surface's default top-level path is declared.
-// Change it (for example to "/api/v2") to version the surface; the generated
-// server graph mounts the modules from this constant (through
-// ModulePrefix), so the change survives every later `weld add`. A module declares
-// its paths relative to its mount, so it follows the prefix without an edit.
+// APIPrefix is the default mount prefix for business modules. Change it to
+// "/api/v2", for example, to version the surface in one place.
 const APIPrefix = "/api"
 
-// ModulePrefix returns the URL prefix a business module is registered under.
-//
-// The generated server graph mounts every module through this function, so the
-// project owns the mapping from a module to its URL space without editing the
-// regenerated graph. The default keeps a module under the versioned API prefix
-// (APIPrefix/<name>). Return "" for a module that declares its own full paths —
-// for example one whose public routes live at /v1/thing and whose administrator
-// routes live at /admin/v1/thing, which do not fit a single APIPrefix/<name>
-// mount; the module then owns its complete paths and the graph mounts it at the
-// root.
-//
-// The name is the module's package name (the module's Name constant). Version
-// the whole surface in one place here, or special-case one module, without
-// touching internal/di/di.go.
+// ModulePrefix returns each module's mount path. Return "" for a module that
+// owns complete paths, or special-case a module without editing generated di.go.
 func ModulePrefix(name string) string {
 	return APIPrefix + "/" + name
 }
 
-// PolicyAdmin is the name of the administrator route policy. A module marks its
-// administrator routes with httpx.Policy(PolicyAdmin) and implements no check
-// itself; the generated server graph resolves the name once, so every module
-// shares one guard.
+// PolicyAdmin is a route policy name, not an authorization check. Business
+// policy middleware is wired in internal/di/http_policies.go.
 const PolicyAdmin = "admin"
 
-// NamedPolicy binds a policy name to the middleware that enforces it.
+// NamedPolicy binds a route policy name to its enforcing middleware.
+// A route that references an undeclared name fails at startup.
 type NamedPolicy struct {
 	Name       string
 	Middleware httpx.Middleware
-}
-
-// Policies returns every named policy the generated server graph applies, in
-// order.
-//
-// The graph declares this function as a Loom provider and loops over its result,
-// so adding a policy — a "login" policy that requires a signed-in caller next to
-// the administrator one, say — is an edit here, in this stable project file,
-// rather than an edit to the regenerated internal/di/di.go. Each policy can take
-// the dependencies it needs as parameters, because Loom constructs it; a policy
-// that returns an error fails startup rather than serving its routes unguarded.
-//
-// A module references a name with httpx.Policy(name) and a name no route uses yet
-// is harmless, so the set can grow ahead of the routes that need it.
-//
-// One edit goes with a new policy: the module that requires it. The generated
-// composition test keeps its own short list for the module-independent API
-// surface, but it never mounts a module, so it does not have to track a module's
-// policy; an unguarded route is caught by the module's own test, which applies
-// the name explicitly.
-func Policies() ([]NamedPolicy, error) {
-	return []NamedPolicy{{Name: PolicyAdmin, Middleware: AdminGuard()}}, nil
-}
-
-// AdminGuard is the project's administrator policy: the guard the generated
-// server graph registers for every module route marked httpx.Policy("admin").
-//
-// The graph declares this function as a Loom provider and injects its result, so
-// the guard can take the dependencies a real check needs: add a parameter (for
-// example the pool after `weld add db`) and Loom constructs it, with no edit to
-// the regenerated graph. It is an ordinary net/http middleware: it runs before
-// the handler and before the request body is bound, and it may read a header,
-// verify a JWT or a session, or look a role up in the database. It rejects by
-// writing httpx.Error and returning, and it passes by calling next.ServeHTTP,
-// optionally carrying the caller's identity on the request context for a handler
-// to read. Return an (httpx.Middleware, error) pair to fail startup when its own
-// configuration is unusable.
-//
-// A policy name the graph never defines panics at startup, so a route can never
-// serve unguarded because of a typo.
-//
-// The body below is a placeholder that accepts any non-empty bearer token, so a
-// generated project compiles and its tests exercise the rejection path. It does
-// not authenticate anyone: replace it, do not build on it.
-func AdminGuard() httpx.Middleware {
-	return func(next nethttp.Handler) nethttp.Handler {
-		return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-			authorization := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authorization, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")) == "" {
-				httpx.Error(w, nethttp.StatusUnauthorized, "authentication required")
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
 }

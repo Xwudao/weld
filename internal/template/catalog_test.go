@@ -247,8 +247,7 @@ func TestCronCapabilityLoads(t *testing.T) {
 	}
 	for _, want := range []string{
 		"internal/cron/cron.go",
-		"internal/cron/deps.go",
-		"internal/cron/register.go",
+		"internal/di/cron_jobs.go",
 		"internal/config/cron.go",
 		"internal/di/cron_provider.go",
 	} {
@@ -461,7 +460,7 @@ func TestLoomCapabilityLoads(t *testing.T) {
 	for _, want := range []string{
 		"tools/loom/go.mod",
 		"tools/loom/go.sum",
-		"internal/di/repository_providers.go",
+		"internal/di/providers.go",
 	} {
 		if !paths[want] {
 			t.Errorf("loom capability does not ship %s", want)
@@ -540,9 +539,9 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	// Installing db declares the pool as an available binding, but the default
 	// composition never depends on it and the graph registers no data.Repository:
 	// the graph root holds no repository. The project registers a repository in
-	// repositoryModule
-	// (repository_providers.go), and a provider the graph consumes asks for it.
-	for _, want := range []string{"loom.Provide(NewPool)", "repositoryModule"} {
+	// projectModule
+	// (providers.go), and a provider the graph consumes asks for it.
+	for _, want := range []string{"loom.Provide(NewPool)", "projectModule"} {
 		if !strings.Contains(string(withDB), want) {
 			t.Errorf("db graph is missing %q:\n%s", want, withDB)
 		}
@@ -608,7 +607,7 @@ func TestRenderDIGraphIsCapabilityAware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDIGraph(cron): %v", err)
 	}
-	for _, want := range []string{"loom.Provide(NewCronDeps)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler", "example.com/demo/internal/cron"} {
+	for _, want := range []string{"loom.Provide(NewCronJobs)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler", "example.com/demo/internal/cron"} {
 		if !strings.Contains(string(withCron), want) {
 			t.Errorf("cron graph is missing %q:\n%s", want, withCron)
 		}

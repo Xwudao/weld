@@ -1,0 +1,27 @@
+package di
+
+import "__module__/internal/cron"
+
+// CronJobs marks completed job registration. The HTTP application graph
+// consumes it automatically before lifecycle.Start; do not edit generated di.go.
+type CronJobs struct{}
+
+// NewCronJobs wires scheduled business work. Add a service parameter and
+// register its ordinary func(context.Context) error method, then make generate:
+//
+//	func NewCronJobs(s *cron.Scheduler, report report.Service) (*CronJobs, error) {
+//		if err := s.Register("daily-report", cron.Daily(), report.Generate); err != nil {
+//			return nil, err
+//		}
+//		return &CronJobs{}, nil
+//	}
+//
+// The service provider must be declared in the graph (HTTP module services
+// already are). Job errors and panics are logged by the scheduler; methods can
+// also be called directly or tested without a scheduler. Invalid registrations
+// fail graph construction before the application starts.
+//
+// This file is written once; subsequent weld add commands preserve your edits.
+func NewCronJobs(s *cron.Scheduler) (*CronJobs, error) {
+	return &CronJobs{}, nil
+}

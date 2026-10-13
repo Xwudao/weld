@@ -12,15 +12,16 @@ for the installed capability set and declares two things:
   from it.
 
 `loom_gen.go` is Loom output and must never be edited by hand. The provider
-seams are the opposite: weld writes `repository_providers.go`,
+seams are the opposite: weld writes `providers.go`,
 `redis_provider.go`, `mail_provider.go`, `storage_provider.go` and
 `cron_provider.go` once and never regenerates them, so they are the files you
-edit to wire dependencies. `repository_providers.go` declares the project-owned
-`repositoryModule`, which `commonModule` includes:
+edit to wire dependencies. `providers.go` is the single extension point for
+custom services, repositories and third-party clients; its `projectModule` is
+included by every graph, with unused providers pruned:
 
 ```go
-// internal/di/repository_providers.go, after `weld add db`
-var repositoryModule = loom.Module(
+// internal/di/providers.go, after `weld add db`
+var projectModule = loom.Module(
 	loom.As[data.Repository](NewRepository),
 )
 ```
@@ -31,12 +32,12 @@ var repositoryModule = loom.Module(
 | --- | --- | --- |
 | `*Config` | always | an immutable config built by `NewConfig`: the listen address (`serve --addr`, else `:8080`). The database fields are loaded but validated only by the pool |
 | `logging.Logger` | always | `NewLogger`, which builds the base `logging` handler on stderr; injected into the server so startup, a serve failure and a shutdown are logged through one protocol, with no process default logger |
-| `*pgxpool.Pool` | `db` | `data.NewPool`; **declared but not part of the default composition**. Loom prunes it while no provider depends on the pool — directly on `*pgxpool.Pool` or through a repository registered in `repositoryModule` (see `repository_providers.go`). When such a consumer exists Loom validates the database section, parses the dsn lazily (it is **not** connected at build, test or startup) and registers a cleanup that closes it exactly once |
-| `data.Repository` | `db` | **not declared by default**: the project registers it in `repository_providers.go` (`loom.As[data.Repository](NewRepository)`), so `NewPool` and the repository are constructed only for the roots that consume it. The generated graph claims no production consumer until you register one |
+| `*pgxpool.Pool` | `db` | `data.NewPool`; **declared but not part of the default composition**. Loom prunes it while no provider depends on the pool — directly on `*pgxpool.Pool` or through a repository registered in `projectModule` (see `providers.go`). When such a consumer exists Loom validates the database section, parses the dsn lazily (it is **not** connected at build, test or startup) and registers a cleanup that closes it exactly once |
+| `data.Repository` | `db` | **not declared by default**: the project registers it in `providers.go` (`loom.As[data.Repository](NewRepository)`), so `NewPool` and the repository are constructed only for the roots that consume it. The generated graph claims no production consumer until you register one |
 | `*redis.Client` | `redis` | `redisclient.New` through `NewRedisClient`, defined in the stable `redis_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*redis.Client`. When a consumer asks for it, Loom validates the `redis` section, builds the lazy client (it is **not connected** at build, test or startup) and registers a cleanup that closes it exactly once |
 | `*cron.Scheduler` | `cron` | `mailsender.New` through `NewMailSender`, defined in the stable `mail_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*mailsender.Sender`. Construction never connects and never sends |
 | `*objectstore.Store` | `storage` | `objectstore.New` through `NewObjectStore`, defined in the stable `storage_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*objectstore.Store`. Construction never connects |
-| `*cron.Scheduler` | `cron` | `cron.New` through `NewScheduler`, defined in the stable `cron_provider.go` seam. Unlike the bindings above, the server graph root consumes it, so Loom always constructs it and its start/stop hooks run with the server. `NewScheduler` takes the server, so the socket is bound before the scheduler starts and the scheduler stops before the server. `NewCronDeps` builds the `cron.Deps` bundle every job receives; add a job dependency there, not to this regenerated graph. It starts no jobs until `internal/cron/register.go` registers them |
+| `*cron.Scheduler` | `cron` | `cron.New` through `NewScheduler`, defined in the stable `cron_provider.go` seam. Unlike the bindings above, the server graph root consumes it, so Loom always constructs it and its start/stop hooks run with the server. `NewScheduler` takes the server, so the socket is bound before the scheduler starts and the scheduler stops before the server. `NewCronJobs` in `internal/di/cron_jobs.go` injects services and binds their methods before startup. It starts no jobs unless that seam registers them |
 | `*httpserver.Server` | `http` | the composed mux plus its `loom.Hook` start/stop lifecycle |
 | `*App` | `http` | the server graph root returned by `InitApp` |
 
@@ -49,17 +50,29 @@ a project that installs only `db`, `redis`, `mail`, `storage`, `config` or a
 command has Loom and `commonModule` but no server graph, no `InitApp` and no
 `internal/httpserver`.
 
+## Custom providers
+
+Declare project-specific providers in `internal/di/providers.go`, then run
+`make generate`. Use `loom.Provide(NewClient)` for a concrete result or
+`loom.As[SomeInterface](NewImplementation)` for an interface binding.
+Declare them once; every graph can consume them without copying registrations.
+
+HTTP policy wiring lives in `internal/di/http_policies.go`: add service
+parameters to `NewHTTPPolicies` and return named middleware. Route constants and
+mount prefixes remain in `internal/httpserver/policy.go`. Never import business
+services into httpserver, which the business modules themselves reference.
+
 ## The database is wired by hand
 
 `weld add db` installs a capability, not a connection. The graph declares the
 pool provider above but registers no `data.Repository` by default, so Loom
 prunes the pool and no command needs a database credential. When you want
-persistence, register the repository in `repository_providers.go`, the
+persistence, register the repository in `providers.go`, the
 project-owned seam, rather than in `di.go`, which is regenerated:
 
 ```go
-// internal/di/repository_providers.go, after `weld add db`
-var repositoryModule = loom.Module(
+// internal/di/providers.go, after `weld add db`
+var projectModule = loom.Module(
 	loom.As[data.Repository](NewRepository),
 )
 ```
@@ -100,10 +113,10 @@ so Loom constructs `NewScheduler` and registers its `loom.Hook` start/stop.
 `NewScheduler` takes the `*httpserver.Server`, and Loom constructs providers in
 dependency order and appends hooks as it constructs them, so the socket is bound
 before the scheduler starts and the scheduler stops before the server.
-`NewCronDeps` builds the `cron.Deps` bundle every job receives, so a job that
-needs the events publisher or a repository consumes it there rather than through
-a global or a signature change. The scheduler starts no jobs until
-`internal/cron/register.go` registers them. See `internal/cron/README.md`.
+Add service parameters and register their `func(context.Context) error` methods
+in `NewCronJobs` in `internal/di/cron_jobs.go`, then run `make generate`.
+Registration is automatic before startup; no job dependency bundle is needed.
+The scheduler logs job errors with their names. See `internal/cron/README.md`.
 
 ### Business event listeners are wired automatically
 
@@ -111,8 +124,8 @@ After `weld add events`, add consuming service parameters and `events.On` calls
 in `internal/di/events_listeners.go`, then run `make generate`. The HTTP graph
 consumes `*EventListeners` automatically before startup. A consuming service may
 also inject `events.Publisher`; registration is separate from publisher creation.
-The original `internal/events/register.go` is still supported for low-level
-listeners. Command/seed graphs do not automatically register server listeners.
+Business listeners have one entry point: `internal/di/events_listeners.go`.
+Command/seed graphs do not automatically register server listeners.
 See `internal/events/README.md` for a publish-in-A, consume-in-B example.
 
 Never wire providers into `di.go`: it is regenerated from the installed
@@ -144,7 +157,7 @@ graphs stay stable while `commonModule` grows with the project. To
 consume a shared provider, add a field to the command root's `Deps` and a
 parameter to `<name>.NewDeps`; it is already an available binding through
 `commonModule`, so no graph edit is needed — a `data.Repository` the project
-registered in `repository_providers.go` reaches a command this way too. A
+registered in `providers.go` reaches a command this way too. A
 dependency no provider declares needs `loom.Provide(...)` in the command graph.
 The server-only `*cron.Scheduler` is never available to a command.
 
@@ -159,7 +172,7 @@ written once and never regenerated. The consequence is that installing a module
 refreshes `di.go` and `loom_gen.go` but leaves `di_test.go` byte-for-byte
 unchanged, and changing `NewService` to take a dependency (for example
 `NewService(repo data.Repository)` after `weld add db` and registering the
-repository in `repository_providers.go`) cannot break the graph
+repository in `providers.go`) cannot break the graph
 test. Keep
 module-specific assertions in the module's own test, not here: `di_test.go` is
 generated and an edit to it does not survive the next `weld add`.
@@ -200,8 +213,8 @@ make generate
 installed capability changes the provider set; re-adding an installed capability
 (for example `weld add loom`) reconciles them when only the templates changed, so
 a project scaffolded by an older weld can be refreshed in place — including a
-stable seam a newer weld added, such as `repository_providers.go`. Do not edit
-these generated files. The stable provider seams — `repository_providers.go`,
+stable seam a newer weld added, such as `providers.go`. Do not edit
+these generated files. The stable provider seams — `providers.go`,
 `redis_provider.go`, `mail_provider.go`, `storage_provider.go`
 and `cron_provider.go` — are written once and never regenerated, so edit those
 files to wire dependencies, and keep a module's own route assertions in that

@@ -1084,7 +1084,7 @@ func TestAddLoomInstallsCLIOnlyGraph(t *testing.T) {
 	for _, path := range []string{
 		"internal/di/di.go",
 		"internal/di/di_test.go",
-		"internal/di/repository_providers.go",
+		"internal/di/providers.go",
 		"internal/di/README.md",
 		"tools/loom/go.mod",
 		"tools/loom/go.sum",
@@ -1165,7 +1165,7 @@ func TestAddLoomIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestAddLoomRepositoryProviderSeamIsStable proves repository_providers.go is a
+// TestAddLoomRepositoryProviderSeamIsStable proves providers.go is a
 // stable seam: a later capability install regenerates di.go around it but never
 // rewrites the project's repository wiring, and di.go still includes the seam.
 func TestAddLoomRepositoryProviderSeamIsStable(t *testing.T) {
@@ -1175,7 +1175,7 @@ func TestAddLoomRepositoryProviderSeamIsStable(t *testing.T) {
 	dir := create(t, root)
 	add(t, dir, "loom")
 
-	path := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	path := filepath.Join(dir, "internal", "di", "providers.go")
 	const marker = "// project-owned repository wiring"
 	if err := os.WriteFile(path, []byte(readFile(t, path)+"\n"+marker+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1187,7 +1187,7 @@ func TestAddLoomRepositoryProviderSeamIsStable(t *testing.T) {
 		t.Fatalf("a later add rewrote the stable repository providers seam:\n%s", got)
 	}
 	di := readFile(t, filepath.Join(dir, "internal", "di", "di.go"))
-	if !strings.Contains(di, "repositoryModule") {
+	if !strings.Contains(di, "projectModule") {
 		t.Fatalf("di.go does not include the repository seam:\n%s", di)
 	}
 }
@@ -1195,7 +1195,7 @@ func TestAddLoomRepositoryProviderSeamIsStable(t *testing.T) {
 // TestAddLoomReconcileRestoresMissingRepositoryProviderSeam proves a project
 // scaffolded by an older weld (before the seam existed) gains it on
 // `weld add <installed capability>`: the regenerated graph references
-// repositoryModule, so reconciliation must write the file that declares it.
+// projectModule, so reconciliation must write the file that declares it.
 func TestAddLoomReconcileRestoresMissingRepositoryProviderSeam(t *testing.T) {
 	t.Parallel()
 	loomToolAvailable(t)
@@ -1203,7 +1203,7 @@ func TestAddLoomReconcileRestoresMissingRepositoryProviderSeam(t *testing.T) {
 	dir := create(t, root)
 	add(t, dir, "loom")
 
-	path := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	path := filepath.Join(dir, "internal", "di", "providers.go")
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
@@ -1215,7 +1215,7 @@ func TestAddLoomReconcileRestoresMissingRepositoryProviderSeam(t *testing.T) {
 	if err := result.Apply(); err != nil {
 		t.Fatalf("apply reconcile: %v", err)
 	}
-	if !strings.Contains(readFile(t, path), "var repositoryModule = loom.Module()") {
+	if !strings.Contains(readFile(t, path), "var projectModule = loom.Module()") {
 		t.Fatalf("reconcile did not restore the repository providers seam:\n%s", readFile(t, path))
 	}
 	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
@@ -1224,8 +1224,8 @@ func TestAddLoomReconcileRestoresMissingRepositoryProviderSeam(t *testing.T) {
 }
 
 // TestAddModuleRestoresRepositoryProviderSeam proves `weld add module` on an
-// older project restores repository_providers.go before it regenerates di.go.
-// Without the restore the regenerated graph would reference repositoryModule but
+// older project restores providers.go before it regenerates di.go.
+// Without the restore the regenerated graph would reference projectModule but
 // the file would be absent, so the Loom generation and the build would fail.
 func TestAddModuleRestoresRepositoryProviderSeam(t *testing.T) {
 	t.Parallel()
@@ -1234,18 +1234,18 @@ func TestAddModuleRestoresRepositoryProviderSeam(t *testing.T) {
 	dir := create(t, root)
 	add(t, dir, "http")
 
-	path := filepath.Join(dir, "internal", "di", "repository_providers.go")
+	path := filepath.Join(dir, "internal", "di", "providers.go")
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 
 	addModule(t, dir, "widget")
 
-	if !strings.Contains(readFile(t, path), "var repositoryModule = loom.Module()") {
+	if !strings.Contains(readFile(t, path), "var projectModule = loom.Module()") {
 		t.Fatalf("add module did not restore the repository providers seam:\n%s", readFile(t, path))
 	}
 	di := readFile(t, filepath.Join(dir, "internal", "di", "di.go"))
-	if !strings.Contains(di, "repositoryModule") || !strings.Contains(di, "widget") {
+	if !strings.Contains(di, "projectModule") || !strings.Contains(di, "widget") {
 		t.Fatalf("the regenerated graph does not include the repository seam and the module:\n%s", di)
 	}
 	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
@@ -1276,16 +1276,16 @@ func TestAddLoomGraphFollowsInstalledCapabilities(t *testing.T) {
 				add(t, dir, capability)
 			}
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-			for _, want := range []string{"loom.Provide(NewPool)", "repositoryModule"} {
+			for _, want := range []string{"loom.Provide(NewPool)", "projectModule"} {
 				if !strings.Contains(di, want) {
 					t.Errorf("di.go does not declare %q:\n%s", want, di)
 				}
 			}
 			// The repository providers are project-owned: the graph includes the
 			// seam but registers no default repository.
-			providers := readFile(t, filepath.Join(dir, "internal/di/repository_providers.go"))
-			if !strings.Contains(providers, "var repositoryModule = loom.Module()") {
-				t.Errorf("repository_providers.go is not the empty project seam:\n%s", providers)
+			providers := readFile(t, filepath.Join(dir, "internal/di/providers.go"))
+			if !strings.Contains(providers, "var projectModule = loom.Module()") {
+				t.Errorf("providers.go is not the empty project seam:\n%s", providers)
 			}
 			// A CLI-only project has no server graph and so no generated initializer.
 			for _, forbidden := range []string{"func InitApp", "NewServer", "internal/httpserver"} {
@@ -2669,7 +2669,7 @@ func TestAddCronInstallsHTTPAndLoom(t *testing.T) {
 	}
 	for _, path := range []string{
 		"internal/cron/cron.go",
-		"internal/cron/register.go",
+		"internal/di/cron_jobs.go",
 		"internal/config/cron.go",
 		"internal/di/cron_provider.go",
 		"internal/di/di.go",
@@ -2688,11 +2688,11 @@ func TestAddCronInstallsHTTPAndLoom(t *testing.T) {
 	}
 
 	// The registration file is the stable job seam and registers nothing.
-	register := readFile(t, filepath.Join(dir, "internal/cron/register.go"))
-	if !strings.Contains(register, "func Register(s *Scheduler) error") {
+	register := readFile(t, filepath.Join(dir, "internal/di/cron_jobs.go"))
+	if !strings.Contains(register, "func NewCronJobs(s *cron.Scheduler) (*CronJobs, error)") {
 		t.Errorf("register.go does not expose Register:\n%s", register)
 	}
-	if !strings.Contains(register, "return nil") {
+	if !strings.Contains(register, "return &CronJobs{}, nil") {
 		t.Errorf("register.go schedules work by default:\n%s", register)
 	}
 	// The server graph root consumes the scheduler, so it is constructed and its
@@ -2704,7 +2704,7 @@ func TestAddCronInstallsHTTPAndLoom(t *testing.T) {
 		}
 	}
 	provider := readFile(t, filepath.Join(dir, "internal/di/cron_provider.go"))
-	for _, want := range []string{"func NewScheduler", "cron.New", "cron.Register", "lc.Append"} {
+	for _, want := range []string{"func NewScheduler", "cron.New", "lc.Append"} {
 		if !strings.Contains(provider, want) {
 			t.Errorf("cron_provider.go is missing %q:\n%s", want, provider)
 		}
@@ -2794,7 +2794,7 @@ func TestAddCronWithLoomWiresScheduler(t *testing.T) {
 			}
 
 			di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
-			for _, want := range []string{"loom.Provide(NewCronDeps)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
+			for _, want := range []string{"loom.Provide(NewCronJobs)", "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
 				if !strings.Contains(di, want) {
 					t.Errorf("di.go is missing %q:\n%s", want, di)
 				}
@@ -2895,108 +2895,27 @@ func TestCronProviderSeamGuardsInstallOnce(t *testing.T) {
 	}
 }
 
-// TestAddCronProviderSeamSurvivesLaterAdd proves the durable seam end to end: a
-// user edit to the stable register and provider files survives a later
-// capability add that regenerates the graph.
+// TestAddCronProviderSeamSurvivesLaterAdd proves both project-owned DI seams
+// survive capability additions that regenerate the application graph.
 func TestAddCronProviderSeamSurvivesLaterAdd(t *testing.T) {
 	t.Parallel()
 	loomToolAvailable(t)
-	orders := []struct {
-		name string
-		caps []string
-	}{
-		{"cron then loom", []string{"cron", "loom"}},
-		{"loom then cron", []string{"loom", "cron"}},
+	dir := create(t, t.TempDir())
+	add(t, dir, "cron")
+	paths := []string{"internal/di/cron_jobs.go", "internal/di/cron_provider.go"}
+	edits := make(map[string]string)
+	for _, path := range paths {
+		edits[path] = readFile(t, filepath.Join(dir, path)) + "\n// project-owned wiring\n"
+		edited(t, dir, path, edits[path])
 	}
-	for _, order := range orders {
-		t.Run(order.name, func(t *testing.T) {
-			t.Parallel()
-			root := t.TempDir()
-			dir := create(t, root)
-			for _, capability := range order.caps {
-				add(t, dir, capability)
-			}
-
-			registerPath := filepath.Join(dir, "internal/cron/register.go")
-			depsPath := filepath.Join(dir, "internal/cron/deps.go")
-			providerPath := filepath.Join(dir, "internal/di/cron_provider.go")
-			registerEdit := readFile(t, registerPath) + "\n// user job, must survive a later add\n"
-			depsEdit := readFile(t, depsPath) + "\n// user deps, must survive a later add\n"
-			providerEdit := readFile(t, providerPath) + "\n// user wiring, must survive a later add\n"
-			if err := os.WriteFile(registerPath, []byte(registerEdit), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(depsPath, []byte(depsEdit), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(providerPath, []byte(providerEdit), 0o644); err != nil {
-				t.Fatal(err)
-			}
-
-			add(t, dir, "web")
-
-			if got := readFile(t, registerPath); got != registerEdit {
-				t.Fatalf("the later add rewrote the user's register.go:\n%s", got)
-			}
-			if got := readFile(t, depsPath); got != depsEdit {
-				t.Fatalf("the later add rewrote the user's deps.go:\n%s", got)
-			}
-			if got := readFile(t, providerPath); got != providerEdit {
-				t.Fatalf("the later add rewrote the user's cron_provider.go:\n%s", got)
-			}
-			if di := readFile(t, filepath.Join(dir, "internal/di/di.go")); !strings.Contains(di, "internal/web") {
-				t.Errorf("di.go was not regenerated for web:\n%s", di)
-			}
-			if !buildAndTestGeneratedProject(t, dir) {
-				t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
-			}
-		})
-	}
-}
-
-// TestAddCronDepsExtensionSurvivesLaterAdd is the regression for the Deps seam:
-// cron ships a job dependency bundle and the seam to extend it, so adding a
-// field never changes NewScheduler's signature. A later add regenerates di.go
-// and the generated di_test.go, which calls NewScheduler with the fixed argument
-// list; the extended bundle must still compile and test.
-func TestAddCronDepsExtensionSurvivesLaterAdd(t *testing.T) {
-	t.Parallel()
-	loomToolAvailable(t)
-	root := t.TempDir()
-	dir := create(t, root)
-	for _, capability := range []string{"http", "cron", "loom"} {
-		add(t, dir, capability)
-	}
-
-	depsPath := filepath.Join(dir, "internal/cron/deps.go")
-	deps := readFile(t, depsPath)
-	depsEdit := strings.Replace(deps, "type Deps struct {", "type Deps struct {\n\tNote string", 1)
-	if depsEdit == deps {
-		t.Fatalf("deps.go does not declare the Deps struct:\n%s", deps)
-	}
-	if err := os.WriteFile(depsPath, []byte(depsEdit), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	providerPath := filepath.Join(dir, "internal/di/cron_provider.go")
-	provider := readFile(t, providerPath)
-	providerEdit := strings.Replace(provider, "return &cron.Deps{Logger: logger}", "return &cron.Deps{Logger: logger, Note: \"extended\"}", 1)
-	if providerEdit == provider {
-		t.Fatalf("cron_provider.go does not construct the Deps bundle:\n%s", provider)
-	}
-	if err := os.WriteFile(providerPath, []byte(providerEdit), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// A later add regenerates di.go and di_test.go; the generated test's
-	// NewScheduler call must keep compiling against the extended bundle.
 	add(t, dir, "web")
-	generated := readFile(t, filepath.Join(dir, "internal/di/di_test.go"))
-	if !strings.Contains(generated, "NewScheduler(lifecycle, cfg, logger, server, nil)") {
-		t.Fatalf("the generated di_test.go no longer calls NewScheduler with the stable signature:\n%s", generated)
+	for _, path := range paths {
+		if got := readFile(t, filepath.Join(dir, path)); got != edits[path] {
+			t.Fatalf("later add rewrote %s", path)
+		}
 	}
 	if !buildAndTestGeneratedProject(t, dir) {
-		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+		t.Skip("cannot resolve generated project dependencies")
 	}
 }
 
@@ -3151,9 +3070,9 @@ func TestAddCronRegistrationFileIsConsumed(t *testing.T) {
 		add(t, dir, capability)
 	}
 
-	path := filepath.Join(dir, "internal/cron/register.go")
-	const before = "func Register(s *Scheduler) error {\n\treturn nil\n}"
-	const after = "func Register(s *Scheduler) error {\n\treturn s.Register(\"bad\", \"not a spec\", nil)\n}"
+	path := filepath.Join(dir, "internal/di/cron_jobs.go")
+	const before = "func NewCronJobs(s *cron.Scheduler) (*CronJobs, error) {\n\treturn &CronJobs{}, nil\n}"
+	const after = "func NewCronJobs(s *cron.Scheduler) (*CronJobs, error) {\n\treturn nil, s.Register(\"bad\", \"not a spec\", nil)\n}"
 	content := readFile(t, path)
 	if !strings.Contains(content, before) {
 		t.Fatalf("register.go does not carry the expected default body:\n%s", content)

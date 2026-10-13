@@ -8,8 +8,8 @@ import (
 
 // NewEventListenerDispatcher exposes the publisher's underlying dispatcher for
 // business listener wiring. It never creates a second dispatcher. Keeping this
-// adapter separate from NewEventDispatcher lets consumer services also publish,
-// and works with the existing stable events_provider.go seam in older projects.
+// adapter separate from NewEventDispatcher lets consumer services also publish
+// without making publisher construction depend on the consuming service.
 func NewEventListenerDispatcher(publisher events.Publisher) (*events.Dispatcher, error) {
 	dispatcher, ok := events.DispatcherOf(publisher)
 	if !ok {

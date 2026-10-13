@@ -51,8 +51,7 @@ dispatcher. Do not register listeners in each request or service constructor.
 
 Registration is explicit, not scanned. The event's concrete Go type is the key:
 `On[ItemCreated]` receives `ItemCreated`, not `*ItemCreated`.
-The older `internal/events/register.go` remains supported for low-level
-listeners; keep business service imports out of that package.
+Keep business service imports out of the events package; wiring belongs in DI.
 
 ## Delivery is synchronous, and that is the point
 
@@ -161,13 +160,6 @@ services needed by that seam must also be available to that command graph.
 
 A custom Publisher without an in-process dispatcher fails local listener
 wiring explicitly; Recorder is for isolated service tests, not listener wiring.
-
-### Existing projects
-
-Re-add/upgrade the events capability to install the new wiring files and
-regenerate the HTTP graph. Existing `events_provider.go` and `register.go`
-edits are preserved. Move a business listener from register.go to the new
-DI seam rather than copying it, otherwise it will execute twice.
 
 ## Tests
 

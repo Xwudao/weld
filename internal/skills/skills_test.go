@@ -390,7 +390,7 @@ func TestRenderCronMailStorageLabelsAndSeams(t *testing.T) {
 		"**cron** v0.1.0",
 		"**mail** v0.1.0",
 		"**storage** v0.1.0",
-		"`internal/cron/register.go`",
+		"`internal/di/cron_jobs.go`",
 		"`internal/di/cron_provider.go`",
 		"`internal/di/mail_provider.go`",
 		"`internal/di/storage_provider.go`",
@@ -410,7 +410,7 @@ func TestRenderCronRequiresLoom(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	text := string(body)
-	for _, want := range []string{"`internal/cron/register.go`", "`internal/di/cron_provider.go`", "only the Loom `serve` lifecycle"} {
+	for _, want := range []string{"`internal/di/cron_jobs.go`", "`internal/di/cron_provider.go`", "only the Loom `serve` lifecycle"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("cron skill does not describe the supported DI composition %q:\n%s", want, text)
 		}
@@ -428,7 +428,6 @@ func TestRenderEventsNamesItsSeamsAndItsLimits(t *testing.T) {
 	text := string(body)
 	for _, want := range []string{
 		"**events** v0.1.0",
-		"`internal/events/register.go`",
 		"`internal/di/events_listeners.go`",
 		"`internal/di/events_provider.go`",
 		"`events.Publisher`",

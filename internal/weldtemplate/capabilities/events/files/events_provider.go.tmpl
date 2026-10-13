@@ -37,7 +37,6 @@ const eventShutdownTimeout = 10 * time.Second
 // the HTTP application graph runs that seam automatically before startup.
 //
 // This file is written once and preserved by later weld add/upgrade commands.
-// The low-level events.Register seam is still called for compatibility.
 // NewEventListenerDispatcher exposes this publisher's dispatcher to the
 // business wiring seam, so sync and async delivery use the same listeners.
 //
@@ -46,9 +45,6 @@ const eventShutdownTimeout = 10 * time.Second
 // Services should depend on events.Publisher, not on the concrete dispatcher.
 func NewEventDispatcher(lc *loom.Lifecycle, logger logging.Logger) (events.Publisher, error) {
 	dispatcher := events.New(logger)
-	if err := events.Register(dispatcher); err != nil {
-		return nil, err
-	}
 	if !asyncEvents {
 		return dispatcher, nil
 	}

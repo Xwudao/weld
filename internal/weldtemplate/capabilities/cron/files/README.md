@@ -1,32 +1,43 @@
 # internal/cron
 
-The scheduler of this project. `weld add cron` installs an in-process scheduler
-library and wires it to the `serve` command; it does **not** schedule any work.
-Jobs are declared in `internal/cron/register.go`, a stable file weld writes once
-and never regenerates, so the jobs you add there survive every later
-`weld add`.
+The project's in-process scheduler, started and stopped with `serve`.
+Installing cron schedules no work. Add jobs in the stable
+**`internal/di/cron_jobs.go`** file; weld never regenerates that file.
 
-## Where jobs are declared
+## Call a service on a schedule
 
-`Register` in `internal/cron/register.go` is the one place to add scheduled work:
+A service exposes a normal method:
 
 ```go
-func Register(s *cron.Scheduler) error {
-	if err := s.Register("nightly-report", cron.DailyAt(3, 0), func(ctx context.Context, deps *cron.Deps) {
-		deps.Logger.Info("nightly report started")
-		report(ctx) // ctx is canceled when the process stops
-	}); err != nil {
-		return err
-	}
-	// Every is the form for intervals cron syntax cannot say.
-	return s.Register("poll", cron.Every(30*time.Second), func(ctx context.Context, deps *cron.Deps) {
-		poll(ctx)
-	})
+func (s *service) Generate(ctx context.Context) error {
+    // Use the service's injected repositories, publisher, clients, etc.
+    return nil
 }
 ```
 
-The default implementation registers nothing, which is why installing the
-capability schedules nothing by itself.
+Add that method to its Service interface if the constructor returns an interface.
+Inject the service and register its method in the wiring function:
+
+```go
+func NewCronJobs(s *cron.Scheduler, report report.Service) (*CronJobs, error) {
+    if err := s.Register("daily-report", cron.DailyAt(3, 0), report.Generate); err != nil {
+        return nil, err
+    }
+    return &CronJobs{}, nil
+}
+```
+
+Add imports as needed, then run `make generate`. The service provider must be
+declared; HTTP module providers already are, and custom providers belong in
+`internal/di/providers.go`.
+
+The HTTP graph runs registration automatically before startup. There is no job
+Deps bundle: dependencies belong to the service, or to parameters captured by
+a closure in this wiring function. Other callers can invoke the method directly.
+
+Jobs have the signature `func(context.Context) error`. A returned error is
+logged automatically with the job name, but not retried; panics are recovered.
+Return registration errors so invalid schedules fail before the server starts.
 
 ## Schedules
 
@@ -47,45 +58,15 @@ for polling loops and the intervals cron cannot express — seconds, 90 minutes,
 be at least one second; anything smaller fails at `Register` rather than
 busy-looping.
 
-## Where dependencies come from
-
-A job's second parameter is a `*cron.Deps` bundle, so a job reads the
-application's dependencies instead of a global. The shipped bundle holds the
-logger; add a field to `Deps` in `internal/cron/deps.go` (a stable seam) and
-construct it in `NewCronDeps` in `internal/di/cron_provider.go` (also stable):
-
-```go
-// internal/cron/deps.go
-type Deps struct {
-	Logger    logging.Logger
-	Publisher events.Publisher
-}
-
-// internal/di/cron_provider.go
-func NewCronDeps(logger logging.Logger, publisher events.Publisher) *cron.Deps {
-	return &cron.Deps{Logger: logger, Publisher: publisher}
-}
-```
-
-Loom resolves each parameter of `NewCronDeps` only because the provider consumes
-it, so making a job publish constructs the event dispatcher for the server graph
-and nothing else. Add the field, add the parameter, and `scheduler.Register`'s
-signature never changes — so adding a dependency touches neither the generated
-graph nor any generated test.
-
 ## How it follows serve
 
-The scheduler is not started by the capability and never by a short command.
-`weld add cron` requires `http` (and therefore `loom`), so the server graph root
-consumes `*cron.Scheduler`: `NewScheduler` in the stable
-`internal/di/cron_provider.go` seam builds the scheduler and registers its
-start/stop with the Loom lifecycle. `help`, `version` and every other short
-command never reach it.
+`NewScheduler` in `internal/di/cron_provider.go` builds the scheduler and
+registers lifecycle hooks. `NewCronJobs` binds business methods separately.
+The graph root consumes the registration result so it cannot be pruned.
 
-The provider takes the server, and Loom constructs providers in dependency order
-and appends hooks as it constructs them, so the socket is bound before the
-scheduler starts and the scheduler stops before the HTTP server. One process owns
-one scheduler and it runs only while `serve` runs.
+The scheduler starts after the HTTP server and stops before it. Help, version
+and short commands never construct or start it. Respect the job context, which
+is canceled when the scheduler stops.
 
 ## What the scheduler guarantees
 

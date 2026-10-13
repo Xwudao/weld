@@ -5,7 +5,7 @@
 # tools/loom. `weld add` already runs this when an installed capability changes
 # the graph, and `weld gen loom` runs the same generator without make; this
 # target is the no-weld fallback. Wire providers in
-# internal/di/repository_providers.go or a business module's service.go, the
+# internal/di/providers.go or a business module's service.go, the
 # stable seams; do not edit di.go (regenerated from the installed capabilities)
 # or loom_gen.go (generated) by hand.
 generate: ## Regenerate the Loom graph initializer (pinned tool)

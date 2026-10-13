@@ -132,7 +132,8 @@ Capabilities:
   query/path and JSON
   binding, and the composable middleware chain; the global stack is declared in
   the stable, project-owned `internal/httpserver/middleware.go` and the route
-  policies in `internal/httpserver/policy.go`. The router records every route it
+  policies in `internal/di/http_policies.go`, with service injection; route names
+  and mount prefixes live in `internal/httpserver/policy.go`. The router records every route it
   registers (`Routes`, `LogRoutes`, `PrintRoutes`), and the composition logs the
   table with each route's policies at startup in a development environment. Its
   `Serve` takes the injected
@@ -171,11 +172,10 @@ Capabilities:
 - `cron` (add) — an opt-in in-process scheduler that starts and stops with the
   `serve` command and never with a short command. Requires `http` (and therefore
   `loom`); installing it schedules nothing until you register jobs in
-  `internal/cron/register.go`. Jobs take a five-field cron spec or a readable
-  interval (`cron.Every`, `cron.DailyAt`, `cron.WeeklyOn`, `cron.MonthlyOn`) and
-  each receives a `cron.Deps` bundle you extend in `internal/cron/deps.go` and
-  wire in `internal/di/cron_provider.go`, so a job gets the application's
-  dependencies without a service locator.
+  `internal/di/cron_jobs.go`. Inject a service into `NewCronJobs` and register
+  its ordinary `func(context.Context) error` method. Five-field specs and
+  readable helpers (`Every`, `DailyAt`, `WeeklyOn`, `MonthlyOn`) are supported;
+  job errors are logged automatically. No dependency bundle is needed.
 - `loom` (add) — the compile-time [Loom](https://github.com/Xwudao/loom)
   dependency-injection foundation. Its `commonModule` always wires the
   configuration, the logger and the installed `db`/`redis`/`mail`/`storage`/`events`
@@ -346,7 +346,7 @@ upgrade may do with it:
 |---|---|---|
 | `payload` (the default) | `internal/httpx/*.go`, `README.md` | rewritten while you have not changed it; otherwise reported with a diff |
 | `patched` | `internal/config/config.go` | the newer payload supplies the skeleton and your live marker regions are spliced into it |
-| `seam` | `internal/httpserver/middleware.go`, `internal/httpserver/policy.go`, `internal/di/*_providers.go`, `internal/*/register.go`, the `Makefile`, `.gitignore`, `config.yml` | written once, then yours: **never rewritten**, reported with a diff when the shipped version moves |
+| `seam` | `internal/httpserver/middleware.go`, `internal/httpserver/policy.go`, `internal/di/providers.go`, `internal/di/http_policies.go`, `internal/di/events_listeners.go`, `internal/di/cron_jobs.go`, capability provider seams, `internal/data/seeder/register.go`, the `Makefile`, `.gitignore`, `config.yml` | written once, then yours: **never rewritten**, reported with a diff when the shipped version moves |
 | `generated` | `internal/di/di.go`, `internal/di/di_test.go` | re-rendered from the graph, never merged, never pruned |
 
 `go.mod` and `go.sum` belong to the Go toolchain: `go mod tidy`, every build and
@@ -554,10 +554,9 @@ What Loom binds, and why it is not ceremonial:
 - `*cron.Scheduler` (`cron`) — the graph root consumes the scheduler, so it is
   always constructed and its `loom.Hook` start/stop run with the server: the
   socket is bound before the scheduler starts and the scheduler stops before the
-  server. `NewCronDeps` builds the `cron.Deps` bundle every job receives; add a
-  job dependency there rather than to the regenerated graph. It starts no jobs
-  until `internal/cron/register.go` registers them, and it takes no database or
-  Redis lock.
+  server. `NewCronJobs` in `internal/di/cron_jobs.go` injects business services
+  and registers their methods before startup. It starts no jobs unless that
+  seam registers them, and it takes no database or Redis lock.
 - `*redis.Client` (`redis`), `*mailsender.Sender` (`mail`) and
   `*objectstore.Store` (`storage`) — declared bindings the default graph never
   depends on, so Loom prunes them and an unrelated serve needs none of those
@@ -575,7 +574,7 @@ failure rolls the whole plan back so a project is never left with a graph that
 does not match `loom_gen.go`. Capabilities stay independent of the graph source:
 each contributes its own stable provider seam (`redis_provider.go`,
 `mail_provider.go`, `storage_provider.go`,
-`cron_provider.go` and the `cron.Deps` bundle in `internal/cron/deps.go`) and a
+`cron_provider.go`, `cron_jobs.go`, `http_policies.go` and `providers.go`) and a
 `go.mod` go-directive extension point, while `di.go`
 and `loom_gen.go` alone are regenerated.
 
@@ -613,8 +612,6 @@ What lands in the project:
   Publisher without a DI construction cycle.
 - `internal/di/events_bindings.go` and `internal/events/registration.go` — expose
   the publisher's same dispatcher for registration in both delivery modes.
-- `internal/events/register.go` — the legacy low-level registration seam, still
-  supported and preserved. Prefer the DI seam for business service listeners.
 - `internal/di/events_provider.go` — the stable Loom provider seam, written when
   `loom` is installed. It returns the `events.Publisher` interface and selects the
   delivery mode from the `asyncEvents` switch at the top of the file (false by
@@ -650,8 +647,8 @@ are declared by `weld add module`). B's handler remains a normal method that
 other code can call directly. The HTTP graph constructs the publisher and
 registers listeners before startup; a registration error fails startup, not the
 first request. Command/seed graphs still prune unused publishers and do not
-implicitly consume server listeners. Existing `events_provider.go` and
-`register.go` edits are preserved when upgrading to the new DI seam.
+implicitly consume server listeners. Business listener registration has one
+entry point: `internal/di/events_listeners.go`.
 
 ## `weld add module` (stage 5)
 

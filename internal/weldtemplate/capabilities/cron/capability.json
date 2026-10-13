@@ -1,14 +1,13 @@
 {
   "name": "cron",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "kind": "add",
-  "summary": "Opt-in in-process scheduler: a named job registry with explicit Start/Stop, five-field cron specs or fixed intervals (Every, DailyAt, WeeklyOn, MonthlyOn), overlap skipping, panic recovery and a UTC-default timezone. Jobs receive a Deps bundle, the seam for injecting application dependencies. Installing it schedules nothing on its own; the scheduler starts and stops with the serve command through the Loom graph and jobs are declared in a stable registration file.",
+  "summary": "Opt-in in-process scheduler: a named job registry with explicit Start/Stop, five-field cron specs or fixed intervals (Every, DailyAt, WeeklyOn, MonthlyOn), overlap skipping, panic recovery and a UTC-default timezone. Jobs are ordinary func(context.Context) error methods, wired to injected services in internal/di/cron_jobs.go before startup. Job errors are logged automatically. Installing it schedules nothing on its own; the scheduler starts and stops with the serve command through the Loom graph.",
   "requires": ["http"],
   "files": [
     { "path": "internal/cron/cron.go", "source": "files/cron.go.tmpl" },
-    { "path": "internal/cron/deps.go", "source": "files/deps.go.tmpl", "role": "seam" },
     { "path": "internal/cron/cron_test.go", "source": "files/cron_test.go.tmpl" },
-    { "path": "internal/cron/register.go", "source": "files/register.go.tmpl", "role": "seam" },
+    { "path": "internal/di/cron_jobs.go", "source": "files/cron_jobs.go.tmpl", "role": "seam", "when": ["loom"] },
     { "path": "internal/cron/README.md", "source": "files/README.md" },
     { "path": "internal/config/cron.go", "source": "files/cron_config.go.tmpl" },
     { "path": "internal/config/cron_test.go", "source": "files/cron_config_test.go.tmpl" },

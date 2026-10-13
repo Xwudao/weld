@@ -77,7 +77,6 @@ func TestEventsCapabilityRequiresLoomWithoutHTTP(t *testing.T) {
 		"internal/events/dispatcher.go",
 		"internal/events/dispatcher_test.go",
 		"internal/events/recorder.go",
-		"internal/events/register.go",
 		"internal/events/README.md",
 		"internal/di/events_provider.go",
 		"internal/di/events_listeners.go",
@@ -128,26 +127,24 @@ func TestEventsShipsNoDependencyAndPatchesNothing(t *testing.T) {
 // during graph construction, and nothing discovers listeners implicitly.
 func TestEventsRegistrationSeamIsStableAndExplicit(t *testing.T) {
 	t.Parallel()
-	register, err := fs.ReadFile(weldtemplate.FS(), "capabilities/events/files/register.go.tmpl")
+	listeners, err := fs.ReadFile(weldtemplate.FS(), "capabilities/events/files/events_listeners.go.tmpl")
 	if err != nil {
-		t.Fatalf("read register payload: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(register), "func Register(d *Dispatcher) error {") {
-		t.Errorf("register.go does not expose the stable Register seam:\n%s", register)
+	for _, want := range []string{"func NewEventListeners(d *events.Dispatcher) (*EventListeners, error)", "return &EventListeners{}, nil"} {
+		if !strings.Contains(string(listeners), want) {
+			t.Fatalf("missing business registration seam %q", want)
+		}
 	}
-	if !strings.Contains(string(register), "return nil") {
-		t.Error("the default Register does not register nothing")
-	}
-
 	provider, err := fs.ReadFile(weldtemplate.FS(), "capabilities/events/files/events_provider.go.tmpl")
 	if err != nil {
-		t.Fatalf("read provider payload: %v", err)
-	}
-	if !strings.Contains(string(provider), "events.Register(dispatcher)") {
-		t.Errorf("the provider never runs the registration seam:\n%s", provider)
+		t.Fatal(err)
 	}
 	if !strings.Contains(string(provider), "events.New(logger)") {
-		t.Errorf("the provider does not build the dispatcher with the injected logger:\n%s", provider)
+		t.Error("publisher does not construct an injected dispatcher")
+	}
+	if strings.Contains(string(provider), "events.Register(") {
+		t.Error("publisher still calls the removed low-level registration seam")
 	}
 
 	// Registration is explicit: no payload scans packages or reflects over types
@@ -155,7 +152,6 @@ func TestEventsRegistrationSeamIsStableAndExplicit(t *testing.T) {
 	for _, source := range []string{
 		"capabilities/events/files/dispatcher.go.tmpl",
 		"capabilities/events/files/events_provider.go.tmpl",
-		"capabilities/events/files/register.go.tmpl",
 		"capabilities/events/files/events_listeners.go.tmpl",
 	} {
 		raw, err := fs.ReadFile(weldtemplate.FS(), source)
