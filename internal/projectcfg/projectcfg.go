@@ -46,8 +46,16 @@ type Ldflag struct {
 	Vars map[string]string `yaml:"vars"`
 }
 
+// DockerConfig holds local image build settings (no push or deployment).
+type DockerConfig struct {
+	Image      string `yaml:"image"`
+	Dockerfile string `yaml:"dockerfile"`
+	Platform   string `yaml:"platform"`
+}
+
 // BuildConfig holds the `weld build` settings.
 type BuildConfig struct {
+	Docker DockerConfig `yaml:"docker"`
 	// Output is the directory cross-compiled binaries are written to. It
 	// defaults to "bin".
 	Output string `yaml:"output"`
@@ -379,6 +387,11 @@ version: 1
 build:
   # Directory built binaries are written to (default: bin).
   output: bin
+  # Local image settings for weld build --docker (requires weld docker init).
+  # docker:
+  #   image: my-app:latest
+  #   dockerfile: Dockerfile
+  #   platform: linux/amd64
   # Build the frontend before the Go binary. Omit to build it exactly when the
   # web capability is installed.
   # web: true

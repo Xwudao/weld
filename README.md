@@ -30,6 +30,7 @@ weld upgrade           # move installed capabilities to this weld's payloads
 weld config example    # print the optional, user-owned weld.yml starter
 weld dev               # backend + pnpm frontend dev servers, side by side
 weld build             # builds the frontend and cross-compiles the binary
+weld docker init       # scaffolds the user-owned Dockerfile and .dockerignore
 weld seed              # runs the database seeders (seed build tag)
 weld deploy            # builds the linux binary, uploads it and runs the remote script
 make build             # the Makefile stays as the no-weld fallback
@@ -55,7 +56,8 @@ weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
 weld upgrade [capability...] [--check] [--prune] [--verify vet|build|none] [--dir dir] [--dry-run]
 weld gen [enum|loom] [--dir dir] [--dry-run]
 weld dev [--dir dir]
-weld build [--dir dir]
+weld build [--docker] [--image tag] [--dockerfile path] [--platform os/arch] [--dir dir]
+weld docker init [--dir dir] [--dry-run]
 weld seed [name] [--tag tag] [--dir dir]
 weld deploy [--no-build] [--artifact file] [--dir dir]
 weld config example
@@ -76,6 +78,68 @@ both; control commands on stdin restart or open either side
 then cross-compiles the Go binary for every configured target. It is the
 release path; `make build` stays available as the self-contained, no-weld
 fallback.
+
+### Docker images for generated projects
+
+Initialize explicitly **after installing the desired capabilities**:
+
+```sh
+weld docker init                  # creates Dockerfile and .dockerignore
+weld docker init --dry-run        # preview; no Docker daemon needed
+weld build --docker --image my-app:latest
+weld build --docker --platform linux/arm64 --image my-app:arm64
+```
+
+Existing Docker files are always kept and are user-owned (not tracked in
+`weld.json`, not upgraded). The generated Dockerfile records the capabilities it
+was built for (`web`/`http`); `weld build --docker` warns when the project's
+capabilities no longer match, but it never rewrites the file. After adding `web`,
+edit your Dockerfile or explicitly remove it and re-run init. This does not modify
+`weld.yml` or SSH deployment. The ordinary `weld build` remains unchanged; Docker
+mode builds inside Docker, loads one local image and never pushes it. Docker with
+BuildKit/buildx is required. Cross-platform builds cross-compile on the build
+platform; only running the resulting image on a different architecture may need
+emulation on the Docker host.
+
+```yaml
+build:
+  docker:
+    image: my-app:latest
+    dockerfile: Dockerfile
+    platform: linux/amd64
+```
+
+Flags (`--image`, `--dockerfile`, `--platform`) override these settings; defaults
+are `<project-name>:latest`, `Dockerfile`, and `linux/amd64`, independent of
+`build.targets`. `--dry-run` prints the Docker arguments without invoking Docker.
+Build tags and expanded ldflags are passed as build arguments; **do not put
+secrets in them**. CGO defaults to off; `build.cgo: true` needs a custom Dockerfile
+with a compatible runtime, not the generated static runtime.
+
+The multi-stage Dockerfile uses the project's Go version, optionally builds the
+frontend (Node 22; pnpm 12/npm/yarn), embeds `internal/web/dist`, and runs in a
+non-root distroless image with CA certificates. Custom frontend layouts/output
+paths or package-manager versions may require Dockerfile edits. Dependency install
+honors available lockfiles where supported; review/pin dependencies, the
+Node/Go/pnpm versions and image digests for reproducible production releases.
+
+Local `config.yml`, `.env*`, Git metadata and private-key files are excluded from
+the context; review `.dockerignore` for any additional project-specific secrets.
+Applications with configuration need a readable config file even when environment
+variables override its values:
+
+```sh
+# CLI-only application:
+docker run --rm my-app:latest help
+# HTTP/web application (config.yml must be readable by uid 65532):
+docker run --rm -p 8080:8080 \
+  --mount type=bind,src="$(pwd)/config.yml",dst=/app/config.yml,readonly \
+  my-app:latest
+```
+
+The mounted config stays outside the image; provision production credentials
+separately rather than baking them into the build. The default HTTP address is
+`:8080` (ensure the configured address is not restricted to localhost).
 
 `weld seed` runs the project's database seeders. The seeders live behind the
 `seed` build tag (`//go:build seed`), so the binary `go build` / `weld build`
