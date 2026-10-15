@@ -12,8 +12,10 @@
 package projectcfg
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -129,6 +131,9 @@ type Config struct {
 	Dev     DevConfig    `yaml:"dev"`
 	Seed    SeedConfig   `yaml:"seed"`
 	Deploy  DeployConfig `yaml:"deploy"`
+	// Hooks extend the build/dev/deploy/seed commands with user-owned commands.
+	// They are never run by `weld add` or `weld upgrade`.
+	Hooks HookConfig `yaml:"hooks"`
 }
 
 // Load reads weld.yml from dir and returns ErrNotFound when it is absent.
@@ -142,11 +147,25 @@ func Load(dir string) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{}
-	if err := yaml.Unmarshal(raw, cfg); err != nil {
-		return nil, fmt.Errorf("%s: invalid %s: %w", dir, FileName, err)
+	// KnownFields makes an unknown key a load-time error rather than a silently
+	// ignored setting. That is what turns a mistyped hook command (hooks.buld)
+	// or step field into a message instead of a hook that never runs.
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil {
+		// An empty or comment-only file is an empty config, matching the
+		// previous yaml.Unmarshal behaviour.
+		if errors.Is(err, io.EOF) {
+			cfg = &Config{}
+		} else {
+			return nil, fmt.Errorf("%s: invalid %s: %w", dir, FileName, err)
+		}
 	}
 	if cfg.Version != 0 && cfg.Version != 1 {
 		return nil, fmt.Errorf("%s: unsupported %s version %d (want 1)", dir, FileName, cfg.Version)
+	}
+	if err := cfg.validateHooks(); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
@@ -442,5 +461,34 @@ deploy:
   remote_script: /srv/app/deploy.sh
   # GOOS/GOARCH built and uploaded (default: linux/amd64).
   # target: { os: linux, arch: arm64 }
+
+# Hooks run your own commands around a weld command. Each command has a "pre"
+# and a "post" list; steps run in order, and a failure aborts the command unless
+# the step sets continue_on_error. A whole run can skip them with --no-hooks or
+# WELD_NO_HOOKS=1. A "run" scalar is a shell command line; a "run" list is an
+# argv vector run directly. Valid commands: build, dev, deploy, seed.
+hooks:
+  # enabled: true
+  # build:
+  #   pre:
+  #     - name: tidy
+  #       run: [go, mod, tidy]
+  #   post:
+  #     - run: "gofmt -w ."
+  #       platforms: [linux, darwin]
+  # dev:
+  #   pre:
+  #     - run: "./scripts/pre_dev.sh"
+  #       timeout: 2m
+  # deploy:
+  #   pre:
+  #     - name: build assets
+  #       run: [pnpm, run, build]
+  #       dir: web
+  #       when: { capability: [web] }
+  #   post:
+  #     - run: "./scripts/notify.sh"
+  #       continue_on_error: true
+  #       env: { SLACK_CHANNEL: "#deploys" }
 `
 }

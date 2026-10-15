@@ -1095,6 +1095,101 @@ present in a region is never re-inserted, so add the block by hand or set the
 `CORS_*` environment variables. The policy is off by default either way. See
 [`weld upgrade`](#weld-upgrade).
 
+## Hooks
+
+`weld.yml` is user-owned, and hooks are the user-owned extension point for the
+commands that build, run, seed and deploy the project. A hook is a command you
+declare, run at a named point in a weld command, so a project can add code
+generation, asset steps or notifications without weld learning about them:
+
+```yaml
+hooks:
+  enabled: true
+  build:
+    pre:
+      - name: tidy
+        run: [go, mod, tidy]
+    post:
+      - run: "gofmt -w ."
+        platforms: [linux, darwin]
+  deploy:
+    pre:
+      - name: build assets
+        run: [pnpm, run, build]
+        dir: web
+        when: { capability: [web] }
+    post:
+      - run: "./scripts/notify.sh"
+        continue_on_error: true
+        env: { SLACK_CHANNEL: "#deploys" }
+```
+
+### Events
+
+Every hookable command exposes a `pre` and a `post` list. Steps run in order,
+and `pre` runs before the command's own work, `post` after it succeeds.
+
+| event | when |
+|---|---|
+| `build.pre` / `build.post` | around `weld build` (and `weld build --docker`) |
+| `dev.pre` / `dev.post` | around a `weld dev` session, `dev.post` on exit |
+| `seed.pre` / `seed.post` | around `weld seed` |
+| `deploy.pre` / `deploy.post` | around `weld deploy`, before the build/upload and after the remote script |
+
+A hook is tied to the command you typed, not to the commands it calls: `weld
+deploy` builds the artifact internally but does **not** run `build.pre` /
+`build.post`, so a hook never runs twice. Hooks do not run for `weld new`,
+`weld add`, `weld upgrade` or `weld gen`, and they are never run by `weld add` or
+recorded in `weld.json`.
+
+### Step fields
+
+| field | meaning |
+|---|---|
+| `run` (required) | A scalar is a shell command line (`sh -c` on Unix, `cmd /C` on Windows), so pipes and redirection work. A sequence is an argv vector run directly, with no shell and no word splitting; it is the portable form and is preferred for simple commands. |
+| `name` | A label for logs and errors. Optional; the command is used when absent. |
+| `dir` | Working directory, relative to the project root. Optional. |
+| `env` | Environment variables overlaid on the inherited process environment. Optional. |
+| `platforms` | Restricts the step to `linux`, `darwin` (or `macos`/`mac`) and/or `windows`. Empty runs everywhere. |
+| `when` | Conditions below. All must hold. |
+| `timeout` | A Go duration (`30s`, `2m`). Zero is unbounded. |
+| `continue_on_error` | Report a failure and keep going instead of aborting. Default is fail-fast. |
+
+`when` accepts any of: `capability` (each named capability must be installed,
+matched against the manifest), `env` (each variable must equal the given value)
+and `files` (each path must exist, relative to the project root). A condition is
+after the platform check, so a step can be both platform- and capability-gated.
+
+### Execution
+
+- **Fail-fast.** The first step that fails aborts the command with a message that
+  names the event, the step and the exit code. Hooks run outside weld's
+  transactional apply, so a failed hook does **not** roll back files weld already
+  wrote; `continue_on_error` turns a failure into a warning that does not abort.
+- **A hook inherits the environment**, with the step's `env` and a set of
+  `WELD_*` variables overlaid: `WELD_COMMAND`, `WELD_EVENT`, `WELD_DIR`,
+  `WELD_VERSION`, `WELD_PROJECT`, plus `WELD_BUILD_OUTPUT`, `WELD_DEPLOY_HOST` /
+  `WELD_DEPLOY_TARGET` and `WELD_SEED_TAG` for the matching command.
+- **dry-run is truthful.** `weld deploy --dry-run` and `weld build --docker
+  --dry-run` print the hook steps they would run instead of running them. A
+  command that ignores `--dry-run` (plain `weld build`, `weld dev`, `weld seed`)
+  still runs its hooks, so the flag never silently skips them.
+- **Opt out for a run** with `--no-hooks`, or globally with `WELD_NO_HOOKS=1`
+  (for CI), or in the file with `hooks.enabled: false`.
+
+### Trust
+
+Declaring a hook makes `weld.yml` executable: a cloned repository can run code
+when you `weld build` or `weld dev`. That is the same trust you already extend to
+its `Makefile` and `package.json` scripts, and weld only reads the project's own
+`weld.yml`. Each step is printed (`[hook] build.pre: ...`) before it runs, and
+`--no-hooks` / `WELD_NO_HOOKS=1` is the escape hatch for an untrusted checkout.
+
+Hooks are validated when `weld.yml` loads: an unknown command (`hooks.buld`), an
+unknown step field, an empty `run`, an absolute or escaping `dir`, an unknown
+platform and a negative `timeout` are all load-time errors rather than hooks that
+quietly never run. `weld config example` documents the block.
+
 ## Tests
 
 ```sh

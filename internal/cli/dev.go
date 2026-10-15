@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Xwudao/weld/internal/dev"
+	"github.com/Xwudao/weld/internal/hook"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/projectcfg"
 )
@@ -44,7 +45,10 @@ func runDev(cmd *cobra.Command, args []string) error {
 		frontendInstalled = manifest.HasCapability("web")
 	}
 
-	return dev.Run(dev.Request{
+	if err := runHooks(cmd, cfg, hook.EventDevPre, false); err != nil {
+		return err
+	}
+	runErr := dev.Run(dev.Request{
 		Dir:               dir,
 		Config:            cfg,
 		FrontendInstalled: frontendInstalled,
@@ -52,4 +56,11 @@ func runDev(cmd *cobra.Command, args []string) error {
 		Stdout:            cmd.OutOrStdout(),
 		Stderr:            cmd.ErrOrStderr(),
 	})
+	// The post hook is cleanup: run it even when the session failed so a dev
+	// environment is torn down, but report the session error first.
+	postErr := runHooks(cmd, cfg, hook.EventDevPost, false)
+	if runErr != nil {
+		return runErr
+	}
+	return postErr
 }

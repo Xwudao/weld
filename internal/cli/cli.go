@@ -73,6 +73,7 @@ func newRootCommand() *cobra.Command {
 	// are persistent flags defined once here.
 	root.PersistentFlags().String("dir", ".", "project directory")
 	root.PersistentFlags().Bool("dry-run", false, "print the plan without writing")
+	root.PersistentFlags().Bool("no-hooks", false, "skip the weld.yml hooks for this run")
 	root.AddCommand(
 		newNewCommand(),
 		newAddCommand(),

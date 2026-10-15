@@ -7,6 +7,7 @@ import (
 
 	"github.com/Xwudao/weld/internal/build"
 	"github.com/Xwudao/weld/internal/docker"
+	"github.com/Xwudao/weld/internal/hook"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/projectcfg"
 )
@@ -73,8 +74,15 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		dockerfile, _ := cmd.Flags().GetString("dockerfile")
 		platform, _ := cmd.Flags().GetString("platform")
 		dry, _ := cmd.Flags().GetBool("dry-run")
+		buildEnv := []string{"WELD_BUILD_OUTPUT=" + cfg.Output()}
+		if err := runHooks(cmd, cfg, hook.EventBuildPre, dry, buildEnv...); err != nil {
+			return err
+		}
 		built, err := docker.Run(docker.Request{Dir: dir, Name: name, Config: cfg, Overrides: projectcfg.DockerConfig{Image: image, Dockerfile: dockerfile, Platform: platform}, WebInstalled: webInstalled, HTTPInstalled: httpInstalled, Stdout: stdout, Stderr: cmd.ErrOrStderr(), DryRun: dry})
 		if err != nil {
+			return err
+		}
+		if err := runHooks(cmd, cfg, hook.EventBuildPost, dry, buildEnv...); err != nil {
 			return err
 		}
 		if !dry {
@@ -83,6 +91,10 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	buildEnv := []string{"WELD_BUILD_OUTPUT=" + cfg.Output()}
+	if err := runHooks(cmd, cfg, hook.EventBuildPre, false, buildEnv...); err != nil {
+		return err
+	}
 	result, err := build.Run(build.Request{
 		Dir:          dir,
 		Name:         name,
@@ -92,6 +104,9 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		Stderr:       cmd.ErrOrStderr(),
 	})
 	if err != nil {
+		return err
+	}
+	if err := runHooks(cmd, cfg, hook.EventBuildPost, false, buildEnv...); err != nil {
 		return err
 	}
 	if result.WebBuilt {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/Xwudao/weld/internal/build"
 	"github.com/Xwudao/weld/internal/deploy"
+	"github.com/Xwudao/weld/internal/hook"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/projectcfg"
 )
@@ -78,6 +79,16 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	name, webInstalled := projectIdentity(dir)
 
+	// Hooks run before any build or upload, so a pre hook can produce the
+	// artifact the deploy uploads (for example a frontend build).
+	deployEnv := []string{
+		"WELD_DEPLOY_HOST=" + deployCfg.Host,
+		"WELD_DEPLOY_TARGET=" + deployCfg.Target.OS + "/" + deployCfg.Target.Arch,
+	}
+	if err := runHooks(cmd, cfg, hook.EventDeployPre, dryRun, deployEnv...); err != nil {
+		return err
+	}
+
 	// --artifact names the file and skips the build. Otherwise the default is
 	// a build for the deploy target; --no-build reuses an earlier one.
 	local := ""
@@ -107,6 +118,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		Stderr:   stderr,
 	})
 	if err != nil {
+		return err
+	}
+	if err := runHooks(cmd, cfg, hook.EventDeployPost, dryRun, deployEnv...); err != nil {
 		return err
 	}
 	if dryRun {

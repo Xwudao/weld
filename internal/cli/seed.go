@@ -3,6 +3,8 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/Xwudao/weld/internal/hook"
+	"github.com/Xwudao/weld/internal/projectcfg"
 	"github.com/Xwudao/weld/internal/seed"
 )
 
@@ -43,11 +45,28 @@ func runSeedCommand(cmd *cobra.Command, args []string) error {
 	if len(args) == 1 {
 		name = args[0]
 	}
-	return seed.Run(seed.Request{
+	cfg, err := projectcfg.LoadOptional(dir)
+	if err != nil {
+		return err
+	}
+	effectiveTag := tag
+	if effectiveTag == "" {
+		effectiveTag = cfg.SeedTag()
+	}
+	seedEnv := []string{"WELD_SEED_TAG=" + effectiveTag}
+	if err := runHooks(cmd, cfg, hook.EventSeedPre, false, seedEnv...); err != nil {
+		return err
+	}
+	runErr := seed.Run(seed.Request{
 		Dir:    dir,
 		Name:   name,
 		Tag:    tag,
 		Stdout: cmd.OutOrStdout(),
 		Stderr: cmd.ErrOrStderr(),
 	})
+	postErr := runHooks(cmd, cfg, hook.EventSeedPost, false, seedEnv...)
+	if runErr != nil {
+		return runErr
+	}
+	return postErr
 }
