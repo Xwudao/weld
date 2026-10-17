@@ -1,0 +1,140 @@
+package config
+
+// JWT configuration: the typed bearer-token settings and the environment,
+// defaults and validation that back them.
+//
+// This file is written once by `weld add jwt` and belongs to the config package,
+// so it can define methods on Config and reuse the redacting Secret type. The
+// Config struct field and the loader calls into this file are added by marker
+// patches to internal/config/config.go; the regions that hold them are
+// weld-managed and never rewritten outside the marker.
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// DefaultJWT values. The issuer is replaced with the project name when the
+// capability is installed. The secret deliberately has no default: a token
+// manager is constructed only when a provider asks for one, and it fails rather
+// than signing with an invented key.
+const (
+	DefaultJWTIssuer        = "__name__"
+	DefaultJWTTTLSeconds    = 900
+	DefaultJWTLeewaySeconds = 30
+	// MinJWTSecretBytes is the minimum HS256 key length. A shorter shared secret
+	// is brute-forceable, so configuration validation rejects it instead of
+	// accepting a token signed with a weak key.
+	MinJWTSecretBytes = 32
+)
+
+// JWT environment variable names. The environment overrides the YAML file.
+const (
+	EnvJWTSecret        = "JWT_SECRET"
+	EnvJWTIssuer        = "JWT_ISSUER"
+	EnvJWTAudience      = "JWT_AUDIENCE"
+	EnvJWTTTLSeconds    = "JWT_TTL_SECONDS"
+	EnvJWTLeewaySeconds = "JWT_LEEWAY_SECONDS"
+)
+
+// JWT holds the bearer-token settings.
+//
+// Secret is a Secret so it cannot reach a log, a formatted dump, JSON or YAML.
+// The value is read only when a token manager is built. Issuer is required and
+// is written into every token, audience is optional, and the TTL and leeway are
+// integer seconds so the YAML file needs no custom duration syntax.
+type JWT struct {
+	Secret        Secret `yaml:"secret"`
+	Issuer        string `yaml:"issuer"`
+	Audience      string `yaml:"audience"`
+	TTLSeconds    int    `yaml:"ttl_seconds"`
+	LeewaySeconds int    `yaml:"leeway_seconds"`
+}
+
+// applyJWTEnv overrides the JWT section with the environment. A variable that
+// cannot be parsed, or an explicitly blank issuer, is an error rather than a
+// silent fallback. The secret is intentionally not length-checked here: installing
+// jwt must not require a secret until a token manager is actually constructed.
+func (c *Config) applyJWTEnv(lookupEnv LookupEnvFunc) error {
+	if value, ok := lookupEnv(EnvJWTSecret); ok {
+		c.JWT.Secret = Secret(value)
+	}
+	if value, ok := lookupEnv(EnvJWTIssuer); ok {
+		issuer := strings.TrimSpace(value)
+		if issuer == "" {
+			return fmt.Errorf("config: %s is set but blank", EnvJWTIssuer)
+		}
+		c.JWT.Issuer = issuer
+	}
+	if value, ok := lookupEnv(EnvJWTAudience); ok {
+		c.JWT.Audience = strings.TrimSpace(value)
+	}
+	if value, ok := lookupEnv(EnvJWTTTLSeconds); ok {
+		seconds, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a number", EnvJWTTTLSeconds)
+		}
+		c.JWT.TTLSeconds = seconds
+	}
+	if value, ok := lookupEnv(EnvJWTLeewaySeconds); ok {
+		seconds, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a number", EnvJWTLeewaySeconds)
+		}
+		c.JWT.LeewaySeconds = seconds
+	}
+	return nil
+}
+
+// applyJWTDefaults fills the explicit JWT defaults after the file and the
+// environment. It never invents a secret.
+func (c *Config) applyJWTDefaults() {
+	if strings.TrimSpace(c.JWT.Issuer) == "" {
+		c.JWT.Issuer = DefaultJWTIssuer
+	}
+	if c.JWT.TTLSeconds == 0 {
+		c.JWT.TTLSeconds = DefaultJWTTTLSeconds
+	}
+	if c.JWT.LeewaySeconds == 0 {
+		c.JWT.LeewaySeconds = DefaultJWTLeewaySeconds
+	}
+}
+
+// JWTTTL returns the configured token lifetime.
+func (c *Config) JWTTTL() time.Duration {
+	return time.Duration(c.JWT.TTLSeconds) * time.Second
+}
+
+// JWTLeeway returns the configured clock-skew tolerance.
+func (c *Config) JWTLeeway() time.Duration {
+	return time.Duration(c.JWT.LeewaySeconds) * time.Second
+}
+
+// ValidateJWT reports whether the JWT settings are usable.
+//
+// It is called only where the token manager is actually constructed, so a project
+// that installs jwt but never issues or verifies a token needs no secret. It fails
+// closed: a missing or short HS256 secret, a blank issuer, a non-positive TTL and
+// a negative leeway are all errors, never a development default.
+func (c *Config) ValidateJWT() error {
+	secret := c.JWT.Secret.Value()
+	if strings.TrimSpace(secret) == "" {
+		return errors.New("config: jwt.secret is required (set it in config.yml or " + EnvJWTSecret + ")")
+	}
+	if len(secret) < MinJWTSecretBytes {
+		return fmt.Errorf("config: jwt.secret must be at least %d bytes for HS256", MinJWTSecretBytes)
+	}
+	if strings.TrimSpace(c.JWT.Issuer) == "" {
+		return errors.New("config: jwt.issuer must not be blank")
+	}
+	if c.JWT.TTLSeconds <= 0 {
+		return errors.New("config: jwt.ttl_seconds must be positive")
+	}
+	if c.JWT.LeewaySeconds < 0 {
+		return errors.New("config: jwt.leeway_seconds must not be negative")
+	}
+	return nil
+}

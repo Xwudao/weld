@@ -1,0 +1,155 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"io/fs"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	"__module__/internal/logging"
+)
+
+// jwtSentinel is long enough to pass ValidateJWT and distinctive enough that a
+// leak in a formatted value is unmistakable.
+const jwtSentinel = "sentinel-jwt-secret-do-not-log-0123456789"
+
+// jwtLoader builds a loader over in-memory files and environment, so the JWT
+// tests exercise the real loader without touching the filesystem or the process
+// environment.
+func jwtLoader(files, env map[string]string) *Loader {
+	readFile := func(name string) ([]byte, error) {
+		content, ok := files[name]
+		if !ok {
+			return nil, fs.ErrNotExist
+		}
+		return []byte(content), nil
+	}
+	lookupEnv := func(key string) (string, bool) {
+		value, ok := env[key]
+		return value, ok
+	}
+	return NewLoader(readFile, lookupEnv)
+}
+
+// TestJWTLoadsFileEnvironmentAndDefaults pins the precedence: the file supplies
+// the section, the environment overrides it, and an omitted TTL and leeway get
+// the explicit defaults without inventing a secret.
+func TestJWTLoadsFileEnvironmentAndDefaults(t *testing.T) {
+	file := "jwt:\n  secret: \"" + jwtSentinel + "\"\n  issuer: file-issuer\n  audience: file-audience\n  ttl_seconds: 120\n  leeway_seconds: 5\n"
+
+	cfg, err := jwtLoader(map[string]string{DefaultPath: file}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load file: %v", err)
+	}
+	if cfg.JWT.Secret.Value() != jwtSentinel || cfg.JWT.Issuer != "file-issuer" ||
+		cfg.JWT.Audience != "file-audience" || cfg.JWT.TTLSeconds != 120 || cfg.JWT.LeewaySeconds != 5 {
+		t.Fatalf("JWT from file = %+v", cfg.JWT)
+	}
+
+	envSecret := strings.Repeat("e", MinJWTSecretBytes)
+	cfg, err = jwtLoader(map[string]string{DefaultPath: file}, map[string]string{
+		EnvJWTSecret:        envSecret,
+		EnvJWTIssuer:        "env-issuer",
+		EnvJWTAudience:      "env-audience",
+		EnvJWTTTLSeconds:    "300",
+		EnvJWTLeewaySeconds: "10",
+	}).Load("")
+	if err != nil {
+		t.Fatalf("Load environment: %v", err)
+	}
+	if cfg.JWT.Secret.Value() != envSecret || cfg.JWT.Issuer != "env-issuer" ||
+		cfg.JWT.Audience != "env-audience" || cfg.JWT.TTLSeconds != 300 || cfg.JWT.LeewaySeconds != 10 {
+		t.Fatalf("JWT from environment = %+v", cfg.JWT)
+	}
+
+	cfg, err = jwtLoader(map[string]string{DefaultPath: ""}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if cfg.JWT.Secret.Value() != "" {
+		t.Fatalf("default secret = %q, want empty", cfg.JWT.Secret.Value())
+	}
+	if cfg.JWT.Issuer != DefaultJWTIssuer || cfg.JWT.TTLSeconds != DefaultJWTTTLSeconds ||
+		cfg.JWT.LeewaySeconds != DefaultJWTLeewaySeconds {
+		t.Fatalf("JWT defaults = %+v", cfg.JWT)
+	}
+}
+
+// TestJWTInvalidEnvironmentIsAnError proves a malformed numeric override and an
+// explicitly blank issuer are load errors rather than silent defaults.
+func TestJWTInvalidEnvironmentIsAnError(t *testing.T) {
+	for _, env := range []map[string]string{
+		{EnvJWTTTLSeconds: "soon"},
+		{EnvJWTLeewaySeconds: "later"},
+		{EnvJWTIssuer: "   "},
+	} {
+		if _, err := jwtLoader(map[string]string{DefaultPath: ""}, env).Load(""); err == nil {
+			t.Errorf("environment %v was accepted", env)
+		}
+	}
+}
+
+// TestJWTValidationFailsClosed covers the validation a token manager performs:
+// a missing or short secret, a blank issuer, a non-positive TTL and a negative
+// leeway are rejected, while a usable configuration passes.
+func TestJWTValidationFailsClosed(t *testing.T) {
+	valid := JWT{
+		Secret:        Secret(jwtSentinel),
+		Issuer:        "app",
+		TTLSeconds:    900,
+		LeewaySeconds: 30,
+	}
+	if err := (&Config{JWT: valid}).ValidateJWT(); err != nil {
+		t.Fatalf("valid JWT rejected: %v", err)
+	}
+	for name, jwt := range map[string]JWT{
+		"missing secret":  {Issuer: "app", TTLSeconds: 900},
+		"short secret":    {Secret: Secret("too-short"), Issuer: "app", TTLSeconds: 900},
+		"blank issuer":    {Secret: Secret(jwtSentinel), Issuer: "  ", TTLSeconds: 900},
+		"zero ttl":        {Secret: Secret(jwtSentinel), Issuer: "app"},
+		"negative ttl":    {Secret: Secret(jwtSentinel), Issuer: "app", TTLSeconds: -1},
+		"negative leeway": {Secret: Secret(jwtSentinel), Issuer: "app", TTLSeconds: 900, LeewaySeconds: -1},
+	} {
+		if err := (&Config{JWT: jwt}).ValidateJWT(); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// TestJWTSecretRedacts proves the secret cannot survive formatting, logging,
+// JSON or YAML, including as part of the whole configuration.
+func TestJWTSecretRedacts(t *testing.T) {
+	cfg := &Config{JWT: JWT{Secret: Secret(jwtSentinel), Issuer: "app", TTLSeconds: 900}}
+
+	if got := cfg.JWT.Secret.String(); strings.Contains(got, jwtSentinel) {
+		t.Fatalf("formatting the JWT secret leaked it: %s", got)
+	}
+	if got := (&Config{JWT: JWT{Secret: Secret(jwtSentinel)}}).JWT.Secret.GoString(); strings.Contains(got, jwtSentinel) {
+		t.Fatalf("GoString leaked the JWT secret: %s", got)
+	}
+
+	var buf bytes.Buffer
+	logging.New(&buf, logging.TextFormat, &logging.Options{NoColor: true}).Info("jwt", "secret", cfg.JWT.Secret)
+	if strings.Contains(buf.String(), jwtSentinel) {
+		t.Fatalf("logging leaked the JWT secret:\n%s", buf.String())
+	}
+
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), jwtSentinel) {
+		t.Fatalf("JSON leaked the JWT secret: %s", encoded)
+	}
+
+	yamlEncoded, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if strings.Contains(string(yamlEncoded), jwtSentinel) {
+		t.Fatalf("YAML leaked the JWT secret: %s", yamlEncoded)
+	}
+}

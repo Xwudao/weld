@@ -86,6 +86,8 @@ func newRootCommand() *cobra.Command {
 		newDevCommand(),
 		newSeedCommand(),
 		newDeployCommand(),
+		newDBCommand(),
+		newDoctorCommand(),
 		newConfigCommand(),
 		newHTTPCommand(),
 		newClientCommand(),
@@ -769,6 +771,10 @@ Capabilities:
                     installing it never sends or connects
   storage (add)     Opt-in S3-compatible object-storage client; installing it
                     creates no bucket and uploads nothing
+  jwt    (add)      Opt-in JWT bearer-token authentication: HS256 issue/verify,
+                    a secret-redacted config section and net/http middleware that
+                    stores validated claims on the request context; installing it
+                    issues no token and guards no route (requires http)
   cron   (add)      Opt-in in-process scheduler that starts and stops with
                     serve; installing it schedules nothing until you register
                     service methods in internal/di/cron_jobs.go. Jobs take a
@@ -829,6 +835,22 @@ Enums:
   no capability. Add a value by editing the definition file, then run
   'weld gen enum' to refresh the generated methods.
 
+Database:
+  db migrate up|status|down runs the goose tool pinned in db/tools against the
+  database described by config.yml (database.dsn or the host/port/user/password/
+  name fields, with DB_* overrides) or DATABASE_URL, which takes precedence. The
+  dsn is passed to goose but never printed; --dry-run shows $DATABASE_URL instead.
+  down reverts exactly one migration and requires --yes or CONFIRM=1.
+  db create <name> writes db/migrations/<timestamp>_<name>.sql as a goose
+  skeleton. The db capability must be installed, and --config names a different
+  application configuration file.
+
+Diagnostics:
+  doctor runs read-only checks on the manifest, weld.yml, config.yml, managed-file
+  drift, go.mod, installed tools, generated Loom and enum files and the db
+  migration layout. Warnings are advisory; failures exit non-zero. --json prints
+  the report for CI. It never writes, builds or connects to a service.
+
 Generators:
   gen runs every generator that applies to the project. gen enum regenerates
   internal/enums/*_gen.go from the definitions, reads the human-owned files and
@@ -869,7 +891,9 @@ the repositories you wire in internal/di/seed_providers.go; it seeds nothing
 until you register a seeder. redis likewise requires only base (and config): it
 installs a lazy client the caller owns and never wires Redis into a service on
 its own. events requires loom and installs a dispatcher that publishes nothing
-until you register a listener in internal/di/events_listeners.go. loom is required
+until you register a listener in internal/di/events_listeners.go. jwt requires
+http and installs an HS256 manager and bearer middleware; it issues no token and
+guards no route until you inject the manager into NewHTTPPolicies. loom is required
 by every capability beyond the bare CLI, requires
 config, regenerates its graph when any capability it feeds is installed, and
 raises the project's Go floor to 1.25.

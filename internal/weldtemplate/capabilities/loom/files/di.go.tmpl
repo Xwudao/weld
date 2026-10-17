@@ -22,8 +22,9 @@
 // live in separate files weld writes once and never regenerates, so wiring there
 // survives every later `weld add`: the project-owned custom providers in
 // internal/di/providers.go (included in commonModule below), and the
-// Redis, mail, object-store and cron providers in internal/di/redis_provider.go,
-// internal/di/mail_provider.go, internal/di/storage_provider.go and
+// Redis, mail, object-store, JWT and cron providers in
+// internal/di/redis_provider.go, internal/di/mail_provider.go,
+// internal/di/storage_provider.go, internal/di/jwt_provider.go and
 // internal/di/cron_provider.go.
 //
 // Command groups installed with `weld add command` or
@@ -90,8 +91,8 @@ import (
 )
 
 // commonModule groups the providers every graph shares: the configuration
-// loader, the configuration, the logger and the installed db/redis/mail/storage/events
-// bindings.
+// loader, the configuration, the logger and the installed
+// db/redis/mail/storage/events/jwt bindings.
 //
 // It lives in this regenerated file rather than being copied into each graph, so
 // a capability installed after a command graph was written still reaches that
@@ -151,6 +152,14 @@ var commonModule = loom.Module(
 	// wiring seam; edit a provider this module is included by to depend on
 	// *objectstore.Store to switch it on.
 	loom.Provide(NewObjectStore),
+{{- end}}
+{{- if .Caps.Has "jwt"}}
+	// The token manager is a declared binding, not part of the default
+	// composition: nothing in the default graph depends on *jwtauth.Manager, so
+	// Loom prunes it and an ordinary serve needs no JWT secret. It is defined in
+	// jwt_provider.go, the stable wiring seam; inject the manager into
+	// NewHTTPPolicies (http_policies.go) to switch it on.
+	loom.Provide(NewJWTAuth),
 {{- end}}
 )
 

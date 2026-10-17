@@ -1,0 +1,310 @@
+package jwtauth
+
+import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+
+	"__module__/internal/config"
+)
+
+const testSecret = "jwtauth-test-secret-0123456789abcdef"
+
+func testManager(t *testing.T, mutate func(*config.Config)) *Manager {
+	t.Helper()
+	cfg := &config.Config{JWT: config.JWT{
+		Secret:        config.Secret(testSecret),
+		Issuer:        "test-issuer",
+		Audience:      "test-audience",
+		TTLSeconds:    60,
+		LeewaySeconds: 0,
+	}}
+	if mutate != nil {
+		mutate(cfg)
+	}
+	manager, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return manager
+}
+
+// TestIssueParseRoundTrip covers the happy path and the registered claims.
+func TestIssueParseRoundTrip(t *testing.T) {
+	manager := testManager(t, nil)
+	raw, err := manager.Issue("user-1", []string{"admin", " admin ", "", "editor"})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	claims, err := manager.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if claims.Subject != "user-1" || claims.Issuer != "test-issuer" {
+		t.Fatalf("claims = %+v", claims)
+	}
+	if len(claims.Audience) != 1 || claims.Audience[0] != "test-audience" {
+		t.Fatalf("audience = %v", claims.Audience)
+	}
+	if len(claims.Roles) != 2 || !claims.HasRole("admin") || !claims.HasRole("editor") {
+		t.Fatalf("roles = %v", claims.Roles)
+	}
+	if claims.ExpiresAt == nil || claims.IssuedAt == nil || claims.ID == "" {
+		t.Fatalf("registered claims are incomplete: %+v", claims.RegisteredClaims)
+	}
+	if got := claims.ExpiresAt.Sub(claims.IssuedAt.Time); got != time.Minute {
+		t.Fatalf("token lifetime = %v, want 1m", got)
+	}
+}
+
+// TestIssueRejectsBlankSubject proves the manager never signs an anonymous
+// token that an application might treat as authenticated.
+func TestIssueRejectsBlankSubject(t *testing.T) {
+	manager := testManager(t, nil)
+	if _, err := manager.Issue("   ", nil); !errors.Is(err, ErrInvalidSubject) {
+		t.Fatalf("Issue(blank) error = %v, want ErrInvalidSubject", err)
+	}
+}
+
+// TestNewRejectsInvalidConfiguration proves construction fails closed instead of
+// signing with an invented or weak key.
+func TestNewRejectsInvalidConfiguration(t *testing.T) {
+	if _, err := New(nil); err == nil {
+		t.Fatal("New(nil) succeeded")
+	}
+	for name, cfg := range map[string]*config.Config{
+		"missing secret": {JWT: config.JWT{Issuer: "app", TTLSeconds: 60}},
+		"short secret":   {JWT: config.JWT{Secret: config.Secret("short"), Issuer: "app", TTLSeconds: 60}},
+		"blank issuer":   {JWT: config.JWT{Secret: config.Secret(testSecret), Issuer: " ", TTLSeconds: 60}},
+		"zero ttl":       {JWT: config.JWT{Secret: config.Secret(testSecret), Issuer: "app"}},
+	} {
+		if _, err := New(cfg); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// TestParseRejectsInvalidTokens covers each verification rule: signature,
+// issuer, audience, expiry, not-before and algorithm.
+func TestParseRejectsInvalidTokens(t *testing.T) {
+	manager := testManager(t, nil)
+	valid, err := manager.Issue("user-1", []string{"user"})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	otherSecret := testManager(t, func(cfg *config.Config) {
+		cfg.JWT.Secret = config.Secret(strings.Repeat("o", 32))
+	})
+	otherIssuer := testManager(t, func(cfg *config.Config) {
+		cfg.JWT.Issuer = "other-issuer"
+	})
+	otherAudience := testManager(t, func(cfg *config.Config) {
+		cfg.JWT.Audience = "other-audience"
+	})
+	wrongSecretToken, err := otherSecret.Issue("user-1", nil)
+	if err != nil {
+		t.Fatalf("Issue wrong secret: %v", err)
+	}
+	wrongIssuerToken, err := otherIssuer.Issue("user-1", nil)
+	if err != nil {
+		t.Fatalf("Issue wrong issuer: %v", err)
+	}
+	wrongAudienceToken, err := otherAudience.Issue("user-1", nil)
+	if err != nil {
+		t.Fatalf("Issue wrong audience: %v", err)
+	}
+
+	expired, err := manager.issueAt("user-1", nil, time.Now().Add(-2*time.Minute))
+	if err != nil {
+		t.Fatalf("issueAt expired: %v", err)
+	}
+
+	futureNotBefore := Claims{RegisteredClaims: jwt.RegisteredClaims{
+		Subject:   "user-1",
+		Issuer:    manager.issuer,
+		Audience:  manager.audienceClaim(),
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+		NotBefore: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Hour)),
+	}}
+	futureRaw, err := manager.sign(futureNotBefore)
+	if err != nil {
+		t.Fatalf("sign future token: %v", err)
+	}
+
+	noneToken := jwt.NewWithClaims(jwt.SigningMethodNone, Claims{RegisteredClaims: jwt.RegisteredClaims{
+		Subject:   "user-1",
+		Issuer:    manager.issuer,
+		Audience:  manager.audienceClaim(),
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+		NotBefore: jwt.NewNumericDate(time.Now()),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	}})
+	noneRaw, err := noneToken.SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatalf("sign none token: %v", err)
+	}
+
+	for name, token := range map[string]string{
+		"empty":          "",
+		"garbage":        "not-a-token",
+		"tampered":       valid + "x",
+		"wrong secret":   wrongSecretToken,
+		"wrong issuer":   wrongIssuerToken,
+		"wrong audience": wrongAudienceToken,
+		"expired":        expired,
+		"future nbf":     futureRaw,
+		"alg none":       noneRaw,
+	} {
+		if _, err := manager.Parse(token); !errors.Is(err, ErrInvalidToken) {
+			t.Errorf("%s: Parse error = %v, want ErrInvalidToken", name, err)
+		}
+	}
+}
+
+// TestMiddlewareAuthenticatesAndPassesClaims proves a valid token reaches the
+// handler with claims on the context, while every bad request is a 401 with the
+// shared envelope and a bearer challenge.
+func TestMiddlewareAuthenticatesAndPassesClaims(t *testing.T) {
+	manager := testManager(t, nil)
+	valid, err := manager.Issue("user-1", []string{"user"})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	var subject string
+	var roleOK bool
+	handler := manager.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := ClaimsFrom(r.Context())
+		if ok {
+			subject = claims.Subject
+			roleOK = claims.HasRole("user")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/private", nil)
+	request.Header.Set("Authorization", "Bearer "+valid)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("valid token status = %d, want 204", recorder.Code)
+	}
+	if subject != "user-1" || !roleOK {
+		t.Fatalf("handler claims = subject %q, role %v", subject, roleOK)
+	}
+
+	// The scheme comparison is case-insensitive.
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/private", nil)
+	request.Header.Set("Authorization", "bearer "+valid)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("lowercase scheme status = %d, want 204", recorder.Code)
+	}
+
+	for name, header := range map[string]string{
+		"missing":       "",
+		"wrong scheme":  "Basic " + valid,
+		"empty bearer":  "Bearer ",
+		"invalid token": "Bearer not-a-token",
+	} {
+		recorder = httptest.NewRecorder()
+		request = httptest.NewRequest(http.MethodGet, "/private", nil)
+		if header != "" {
+			request.Header.Set("Authorization", header)
+		}
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Errorf("%s status = %d, want 401", name, recorder.Code)
+		}
+		if got := recorder.Header().Get("WWW-Authenticate"); got != "Bearer" {
+			t.Errorf("%s challenge = %q, want Bearer", name, got)
+		}
+		if body := recorder.Body.String(); !strings.Contains(body, `"code":401`) {
+			t.Errorf("%s body = %q, want the shared error envelope", name, body)
+		}
+	}
+}
+
+// TestRequireAnyRole covers the 200/403/401 paths of role enforcement.
+func TestRequireAnyRole(t *testing.T) {
+	manager := testManager(t, nil)
+	admin, err := manager.Issue("admin-1", []string{"admin"})
+	if err != nil {
+		t.Fatalf("Issue admin: %v", err)
+	}
+	user, err := manager.Issue("user-1", []string{"user"})
+	if err != nil {
+		t.Fatalf("Issue user: %v", err)
+	}
+
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := manager.Middleware(RequireRole("admin")(ok))
+
+	serve := func(token string) int {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/admin", nil)
+		if token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
+		}
+		handler.ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+	if status := serve(admin); status != http.StatusNoContent {
+		t.Fatalf("admin status = %d, want 204", status)
+	}
+	if status := serve(user); status != http.StatusForbidden {
+		t.Fatalf("user status = %d, want 403", status)
+	}
+	if status := serve(""); status != http.StatusUnauthorized {
+		t.Fatalf("anonymous status = %d, want 401", status)
+	}
+
+	anyHandler := manager.Middleware(RequireAnyRole("editor", "admin")(ok))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	request.Header.Set("Authorization", "Bearer "+admin)
+	anyHandler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("RequireAnyRole(admin) status = %d, want 204", recorder.Code)
+	}
+}
+
+// TestTokenFromRequest pins the only accepted token transport: a case-insensitive
+// bearer Authorization header.
+func TestTokenFromRequest(t *testing.T) {
+	for header, want := range map[string]string{
+		"Bearer token":          "token",
+		"bearer   token  ":      "token",
+		"Basic token":           "",
+		"":                      "",
+		"Bearer":                "",
+		"Bearer   ":             "",
+		"Token token":           "",
+		"Bearer token extra":    "token extra",
+		"Bearer    spaced   ":   "spaced",
+		"BEARER mixed-case-tok": "mixed-case-tok",
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		if header != "" {
+			request.Header.Set("Authorization", header)
+		}
+		got, ok := TokenFromRequest(request)
+		if want == "" {
+			if ok {
+				t.Errorf("header %q accepted token %q", header, got)
+			}
+			continue
+		}
+		if !ok || got != want {
+			t.Errorf("header %q = (%q, %v), want %q", header, got, ok, want)
+		}
+	}
+}

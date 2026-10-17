@@ -1,0 +1,11 @@
+package httpserver
+
+// PolicyUser is the named route policy for an authenticated, non-administrator
+// caller. It is a name, not an enforcement check: wire it to
+// jwtauth.Manager.Middleware in internal/di/http_policies.go (or to your own
+// session/role middleware) before using it on a route.
+//
+// The generated administrator policy, PolicyAdmin, remains deny-all until it is
+// replaced. Composing the JWT middleware with jwtauth.RequireRole("admin") is
+// the intended replacement.
+const PolicyUser = "user"

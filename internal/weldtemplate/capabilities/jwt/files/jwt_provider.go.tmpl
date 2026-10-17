@@ -1,0 +1,36 @@
+package di
+
+import (
+	"__module__/internal/config"
+	"__module__/internal/jwtauth"
+)
+
+// NewJWTAuth is the optional JWT manager provider, and this file is the stable
+// integration seam for wiring token authentication into the Loom application.
+//
+// weld writes this file once, when both the jwt and loom capabilities are
+// installed, and never rewrites it while it regenerates the graph (di.go,
+// loom_gen.go): edits below survive every later `weld add`.
+//
+// The manager is an available binding, not part of the default composition: the
+// graph declares NewJWTAuth, but nothing depends on *jwtauth.Manager, so Loom
+// prunes it and an ordinary serve constructs no manager and needs no JWT secret.
+// To use it, inject the manager into NewHTTPPolicies in
+// internal/di/http_policies.go:
+//
+//	func NewHTTPPolicies(auth *jwtauth.Manager) ([]httpserver.NamedPolicy, error) {
+//		return []httpserver.NamedPolicy{
+//			{Name: httpserver.PolicyUser, Middleware: auth.Middleware},
+//			{Name: httpserver.PolicyAdmin, Middleware: httpx.Chain(auth.Middleware, jwtauth.RequireRole("admin"))},
+//		}, nil
+//	}
+//
+// Loom then constructs the manager, validates jwt.secret in config.yml (or
+// JWT_SECRET) and fails startup with a readable error instead of serving a route
+// with an unusable verifier.
+//
+// The manager has no lifecycle: it holds an immutable key, issuer, audience and
+// lifetime, so there is nothing to start or close.
+func NewJWTAuth(cfg *config.Config) (*jwtauth.Manager, error) {
+	return jwtauth.New(cfg)
+}

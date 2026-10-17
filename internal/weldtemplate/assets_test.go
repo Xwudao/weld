@@ -1527,6 +1527,7 @@ func TestLoomDeclaresAuxiliaryBindings(t *testing.T) {
 		"redis":   "loom.Provide(NewRedisClient)",
 		"mail":    "loom.Provide(NewMailSender)",
 		"storage": "loom.Provide(NewObjectStore)",
+		"jwt":     "loom.Provide(NewJWTAuth)",
 		"cron":    "loom.Provide(NewScheduler)",
 	} {
 		if !strings.Contains(graphText, binding) {
@@ -2131,6 +2132,7 @@ func TestPayloadRolesAreDeclared(t *testing.T) {
 		"cron":    {"internal/di/cron_jobs.go", "internal/di/cron_provider.go"},
 		"events":  {"internal/di/events_provider.go", "internal/di/events_listeners.go"},
 		"http":    {"internal/httpserver/middleware.go", "internal/httpserver/policy.go", "internal/di/http_policies.go"},
+		"jwt":     {"internal/di/jwt_provider.go"},
 		"loom":    {"internal/di/providers.go"},
 		"mail":    {"internal/di/mail_provider.go"},
 		"redis":   {"internal/di/redis_provider.go"},
@@ -2163,7 +2165,7 @@ func TestPayloadRolesAreDeclared(t *testing.T) {
 
 	// A generated file is implied by the di entry, so no capability may claim the
 	// role itself.
-	for _, name := range []string{"loom", "http", "config", "db", "cron", "mail", "redis", "seed", "storage", "web", "events", "base"} {
+	for _, name := range []string{"loom", "http", "jwt", "config", "db", "cron", "mail", "redis", "seed", "storage", "web", "events", "base"} {
 		d := readDescriptor(t, name)
 		for _, file := range d.Files {
 			if file.Role == "generated" {

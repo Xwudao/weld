@@ -1,0 +1,24 @@
+{
+  "name": "jwt",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "Opt-in JWT bearer-token authentication: typed, secret-redacted configuration, HS256 issue/verify with issuer, audience and TTL checks, and composable net/http middleware that puts validated claims on the request context. Installing it issues no token and guards no route until you wire a policy or middleware.",
+  "requires": ["http"],
+  "files": [
+    { "path": "internal/config/jwt.go", "source": "files/jwt_config.go.tmpl" },
+    { "path": "internal/config/jwt_test.go", "source": "files/jwt_config_test.go.tmpl" },
+    { "path": "internal/jwtauth/jwtauth.go", "source": "files/jwtauth.go.tmpl" },
+    { "path": "internal/jwtauth/jwtauth_test.go", "source": "files/jwtauth_test.go.tmpl" },
+    { "path": "internal/jwtauth/README.md", "source": "files/README.md" },
+    { "path": "internal/httpserver/jwt.go", "source": "files/httpserver_jwt.go.tmpl" },
+    { "path": "internal/di/jwt_provider.go", "source": "files/jwt_provider.go.tmpl", "role": "seam", "when": ["loom"] }
+  ],
+  "patches": [
+    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
+    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
+    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" },
+    { "path": "internal/config/config.go", "marker": "configfields", "source": "files/config_fields.snippet" },
+    { "path": "internal/config/config.go", "marker": "configenv", "source": "files/config_env.snippet" },
+    { "path": "internal/config/config.go", "marker": "configdefaults", "source": "files/config_defaults.snippet" }
+  ]
+}

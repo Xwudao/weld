@@ -1,0 +1,294 @@
+// Package jwtauth issues and verifies HS256 JSON Web Tokens and exposes them to
+// net/http handlers.
+//
+// The manager is deliberately small: one shared secret, one issuer, an optional
+// audience and a fixed lifetime. A token carries the standard registered claims
+// plus roles. Every verification requires a valid signature, the configured
+// issuer, an expiry and, when configured, the configured audience; the only
+// accepted algorithm is HS256, so an "alg: none" or asymmetric token can never
+// be confused with a token this manager signed.
+//
+// Installing the jwt capability does not guard any route. Wire the manager into
+// a named policy in internal/di/http_policies.go (or a middleware chain) when
+// the application has an endpoint that verifies credentials and issues tokens.
+package jwtauth
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+
+	"__module__/internal/config"
+	"__module__/internal/httpx"
+)
+
+// ErrInvalidToken is returned for every unverifiable token: a malformed value,
+// a bad signature, an expired or not-yet-valid token, a wrong issuer or a wrong
+// audience. It deliberately does not distinguish the cases for the caller, so a
+// response cannot help an attacker probe the verification rules.
+var ErrInvalidToken = errors.New("jwtauth: invalid token")
+
+// ErrInvalidSubject reports that Issue was called with a blank subject.
+var ErrInvalidSubject = errors.New("jwtauth: subject must not be blank")
+
+// Claims is the token payload. Roles is the application-defined authorization
+// vocabulary; this package only stores and checks it, never assigns it.
+type Claims struct {
+	jwt.RegisteredClaims
+	Roles []string `json:"roles,omitempty"`
+}
+
+// HasRole reports whether the token carries role exactly.
+func (c *Claims) HasRole(role string) bool {
+	if c == nil {
+		return false
+	}
+	for _, candidate := range c.Roles {
+		if candidate == role {
+			return true
+		}
+	}
+	return false
+}
+
+// Manager signs and verifies tokens for one issuer.
+type Manager struct {
+	secret   []byte
+	issuer   string
+	audience string
+	ttl      time.Duration
+	leeway   time.Duration
+}
+
+// New builds a manager from the application configuration.
+//
+// It validates the JWT section, so a missing or short secret, a blank issuer, a
+// non-positive TTL and a negative leeway fail here rather than at the first
+// request. The secret is copied so later configuration edits cannot change a
+// constructed manager.
+func New(cfg *config.Config) (*Manager, error) {
+	if cfg == nil {
+		return nil, errors.New("jwtauth: nil configuration")
+	}
+	if err := cfg.ValidateJWT(); err != nil {
+		return nil, err
+	}
+	return &Manager{
+		secret:   []byte(cfg.JWT.Secret.Value()),
+		issuer:   strings.TrimSpace(cfg.JWT.Issuer),
+		audience: strings.TrimSpace(cfg.JWT.Audience),
+		ttl:      cfg.JWTTTL(),
+		leeway:   cfg.JWTLeeway(),
+	}, nil
+}
+
+// Issue signs a token for subject with the given roles.
+//
+// The subject is application-defined, usually a user or service identifier. The
+// roles are copied and deduplicated. Issue never assigns roles itself: an
+// endpoint that calls it is responsible for authenticating the subject first.
+func (m *Manager) Issue(subject string, roles []string) (string, error) {
+	return m.issueAt(subject, roles, time.Now().UTC())
+}
+
+// issueAt is Issue with an explicit clock, so tests can exercise expiry without
+// sleeping.
+func (m *Manager) issueAt(subject string, roles []string, now time.Time) (string, error) {
+	if strings.TrimSpace(subject) == "" {
+		return "", ErrInvalidSubject
+	}
+	id, err := newID()
+	if err != nil {
+		return "", err
+	}
+	claims := Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   subject,
+			Issuer:    m.issuer,
+			Audience:  m.audienceClaim(),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
+			ID:        id,
+		},
+		Roles: normalizeRoles(roles),
+	}
+	return m.sign(claims)
+}
+
+// Parse verifies raw and returns its claims.
+//
+// Verification is strict: the token must be signed with HS256 by this manager's
+// secret, carry this manager's issuer, carry an expiry and, when an audience is
+// configured, include that audience. The leeway tolerance applies to the time
+// claims. Every failure is ErrInvalidToken.
+func (m *Manager) Parse(raw string) (*Claims, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, ErrInvalidToken
+	}
+	options := []jwt.ParserOption{
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(m.issuer),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(m.leeway),
+	}
+	if m.audience != "" {
+		options = append(options, jwt.WithAudience(m.audience))
+	}
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(raw, claims, func(*jwt.Token) (any, error) {
+		return m.secret, nil
+	}, options...)
+	if err != nil || token == nil || !token.Valid {
+		return nil, ErrInvalidToken
+	}
+	return claims, nil
+}
+
+// sign encodes claims with the manager's HS256 secret.
+func (m *Manager) sign(claims Claims) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(m.secret)
+	if err != nil {
+		return "", errors.New("jwtauth: sign token")
+	}
+	return signed, nil
+}
+
+// audienceClaim returns the registered audience claim, or nil when no audience
+// is configured.
+func (m *Manager) audienceClaim() jwt.ClaimStrings {
+	if m.audience == "" {
+		return nil
+	}
+	return jwt.ClaimStrings{m.audience}
+}
+
+// Middleware requires a valid bearer token and stores its claims on the request
+// context. A missing or invalid token is a 401 in the shared JSON envelope before
+// the wrapped handler runs.
+//
+// It has the net/http middleware shape, so it is also an httpx.Middleware and can
+// be used directly as a named route policy.
+func (m *Manager) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, ok := TokenFromRequest(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		claims, err := m.Parse(raw)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claimsKey{}, claims)))
+	})
+}
+
+// RequireRole authenticates the request and then requires role. It is intended
+// to run after Middleware, usually composed with httpx.Chain:
+//
+//	httpx.Chain(auth.Middleware, jwtauth.RequireRole("admin"))
+//
+// A missing or invalid token is a 401; a valid token without the role is a 403.
+func RequireRole(role string) func(http.Handler) http.Handler {
+	return RequireAnyRole(role)
+}
+
+// RequireAnyRole authenticates the request and then requires at least one of
+// roles. With no roles it only requires authentication, which is useful when the
+// handler decides authorization itself from ClaimsFrom.
+func RequireAnyRole(roles ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := ClaimsFrom(r.Context())
+			if !ok {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			if len(roles) == 0 {
+				next.ServeHTTP(w, r)
+				return
+			}
+			for _, role := range roles {
+				if claims.HasRole(role) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			writeError(w, http.StatusForbidden, "forbidden")
+		})
+	}
+}
+
+// TokenFromRequest extracts a bearer token from the Authorization header. The
+// scheme is matched case-insensitively; no query parameter, cookie or other
+// header is accepted, so a token cannot accidentally leak into a URL or log.
+func TokenFromRequest(r *http.Request) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	parts := strings.SplitN(strings.TrimSpace(r.Header.Get("Authorization")), " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return "", false
+	}
+	token := strings.TrimSpace(parts[1])
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+type claimsKey struct{}
+
+// ClaimsFrom returns the claims Middleware stored on ctx, or (nil, false) when
+// no authenticated request is in progress.
+func ClaimsFrom(ctx context.Context) (*Claims, bool) {
+	claims, ok := ctx.Value(claimsKey{}).(*Claims)
+	return claims, ok && claims != nil
+}
+
+// writeError writes the 401/403 envelope and the standard bearer challenge.
+func writeError(w http.ResponseWriter, status int, message string) {
+	if status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+	}
+	httpx.Error(w, status, message)
+}
+
+// normalizeRoles trims and deduplicates roles while preserving their order, so
+// a token contains no blank or repeated authorization values.
+func normalizeRoles(roles []string) []string {
+	if len(roles) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(roles))
+	normalized := make([]string, 0, len(roles))
+	for _, role := range roles {
+		role = strings.TrimSpace(role)
+		if role == "" || seen[role] {
+			continue
+		}
+		seen[role] = true
+		normalized = append(normalized, role)
+	}
+	return normalized
+}
+
+// newID returns a random token identifier for the registered jti claim.
+func newID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", errors.New("jwtauth: generate token id")
+	}
+	return hex.EncodeToString(raw[:]), nil
+}

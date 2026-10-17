@@ -13,8 +13,9 @@ for the installed capability set and declares two things:
 
 `loom_gen.go` is Loom output and must never be edited by hand. The provider
 seams are the opposite: weld writes `providers.go`,
-`redis_provider.go`, `mail_provider.go`, `storage_provider.go` and
-`cron_provider.go` once and never regenerates them, so they are the files you
+`redis_provider.go`, `mail_provider.go`, `storage_provider.go`,
+`jwt_provider.go` and `cron_provider.go` once and never regenerates them, so
+they are the files you
 edit to wire dependencies. `providers.go` is the single extension point for
 custom services, repositories and third-party clients; its `projectModule` is
 included by every graph, with unused providers pruned:
@@ -35,8 +36,9 @@ var projectModule = loom.Module(
 | `*pgxpool.Pool` | `db` | `data.NewPool`; **declared but not part of the default composition**. Loom prunes it while no provider depends on the pool — directly on `*pgxpool.Pool` or through a repository registered in `projectModule` (see `providers.go`). When such a consumer exists Loom validates the database section, parses the dsn lazily (it is **not** connected at build, test or startup) and registers a cleanup that closes it exactly once |
 | `data.Repository` | `db` | **not declared by default**: the project registers it in `providers.go` (`loom.As[data.Repository](NewRepository)`), so `NewPool` and the repository are constructed only for the roots that consume it. The generated graph claims no production consumer until you register one |
 | `*redis.Client` | `redis` | `redisclient.New` through `NewRedisClient`, defined in the stable `redis_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*redis.Client`. When a consumer asks for it, Loom validates the `redis` section, builds the lazy client (it is **not connected** at build, test or startup) and registers a cleanup that closes it exactly once |
-| `*cron.Scheduler` | `cron` | `mailsender.New` through `NewMailSender`, defined in the stable `mail_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*mailsender.Sender`. Construction never connects and never sends |
+| `*mailsender.Sender` | `mail` | `mailsender.New` through `NewMailSender`, defined in the stable `mail_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*mailsender.Sender`. Construction never connects and never sends |
 | `*objectstore.Store` | `storage` | `objectstore.New` through `NewObjectStore`, defined in the stable `storage_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*objectstore.Store`. Construction never connects |
+| `*jwtauth.Manager` | `jwt` | `jwtauth.New` through `NewJWTAuth`, defined in the stable `jwt_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*jwtauth.Manager`, so an ordinary serve needs no JWT secret. A consumer makes Loom validate the `jwt` section before startup; the manager holds an immutable key and has no lifecycle |
 | `*cron.Scheduler` | `cron` | `cron.New` through `NewScheduler`, defined in the stable `cron_provider.go` seam. Unlike the bindings above, the server graph root consumes it, so Loom always constructs it and its start/stop hooks run with the server. `NewScheduler` takes the server, so the socket is bound before the scheduler starts and the scheduler stops before the server. `NewCronJobs` in `internal/di/cron_jobs.go` injects services and binds their methods before startup. It starts no jobs unless that seam registers them |
 | `*httpserver.Server` | `http` | the framework-neutral runtime built with the shared `httpserver.NewHandler`; DI attaches `Start(ctx)` and `Stop(ctx)` to Loom hooks |
 | `*App` | `http` | the server graph root returned by `InitApp` |
@@ -221,8 +223,9 @@ installed capability changes the provider set; re-adding an installed capability
 a project scaffolded by an older weld can be refreshed in place — including a
 stable seam a newer weld added, such as `providers.go`. Do not edit
 these generated files. The stable provider seams — `providers.go`,
-`redis_provider.go`, `mail_provider.go`, `storage_provider.go`
-and `cron_provider.go` — are written once and never regenerated, so edit those
+`redis_provider.go`, `mail_provider.go`, `storage_provider.go`,
+`jwt_provider.go` and `cron_provider.go` — are written once and never
+regenerated, so edit those
 files to wire dependencies, and keep a module's own route assertions in that
 module's `module_test.go`.
 

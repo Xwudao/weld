@@ -26,6 +26,10 @@ weld add web --with-dependencies  # installs http (and loom, config), then the f
 weld add module items  # JSON business module: typed handlers, DTO validation, {code,msg,data}
 weld add enum status draft published  # typed string enum + generated methods
 weld add db            # PostgreSQL: SQL migrations + sqlc, pool and repository
+weld add jwt --with-dependencies  # HS256 bearer tokens + middleware (installs http)
+weld db migrate up     # apply migrations with the pinned goose tool
+weld db create add_users  # timestamped goose migration skeleton
+weld doctor            # read-only project health checks
 weld upgrade           # move installed capabilities to this weld's payloads
 weld config example    # print the optional, user-owned weld.yml starter
 weld dev               # backend + pnpm frontend dev servers, side by side
@@ -53,6 +57,9 @@ weld add <capability> [capability...] [--dir dir] [--dry-run]
 weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
+weld db migrate up|status|down [--config path] [--yes] [--dir dir] [--dry-run]
+weld db create <name> [--dir dir] [--dry-run]
+weld doctor [--json] [--dir dir]
 weld upgrade [capability...] [--check] [--prune] [--verify vet|build|none] [--dir dir] [--dry-run]
 weld gen [enum|loom] [--dir dir] [--dry-run]
 weld dev [--dir dir]
@@ -236,6 +243,14 @@ Capabilities:
   installing it never sends and never connects.
 - `storage` (add) — an opt-in S3-compatible object-storage client. Requires
   `loom` but not `http`; installing it creates no bucket and uploads nothing.
+- `jwt` (add) — opt-in JWT bearer-token authentication: HS256 issue/verify with a
+  required issuer, an optional audience, an expiry, clock leeway and role claims,
+  plus `net/http` middleware that stores validated claims on the request context.
+  It requires `http` (and therefore `loom` and `config`). Installing it constructs
+  no manager, issues no token and guards no route; inject the manager into
+  `NewHTTPPolicies` in `internal/di/http_policies.go` to switch it on. The secret
+  is required only when a manager is built, must be at least 32 bytes, and is held
+  as `config.Secret`. It is stateless: no refresh token or revocation list.
 - `cron` (add) — an opt-in in-process scheduler that starts and stops with the
   `serve` command and never with a short command. Requires `http` (and therefore
   `loom`); installing it schedules nothing until you register jobs in
@@ -268,14 +283,13 @@ next add restores it from the committed example before appending; a missing or
 corrupt example fails with the exact restore command instead of a silent
 default.
 
-`http` requires `loom`; `web` and a business module each require `http`, so
-`weld add web` and `weld add module <name>` can be run in either order and both
-are served by the one
-`serve` command. `db`, `redis`, `mail` and `storage` require `loom` but not
-`http`: they add pruned bindings, so they can be added to a CLI-only project and
-compose with the HTTP capabilities in any order. `seed` requires `db`: it adds a
-short `seed` command over the repositories you wire, and seeds nothing on its
-own. `loom` is the foundation, not
+`http` requires `loom`; `web`, `jwt` and a business module each require `http`,
+so `weld add web`, `weld add jwt` and `weld add module <name>` can be run in any
+order and are served by the one `serve` command. `db`, `redis`, `mail` and
+`storage` require `loom` but not `http`: they add pruned bindings, so they can be
+added to a CLI-only project and compose with the HTTP capabilities in any order.
+`seed` requires `db`: it adds a short `seed` command over the repositories you
+wire, and seeds nothing on its own. `loom` is the foundation, not
 opt-in: it declares `commonModule` for every project and the server graph once
 `http` is installed, and `weld add` regenerates its graph when a capability
 changes the installed set.
@@ -385,6 +399,30 @@ the frontend never masquerades as an API that is not installed.
 - **Preserves user files.** Existing files are only rewritten through a verified
   marker region; every byte outside the region is left untouched, and all other
   writes are additive.
+
+## `weld doctor`
+
+`weld doctor` runs read-only checks on a project and reports them as `ok`,
+`warn` or `fail`:
+
+```sh
+weld doctor
+weld doctor --json   # machine-readable report for CI
+```
+
+It checks the manifest, `weld.yml`, `config.yml` (presence and YAML validity),
+managed-file drift, `go.mod` and its module path, the Go toolchain, the node/pnpm
+toolchain when `web` is installed, docker when a Dockerfile or `build.docker` is
+configured, ssh/scp for a deploy section, installed capabilities against this
+weld's catalog, the generated Loom graph, generated enum files and the `db`
+migration layout. It never writes, builds, connects to a database or prints a
+credential.
+
+A warning is advisory: a user-edited managed file, a missing optional tool or an
+available upgrade. A failure makes the command exit non-zero, so `weld doctor`
+can gate CI. It is deliberately weaker than `weld upgrade --check`: doctor
+describes the project's local health, while upgrade-check decides what upgrade
+would write.
 
 ## `weld upgrade`
 
@@ -587,6 +625,33 @@ CLI-only project and composes with the HTTP capabilities in any order. Loom
 declares the pool and repository as bindings but prunes them until a provider
 asks for the repository, so an unrelated serve needs no database credential.
 
+### `weld db`
+
+The `db` capability also ships a `weld db` command namespace so migrations do
+not require exporting `DATABASE_URL` or changing into `db/tools` by hand:
+
+```sh
+weld db migrate up        # apply every pending migration
+weld db migrate status    # show which migrations are applied
+weld db migrate down      # revert exactly one migration (requires --yes or CONFIRM=1)
+weld db create add_users  # create db/migrations/<timestamp>_add_users.sql
+```
+
+`weld db migrate` runs the goose tool pinned in `db/tools`, from that module,
+against the database described by the application's `config.yml`: an explicit
+`database.dsn`, or the host/port/user/password/name fields with the same `DB_*`
+environment overrides as the generated loader. `DATABASE_URL` takes precedence
+when non-empty. The resolved dsn is passed to goose but never printed; `--dry-run`
+shows `$DATABASE_URL` in the command instead. `--config` selects a different
+application configuration file. As with the Makefile target, the dsn is an
+argument to the goose process (visible to that process's own OS account); weld
+itself never writes it to output or a log.
+
+`down` reverts one migration and refuses to run without `--yes` (or
+`CONFIRM=1`, matching the Makefile). `create` validates a lower_snake_case name,
+refuses a duplicate name, and writes a goose `Up`/`Down` skeleton. The Makefile
+targets remain available as the no-weld fallback.
+
 ## `weld add loom` (stage 4)
 
 `weld add loom` adds `internal/di`, a
@@ -626,11 +691,12 @@ What Loom binds, and why it is not ceremonial:
   server. `NewCronJobs` in `internal/di/cron_jobs.go` injects business services
   and registers their methods before startup. It starts no jobs unless that
   seam registers them, and it takes no database or Redis lock.
-- `*redis.Client` (`redis`), `*mailsender.Sender` (`mail`) and
-  `*objectstore.Store` (`storage`) — declared bindings the default graph never
-  depends on, so Loom prunes them and an unrelated serve needs none of those
-  settings. Each provider lives in a stable seam (`redis_provider.go`,
-  `mail_provider.go`, `storage_provider.go`).
+- `*redis.Client` (`redis`), `*mailsender.Sender` (`mail`),
+  `*objectstore.Store` (`storage`) and `*jwtauth.Manager` (`jwt`) — declared
+  bindings the default graph never depends on, so Loom prunes them and an
+  unrelated serve needs none of those settings. Each provider lives in a stable
+  seam (`redis_provider.go`, `mail_provider.go`, `storage_provider.go`,
+  `jwt_provider.go`).
 - `*App` — the graph root, holding every bound service.
 
 The graph is capability aware and order independent. `weld add` renders
@@ -642,7 +708,7 @@ nested `tools/loom` module, not in the application `go.mod`, and a generation
 failure rolls the whole plan back so a project is never left with a graph that
 does not match `loom_gen.go`. Capabilities stay independent of the graph source:
 each contributes its own stable provider seam (`redis_provider.go`,
-`mail_provider.go`, `storage_provider.go`,
+`mail_provider.go`, `storage_provider.go`, `jwt_provider.go`,
 `cron_provider.go`, `cron_jobs.go`, `http_policies.go` and `providers.go`) and a
 `go.mod` go-directive extension point, while `di.go`
 and `loom_gen.go` alone are regenerated.
@@ -970,7 +1036,8 @@ it and the user never adds it by hand.
 
 What lands in the project:
 
-- `internal/config/` — typed Go structs (`Config`, `HTTP`, `CORS`, `Database`)
+- `internal/config/` — typed Go structs (`Config`, `HTTP`, `CORS`, `Database`,
+  and the capability-added `JWT`, `Redis`, `Mail`, `Storage` and `Cron` sections)
   with `yaml` tags for names only (no validation tags), a loader whose `readFile`
   and `lookupEnv` are injected (`NewLoader`) so it is testable without the
   filesystem or the process environment, and a `Secret` type that redacts itself
@@ -1097,6 +1164,59 @@ the commented `cors:` block that lives in a patch snippet — a snippet already
 present in a region is never re-inserted, so add the block by hand or set the
 `CORS_*` environment variables. The policy is off by default either way. See
 [`weld upgrade`](#weld-upgrade).
+
+## JWT bearer tokens
+
+`weld add jwt --with-dependencies` installs `http` (and its `loom`/`config`
+chain), then writes `internal/jwtauth` and a `jwt` section in `config.yml`:
+
+```yaml
+jwt:
+  secret: ""              # required when a manager is built; >= 32 bytes
+  issuer: "my-app"        # required; written into and verified from every token
+  audience: ""            # optional; empty disables the audience check
+  ttl_seconds: 900
+  leeway_seconds: 30
+```
+
+`JWT_SECRET`, `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_TTL_SECONDS` and
+`JWT_LEEWAY_SECONDS` override the file, and `config.Secret` keeps the secret out
+of logs, formatted output, JSON and YAML. The manager accepts **HS256 only**,
+requires a valid signature, issuer and expiry, optionally requires an audience,
+and records its failure as one generic `ErrInvalidToken` so an attacker cannot
+probe the verification rules. A secret shorter than 32 bytes is rejected.
+
+Installing `jwt` does not issue a token or guard a route. The manager is a pruned
+Loom binding in `internal/di/jwt_provider.go`. Wire it into the project's policy
+seam:
+
+```go
+func NewHTTPPolicies(auth *jwtauth.Manager) ([]httpserver.NamedPolicy, error) {
+	return []httpserver.NamedPolicy{
+		{Name: httpserver.PolicyUser, Middleware: auth.Middleware},
+		{Name: httpserver.PolicyAdmin, Middleware: httpx.Chain(
+			auth.Middleware,
+			jwtauth.RequireRole("admin"),
+		)},
+	}, nil
+}
+```
+
+Then run `make generate`. `Manager.Middleware` reads only
+`Authorization: Bearer <token>`, stores validated `*jwtauth.Claims` on the
+request context, and returns a `401` in the shared envelope for a missing or
+invalid token. `jwtauth.ClaimsFrom(ctx)` exposes the subject and roles;
+`RequireRole`/`RequireAnyRole` enforce roles with a `403`.
+`httpserver.PolicyUser` is a new policy name, still resolved by
+`NewHTTPPolicies`; the generated `AdminGuard` stays deny-all until replaced.
+
+The package provides `Issue(subject, roles)` for the endpoint that has already
+verified credentials. It does not authenticate a password, look up a user or
+assign roles. Tokens are stateless: there is no refresh token or revocation
+list, so a token remains valid until it expires; keep the TTL short, rotate the
+secret by restarting every instance together, and serve the application over
+HTTPS. Never put passwords, API keys or private data in claims: a JWT is signed,
+not encrypted. See `internal/jwtauth/README.md` in the generated project.
 
 ## Hooks
 
@@ -1336,12 +1456,30 @@ Test conventions:
   and concurrent publish/register under `-race`. A scaffold test generates a
   project, registers a listener, and asserts delivery through the generated
   package's own `go test` run.
+- The jwt capability ships a descriptor test (it requires `http`, patches the
+  config markers, declares its provider seam and ships no login route), a config
+  test (file, environment and defaults precedence and fail-closed validation),
+  and a verifier test (round-trip, wrong secret/issuer/audience, expiry,
+  not-before, `alg: none` rejection, bearer extraction, 401/403 middleware and
+  role checks). A scaffold test generates a project, adds jwt, proves the unused
+  manager is pruned from the default Loom composition, and runs the generated
+  project's gofmt/build/test.
+- `internal/db` tests cover dsn resolution precedence (`DATABASE_URL`, an explicit
+  dsn, the typed fields and `DB_*` overrides), a missing or invalid config,
+  missing fields, the exact pinned goose command, the redacted display form,
+  dry-run, the down confirmation and timestamped migration creation.
+  `internal/doctor` and the CLI tests cover a healthy project, managed-file drift
+  as a warning, a missing project as a failure, capability upgrade/unknown
+  reporting, missing web/deploy tools, a missing Loom graph and a missing db tool
+  layout, plus the JSON report used by CI.
 
 ## Layout
 
 ```
 cmd/weld/            CLI entry point
 internal/cli/        argument parsing and output
+internal/db/         `weld db` migration planning, dsn resolution and migration creation
+internal/doctor/     read-only project health checks
 internal/template/   capability catalog, module and command templates, placeholder rendering
 internal/project/    manifest, marker regions and splicing, unified diff, best-effort rollback apply
 internal/scaffold/   create/add/upgrade/add-module/add-command plans and dependency resolution
