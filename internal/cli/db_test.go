@@ -32,6 +32,16 @@ func TestDBCommands(t *testing.T) {
 	if strings.Contains(out, sentinel) {
 		t.Fatalf("dry run printed the dsn: %s", out)
 	}
+	if strings.Contains(out, "-allow-missing") {
+		t.Fatalf("default up plan unexpectedly allows missing migrations: %s", out)
+	}
+	out, err = run(t, "db", "migrate", "up", "--allow-missing", "--dry-run", "--dir", dir)
+	if err != nil {
+		t.Fatalf("migrate up --allow-missing dry run: %v", err)
+	}
+	if !strings.Contains(out, "-allow-missing") {
+		t.Fatalf("allow-missing plan lacks the flag: %s", out)
+	}
 
 	if _, err := run(t, "db", "migrate", "down", "--dir", dir); err == nil || !strings.Contains(err.Error(), "--yes") {
 		t.Fatalf("down without confirmation error = %v", err)

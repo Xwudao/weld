@@ -14,8 +14,8 @@ for the installed capability set and declares two things:
 `loom_gen.go` is Loom output and must never be edited by hand. The provider
 seams are the opposite: weld writes `providers.go`,
 `redis_provider.go`, `mail_provider.go`, `storage_provider.go`,
-`jwt_provider.go` and `cron_provider.go` once and never regenerates them, so
-they are the files you
+`jwt_provider.go`, `user_provider.go` and `cron_provider.go` once and never
+regenerates them, so they are the files you
 edit to wire dependencies. `providers.go` is the single extension point for
 custom services, repositories and third-party clients; its `projectModule` is
 included by every graph, with unused providers pruned:
@@ -39,6 +39,7 @@ var projectModule = loom.Module(
 | `*mailsender.Sender` | `mail` | `mailsender.New` through `NewMailSender`, defined in the stable `mail_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*mailsender.Sender`. Construction never connects and never sends |
 | `*objectstore.Store` | `storage` | `objectstore.New` through `NewObjectStore`, defined in the stable `storage_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*objectstore.Store`. Construction never connects |
 | `*jwtauth.Manager` | `jwt` | `jwtauth.New` through `NewJWTAuth`, defined in the stable `jwt_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*jwtauth.Manager`, so an ordinary serve needs no JWT secret. A consumer makes Loom validate the `jwt` section before startup; the manager holds an immutable key and has no lifecycle |
+| `*auth.UserService` | `user` | `auth.NewUserService` through `NewUserService`, defined in the stable `user_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*auth.UserService`, so an unrelated serve opens no pool and needs no database or JWT setting. A consumer makes Loom construct the pool, the JWT manager and the account store together; registration and login are methods on the service |
 | `*cron.Scheduler` | `cron` | `cron.New` through `NewScheduler`, defined in the stable `cron_provider.go` seam. Unlike the bindings above, the server graph root consumes it, so Loom always constructs it and its start/stop hooks run with the server. `NewScheduler` takes the server, so the socket is bound before the scheduler starts and the scheduler stops before the server. `NewCronJobs` in `internal/di/cron_jobs.go` injects services and binds their methods before startup. It starts no jobs unless that seam registers them |
 | `*httpserver.Server` | `http` | the framework-neutral runtime built with the shared `httpserver.NewHandler`; DI attaches `Start(ctx)` and `Stop(ctx)` to Loom hooks |
 | `*App` | `http` | the server graph root returned by `InitApp` |
@@ -224,8 +225,8 @@ a project scaffolded by an older weld can be refreshed in place — including a
 stable seam a newer weld added, such as `providers.go`. Do not edit
 these generated files. The stable provider seams — `providers.go`,
 `redis_provider.go`, `mail_provider.go`, `storage_provider.go`,
-`jwt_provider.go` and `cron_provider.go` — are written once and never
-regenerated, so edit those
+`jwt_provider.go`, `user_provider.go` and `cron_provider.go` — are written once
+and never regenerated, so edit those
 files to wire dependencies, and keep a module's own route assertions in that
 module's `module_test.go`.
 

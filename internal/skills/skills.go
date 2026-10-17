@@ -285,6 +285,7 @@ var curatedNotes = map[string]string{
 	"web":     "React + TypeScript + Vite frontend under `web/`, built into `internal/web` and served by **http** on `/`. `/api/` stays reserved: an unknown API path returns 404 instead of the HTML shell.",
 	"db":      "PostgreSQL persistence in `internal/data`: a hand-written `Repository`/`Item` wrapper, `NewPool` and `WithTx`, over sqlc-generated `internal/data/sqlc`. Installing it connects nothing and needs no credential until you wire the repository yourself. `weld db migrate up|status|down` runs the pinned goose tool against `config.yml` or `DATABASE_URL`; `weld db create <name>` writes a timestamped goose migration skeleton.",
 	"jwt":     "opt-in JWT bearer-token authentication in `internal/jwtauth`: HS256 issue/verify with a required issuer, optional audience, expiry, clock leeway and role claims. `Manager.Middleware` reads only the `Authorization: Bearer` header and stores validated claims on the request context; `RequireRole`/`RequireAnyRole` check claims roles. Installing jwt constructs no manager, issues no token and guards no route; inject `*jwtauth.Manager` into `NewHTTPPolicies` in `internal/di/http_policies.go` and use `httpserver.PolicyUser` (or compose `RequireRole(\"admin\")` with `PolicyAdmin`). `jwt.secret` is required only when a manager is built and must be at least 32 bytes; it is held as `config.Secret`, is redacted everywhere, and `JWT_SECRET` overrides the file. Tokens are stateless: there is no revocation or refresh token, so rotate by restarting with a new secret and keep TTLs short.",
+	"user":    "opt-in user accounts split the way the project stores data: the `users` migration and named queries live under `db/` (`users.id` is a PostgreSQL bigint identity, not a random string), generated account code lands in the existing `internal/data/sqlc` package via the project's single `sqlc.yaml` (run `make sqlc` after install), the repository is `internal/data/user_repo.go`, and bcrypt registration/login plus JWT session issuance are in `internal/auth/user.go`. It requires `db` and `jwt`, creates no default account, administrator or route, and grants new accounts no roles; an administrator calls `UserService.SetRoles`. `internal/di/user_provider.go` declares the service but Loom prunes it until a handler or policy consumes it, so an ordinary serve needs no database or JWT secret. The login error is deliberately one `auth.ErrInvalidCredentials` for an unknown user and a wrong password, and the service performs a dummy bcrypt comparison for an unknown name to reduce account enumeration timing. Run `weld db migrate up --allow-missing` when the users migration is older than the database's current version.",
 	"loom":    "compile-time dependency injection in `internal/di`, required by every capability and command beyond the bare CLI (install it with `--with-dependencies`). All command graphs share available config/logger and optional infrastructure providers through `commonModule`; the HTTP server graph exists only after **http** is installed. Graphs reuse each provider once per invocation and prune unused DB/Redis/mail/storage/events/JWT bindings. A command group resolves its graph lazily through the shared `internal/commandkit` seam, so a subcommand injects a dependency by adding a field to its `Deps` and a parameter to `NewDeps` (a provider already in `commonModule` needs no graph edit; a new one needs `loom.Provide(...)` in `internal/di/<name>_graph.go`). Loom raises the project's Go directive to 1.25.",
 	"redis":   "opt-in Redis client in `internal/redisclient` built from typed configuration. Installing it connects nothing: `New` never dials or pings and nothing generated imports it, so you own the client lifecycle.",
 	"cron":    "opt-in in-process scheduler in `internal/cron`: five-field specs or fixed intervals (`Every`, `DailyAt`, `WeeklyOn`, `MonthlyOn`), unique names, overlap skipping, error logging, panic recovery and graceful stop. Cron installs HTTP and follows only the Loom `serve` lifecycle, never a short command. Inject business services into `NewCronJobs` in the stable `internal/di/cron_jobs.go`, register their ordinary func(context.Context) error methods with Scheduler.Register, then run `make generate`. Registration is automatically consumed before startup; no job Deps bundle is needed. `internal/di/cron_provider.go` owns construction and lifecycle, not business wiring. Installing cron schedules nothing.",
@@ -335,6 +336,14 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 		b.WriteString("  revocation or refresh token is provided.\n")
 		wrote = true
 	}
+	if set["user"] {
+		b.WriteString("- **user** installs the account table, repository and bcrypt login service but\n")
+		b.WriteString("  creates no account and mounts no route. Consume `*auth.UserService` from a\n")
+		b.WriteString("  handler, module or `NewHTTPPolicies`; `internal/di/user_provider.go` wires the\n")
+		b.WriteString("  pool and JWT manager lazily. Grant roles with `SetRoles` from a controlled\n")
+		b.WriteString("  path, never from unauthenticated registration (see `internal/auth/README.md`).\n")
+		wrote = true
+	}
 	if set["cron"] {
 		b.WriteString("- **cron** installs a scheduler but schedules nothing by itself: it starts and\n")
 		b.WriteString("  stops with `serve` and runs only the jobs you add in\n")
@@ -368,8 +377,9 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 		b.WriteString("- **loom** is installed with every non-base addition. Command graphs share\n")
 		b.WriteString("  available bindings through `commonModule`; the HTTP server graph exists only\n")
 		b.WriteString("  with **http**. Unused DB, Redis, mail, storage and event providers are pruned,\n")
-		b.WriteString("  and an unconsumed JWT manager is pruned too, so a serve needs no JWT\n")
-		b.WriteString("  secret until `NewHTTPPolicies` consumes it. Short commands never start\n")
+		b.WriteString("  and an unconsumed JWT manager or user service is pruned too, so a serve\n")
+		b.WriteString("  needs no JWT secret or database until a policy consumes it. Short commands\n")
+		b.WriteString("  never start\n")
 		b.WriteString("  HTTP or cron.\n")
 		wrote = true
 	}
@@ -465,6 +475,9 @@ func writeEditing(b *strings.Builder, set map[string]bool) {
 	}
 	if set["jwt"] && set["loom"] {
 		seams = append(seams, "`internal/di/jwt_provider.go`")
+	}
+	if set["user"] && set["loom"] {
+		seams = append(seams, "`internal/di/user_provider.go`")
 	}
 	if set["seed"] && set["loom"] {
 		seams = append(seams, "`internal/di/seed_providers.go`")

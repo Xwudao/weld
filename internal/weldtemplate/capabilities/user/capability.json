@@ -1,0 +1,58 @@
+{
+  "name": "user",
+  "version": "0.2.0",
+  "kind": "add",
+  "summary": "Opt-in user accounts: a PostgreSQL users migration and sqlc query, a repository under internal/data generated through the project's single sqlc.yaml, bcrypt registration/login under internal/auth, and JWT session issuance. Installing it creates no account, no administrator and no route.",
+  "requires": [
+    "db",
+    "jwt"
+  ],
+  "files": [
+    {
+      "path": "db/migrations/000002_create_users.sql",
+      "source": "files/migrations/000002_create_users.sql"
+    },
+    {
+      "path": "db/query/users.sql",
+      "source": "files/query/users.sql"
+    },
+    {
+      "path": "internal/data/user_repo.go",
+      "source": "files/user_repo.go.tmpl"
+    },
+    {
+      "path": "internal/data/user_repo_test.go",
+      "source": "files/user_repo_test.go.tmpl"
+    },
+    {
+      "path": "internal/auth/user.go",
+      "source": "files/auth_user.go.tmpl"
+    },
+    {
+      "path": "internal/auth/user_test.go",
+      "source": "files/auth_user_test.go.tmpl"
+    },
+    {
+      "path": "internal/auth/README.md",
+      "source": "files/README.md"
+    },
+    {
+      "path": "internal/di/user_provider.go",
+      "source": "files/user_provider.go.tmpl",
+      "role": "seam",
+      "when": [
+        "loom"
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "path": "go.mod",
+      "marker": "deps",
+      "source": "files/go.mod.snippet"
+    }
+  ],
+  "postInstall": [
+    "user adds db/query/users.sql but not generated code: run `make sqlc` to generate internal/data/sqlc before `make build`."
+  ]
+}

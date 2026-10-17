@@ -24,8 +24,8 @@
 // internal/di/providers.go (included in commonModule below), and the
 // Redis, mail, object-store, JWT and cron providers in
 // internal/di/redis_provider.go, internal/di/mail_provider.go,
-// internal/di/storage_provider.go, internal/di/jwt_provider.go and
-// internal/di/cron_provider.go.
+// internal/di/storage_provider.go, internal/di/jwt_provider.go,
+// internal/di/user_provider.go and internal/di/cron_provider.go.
 //
 // Command groups installed with `weld add command` or
 // `weld add module <name> --command` get their own stable graph in
@@ -92,7 +92,7 @@ import (
 
 // commonModule groups the providers every graph shares: the configuration
 // loader, the configuration, the logger and the installed
-// db/redis/mail/storage/events/jwt bindings.
+// db/redis/mail/storage/events/jwt/user bindings.
 //
 // It lives in this regenerated file rather than being copied into each graph, so
 // a capability installed after a command graph was written still reaches that
@@ -160,6 +160,15 @@ var commonModule = loom.Module(
 	// jwt_provider.go, the stable wiring seam; inject the manager into
 	// NewHTTPPolicies (http_policies.go) to switch it on.
 	loom.Provide(NewJWTAuth),
+{{- end}}
+{{- if .Caps.Has "user"}}
+	// The account service is a declared binding, not part of the default
+	// composition: nothing in the default graph depends on *auth.UserService, so
+	// Loom prunes it and an ordinary serve opens no pool and needs no database or
+	// JWT secret. It is defined in user_provider.go, the stable wiring seam;
+	// inject it into NewHTTPPolicies or a business module's NewService to switch
+	// it on.
+	loom.Provide(NewUserService),
 {{- end}}
 )
 

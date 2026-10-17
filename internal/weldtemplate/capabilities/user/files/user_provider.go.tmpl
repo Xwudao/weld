@@ -1,0 +1,37 @@
+package di
+
+import (
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"__module__/internal/auth"
+	"__module__/internal/data"
+	"__module__/internal/jwtauth"
+)
+
+// NewUserService is the optional account service provider, and this file is the
+// stable integration seam for account registration and login.
+//
+// weld writes this file once, when the user capability is installed, and never
+// rewrites it while it regenerates the graph (di.go, loom_gen.go): edits below
+// survive every later `weld add`.
+//
+// The service is an available binding, not part of the default composition:
+// nothing in the default graph depends on *auth.UserService, so Loom prunes it
+// and an ordinary serve constructs no pool, no JWT manager and needs no database
+// or JWT secret. Consume it where the application authenticates:
+//
+//	func NewHTTPPolicies(accounts *auth.UserService) ([]httpserver.NamedPolicy, error) {
+//		return []httpserver.NamedPolicy{
+//			{Name: httpserver.PolicyUser, Middleware: NewSessionGuard(accounts)},
+//		}, nil
+//	}
+//
+// or inject *auth.UserService into a business module's NewService. The graph then
+// constructs the pool, the JWT manager and the account service together, and
+// validates the database and jwt configuration before serving.
+//
+// The service has no lifecycle: it holds the pool-backed repository and the
+// immutable token issuer injected above.
+func NewUserService(pool *pgxpool.Pool, tokens *jwtauth.Manager) (*auth.UserService, error) {
+	return auth.NewUserService(data.NewUserRepository(pool), tokens)
+}

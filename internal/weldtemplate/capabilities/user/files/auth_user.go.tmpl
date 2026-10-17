@@ -1,0 +1,284 @@
+// Package auth provides account registration, bcrypt password verification and
+// JWT session issuance for __name__.
+//
+// It is the application-level account service; persistence lives in
+// internal/data/user_repo.go and token signing lives in internal/jwtauth. The
+// package imports both, but not net/http, so a command, a seeder or an HTTP
+// module can reuse the same login path. Installing the user capability creates
+// no default account, no administrator and no route.
+//
+// The password policy is a floor, not a complete credential policy: it requires
+// 8 to 72 bytes because bcrypt silently truncates beyond 72. A real application
+// should add rate limiting, breached-password checks and HTTPS; this package
+// only guarantees that a stored password is a bcrypt hash and that login does not
+// reveal whether the username exists.
+package auth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"__module__/internal/data"
+)
+
+// Password and username limits. Bcrypt's input limit is 72 bytes; these are
+// bytes rather than runes so the limits match bcrypt and PostgreSQL's text
+// storage without a conversion surprise.
+const (
+	MinUsernameBytes = 3
+	MaxUsernameBytes = 64
+	MinPasswordBytes = 8
+	MaxPasswordBytes = 72
+)
+
+// Errors returned by the service. Login deliberately returns
+// ErrInvalidCredentials for a malformed username, an unknown username and a
+// wrong password, so a caller cannot use the error to enumerate accounts.
+var (
+	ErrNotFound           = errors.New("auth: account not found")
+	ErrUsernameTaken      = errors.New("auth: username already exists")
+	ErrInvalidCredentials = errors.New("auth: invalid username or password")
+	ErrInvalidUsername    = errors.New("auth: invalid username")
+	ErrPasswordTooShort   = fmt.Errorf("auth: password must be at least %d bytes", MinPasswordBytes)
+	ErrPasswordTooLong    = fmt.Errorf("auth: password must be at most %d bytes", MaxPasswordBytes)
+	ErrInvalidRole        = errors.New("auth: invalid role")
+	ErrInvalidAccountID   = errors.New("auth: account id must be positive")
+)
+
+// usernamePattern is the accepted account name after trimming and lower-casing:
+// 3-64 characters, starting with a letter or digit, followed by letters, digits,
+// '.', '_' or '-'. Restricting the alphabet keeps a name safe in a URL and a log
+// without escaping. The migration enforces the same lower-case rule.
+var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
+
+// rolePattern is the accepted role vocabulary after trimming and lower-casing.
+// Roles are authorization names, not user-facing labels; lower-case keeps
+// `jwtauth.RequireRole("admin")` stable across call sites.
+var rolePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
+
+// dummyPasswordHash is a valid bcrypt hash of a value no account uses. Login
+// compares against it when the username is unknown, so the response time does
+// not reveal whether an account exists. It is a fixed cost-10 hash; keep the
+// cost in sync with bcrypt.DefaultCost if that default changes.
+var dummyPasswordHash = []byte("$2a$10$BWvLLaO6J64BsamnhyRiv.GxUa23d.g.pI.fUF61bXQ/ieRO7SsYW")
+
+// UserStore is the persistence contract the service depends on. It is declared
+// by the consumer, so internal/data can satisfy it without importing auth.
+type UserStore interface {
+	CreateUser(ctx context.Context, create data.UserCreate) (data.UserAccount, error)
+	FindUserByUsername(ctx context.Context, username string) (data.UserCredentials, error)
+	GetUser(ctx context.Context, id int64) (data.UserAccount, error)
+	SetUserRoles(ctx context.Context, id int64, roles []string) (data.UserAccount, error)
+}
+
+// TokenIssuer signs a token for an authenticated account. *jwtauth.Manager
+// satisfies this interface; a test can substitute a fake so the service is
+// exercised without a secret.
+type TokenIssuer interface {
+	Issue(subject string, roles []string) (string, error)
+}
+
+// Session is an authenticated account and the JWT issued for it.
+type Session struct {
+	Account data.UserAccount
+	Token   string
+}
+
+// UserService registers accounts, verifies passwords and issues sessions.
+//
+// It is safe for concurrent use: the store and token issuer are injected and
+// immutable, and each call owns its state. The service never assigns roles on
+// registration; an administrator grants them with SetRoles.
+type UserService struct {
+	store  UserStore
+	tokens TokenIssuer
+}
+
+// NewUserService returns a service backed by store and tokens.
+//
+// Both dependencies are required: a missing store would make registration
+// panic, and a missing issuer would let a login succeed without a token. The
+// generated Loom provider passes the PostgreSQL repository and the configured
+// JWT manager, so both are present only when a root actually consumes the
+// service.
+func NewUserService(store UserStore, tokens TokenIssuer) (*UserService, error) {
+	if store == nil {
+		return nil, errors.New("auth: nil user store")
+	}
+	if tokens == nil {
+		return nil, errors.New("auth: nil token issuer")
+	}
+	return &UserService{store: store, tokens: tokens}, nil
+}
+
+// Register creates an account with no roles and returns its credential-free
+// projection.
+//
+// The username is trimmed and lower-cased; the password is bcrypt-hashed with
+// DefaultCost. A duplicate username returns ErrUsernameTaken. Registration does
+// not issue a token: a caller that wants to sign the new account in calls Login
+// or IssueToken explicitly.
+func (s *UserService) Register(ctx context.Context, username, password string) (data.UserAccount, error) {
+	name, err := NormalizeUsername(username)
+	if err != nil {
+		return data.UserAccount{}, err
+	}
+	if err := validatePassword(password); err != nil {
+		return data.UserAccount{}, err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return data.UserAccount{}, errors.New("auth: hash password")
+	}
+	account, err := s.store.CreateUser(ctx, data.UserCreate{
+		Username:     name,
+		PasswordHash: string(hash),
+		Roles:        []string{},
+	})
+	if errors.Is(err, data.ErrUsernameTaken) {
+		return data.UserAccount{}, ErrUsernameTaken
+	}
+	return account, err
+}
+
+// Authenticate verifies a username and password and returns the account.
+//
+// Every credential failure is ErrInvalidCredentials. When the username is
+// unknown or malformed, the service still performs a bcrypt comparison against
+// a dummy hash so a timing difference does not disclose account existence.
+func (s *UserService) Authenticate(ctx context.Context, username, password string) (data.UserAccount, error) {
+	name, err := NormalizeUsername(username)
+	if err != nil {
+		compareDummy(password)
+		return data.UserAccount{}, ErrInvalidCredentials
+	}
+	credentials, err := s.store.FindUserByUsername(ctx, name)
+	if err != nil {
+		if errors.Is(err, data.ErrUserNotFound) {
+			compareDummy(password)
+			return data.UserAccount{}, ErrInvalidCredentials
+		}
+		return data.UserAccount{}, err
+	}
+	if bcrypt.CompareHashAndPassword([]byte(credentials.PasswordHash), []byte(password)) != nil {
+		return data.UserAccount{}, ErrInvalidCredentials
+	}
+	account, err := s.Get(ctx, credentials.ID)
+	if errors.Is(err, ErrNotFound) {
+		return data.UserAccount{}, ErrInvalidCredentials
+	}
+	return account, err
+}
+
+// Login authenticates the credentials and issues a JWT for the account.
+//
+// The token subject is the account ID and the claims carry the account's roles,
+// so a role change takes effect on the next login, not on an already-issued
+// token. Tokens are stateless: there is no refresh token or revocation list.
+func (s *UserService) Login(ctx context.Context, username, password string) (Session, error) {
+	account, err := s.Authenticate(ctx, username, password)
+	if err != nil {
+		return Session{}, err
+	}
+	token, err := s.IssueToken(account)
+	if err != nil {
+		return Session{}, err
+	}
+	return Session{Account: account, Token: token}, nil
+}
+
+// IssueToken signs a token for an already-authenticated account.
+//
+// Call it only after Authenticate (or an equivalent identity check); this method
+// does not inspect a password and must never be reachable from an untrusted
+// request without one.
+func (s *UserService) IssueToken(account data.UserAccount) (string, error) {
+	if account.ID <= 0 {
+		return "", ErrInvalidAccountID
+	}
+	return s.tokens.Issue(strconv.FormatInt(account.ID, 10), account.Roles)
+}
+
+// Get returns the account with id, or ErrNotFound.
+func (s *UserService) Get(ctx context.Context, id int64) (data.UserAccount, error) {
+	if id <= 0 {
+		return data.UserAccount{}, ErrNotFound
+	}
+	account, err := s.store.GetUser(ctx, id)
+	if errors.Is(err, data.ErrUserNotFound) {
+		return data.UserAccount{}, ErrNotFound
+	}
+	return account, err
+}
+
+// SetRoles replaces an account's roles. It is the administrator path: the
+// public Register method intentionally grants none, so a caller must have its
+// own authorization before calling this method.
+func (s *UserService) SetRoles(ctx context.Context, id int64, roles []string) (data.UserAccount, error) {
+	if id <= 0 {
+		return data.UserAccount{}, ErrNotFound
+	}
+	normalized, err := NormalizeRoles(roles)
+	if err != nil {
+		return data.UserAccount{}, err
+	}
+	account, err := s.store.SetUserRoles(ctx, id, normalized)
+	if errors.Is(err, data.ErrUserNotFound) {
+		return data.UserAccount{}, ErrNotFound
+	}
+	return account, err
+}
+
+// NormalizeUsername trims and lower-cases a username and validates its shape.
+// An invalid name returns ErrInvalidUsername; callers that authenticate should
+// map that to ErrInvalidCredentials instead of exposing the validation detail.
+func NormalizeUsername(raw string) (string, error) {
+	name := strings.ToLower(strings.TrimSpace(raw))
+	if !usernamePattern.MatchString(name) {
+		return "", fmt.Errorf("%w: use 3-64 characters from a-z, 0-9, '.', '_' or '-'", ErrInvalidUsername)
+	}
+	return name, nil
+}
+
+// NormalizeRoles trims, lower-cases and deduplicates roles while preserving
+// their first-seen order. A blank or malformed role is an error, so a typo
+// cannot silently grant nothing.
+func NormalizeRoles(roles []string) ([]string, error) {
+	normalized := make([]string, 0, len(roles))
+	seen := make(map[string]bool, len(roles))
+	for _, raw := range roles {
+		role := strings.ToLower(strings.TrimSpace(raw))
+		if !rolePattern.MatchString(role) {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidRole, raw)
+		}
+		if !seen[role] {
+			seen[role] = true
+			normalized = append(normalized, role)
+		}
+	}
+	return normalized, nil
+}
+
+// validatePassword enforces the bcrypt byte range without trimming the value:
+// spaces are significant in a password.
+func validatePassword(password string) error {
+	if len(password) < MinPasswordBytes {
+		return ErrPasswordTooShort
+	}
+	if len(password) > MaxPasswordBytes {
+		return ErrPasswordTooLong
+	}
+	return nil
+}
+
+// compareDummy spends the same bcrypt work as a real comparison. A failure is
+// expected and intentionally ignored.
+func compareDummy(password string) {
+	_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
+}

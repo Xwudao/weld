@@ -27,6 +27,7 @@ weld add module items  # JSON business module: typed handlers, DTO validation, {
 weld add enum status draft published  # typed string enum + generated methods
 weld add db            # PostgreSQL: SQL migrations + sqlc, pool and repository
 weld add jwt --with-dependencies  # HS256 bearer tokens + middleware (installs http)
+weld add user --with-dependencies  # users table, repository, bcrypt login + JWT sessions
 weld db migrate up     # apply migrations with the pinned goose tool
 weld db create add_users  # timestamped goose migration skeleton
 weld doctor            # read-only project health checks
@@ -57,7 +58,7 @@ weld add <capability> [capability...] [--dir dir] [--dry-run]
 weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
-weld db migrate up|status|down [--config path] [--yes] [--dir dir] [--dry-run]
+weld db migrate up|status|down [--config path] [--yes] [--allow-missing] [--dir dir] [--dry-run]
 weld db create <name> [--dir dir] [--dry-run]
 weld doctor [--json] [--dir dir]
 weld upgrade [capability...] [--check] [--prune] [--verify vet|build|none] [--dir dir] [--dry-run]
@@ -251,6 +252,16 @@ Capabilities:
   `NewHTTPPolicies` in `internal/di/http_policies.go` to switch it on. The secret
   is required only when a manager is built, must be at least 32 bytes, and is held
   as `config.Secret`. It is stateless: no refresh token or revocation list.
+- `user` (add) — opt-in user accounts: the `users` migration and sqlc query,
+  a repository at `internal/data/user_repo.go` over the existing generated
+  `internal/data/sqlc` package, and bcrypt registration/login with JWT session
+  issuance in `internal/auth/user.go`. It requires `db` and `jwt`. Installing it
+  creates no account, administrator or route; new accounts have no roles, and an
+  administrator grants them with `UserService.SetRoles`. It writes no generated
+  code: run `make sqlc` after install (the command is printed by `weld add user`)
+  to generate `users.sql.go` and the `User` model. The account service is a
+  pruned Loom binding in `internal/di/user_provider.go` until a handler or policy
+  consumes it.
 - `cron` (add) — an opt-in in-process scheduler that starts and stops with the
   `serve` command and never with a short command. Requires `http` (and therefore
   `loom`); installing it schedules nothing until you register jobs in
@@ -284,7 +295,8 @@ corrupt example fails with the exact restore command instead of a silent
 default.
 
 `http` requires `loom`; `web`, `jwt` and a business module each require `http`,
-so `weld add web`, `weld add jwt` and `weld add module <name>` can be run in any
+and `user` requires both `db` and `jwt`, so `weld add web`, `weld add jwt`,
+`weld add user` and `weld add module <name>` can be run in any
 order and are served by the one `serve` command. `db`, `redis`, `mail` and
 `storage` require `loom` but not `http`: they add pruned bindings, so they can be
 added to a CLI-only project and compose with the HTTP capabilities in any order.
@@ -632,6 +644,7 @@ not require exporting `DATABASE_URL` or changing into `db/tools` by hand:
 
 ```sh
 weld db migrate up        # apply every pending migration
+weld db migrate up --allow-missing  # also apply one older than the current version
 weld db migrate status    # show which migrations are applied
 weld db migrate down      # revert exactly one migration (requires --yes or CONFIRM=1)
 weld db create add_users  # create db/migrations/<timestamp>_add_users.sql
@@ -647,10 +660,13 @@ application configuration file. As with the Makefile target, the dsn is an
 argument to the goose process (visible to that process's own OS account); weld
 itself never writes it to output or a log.
 
-`down` reverts one migration and refuses to run without `--yes` (or
-`CONFIRM=1`, matching the Makefile). `create` validates a lower_snake_case name,
-refuses a duplicate name, and writes a goose `Up`/`Down` skeleton. The Makefile
-targets remain available as the no-weld fallback.
+`up --allow-missing` passes goose's out-of-order opt-in, which is how an
+installed capability's migration (for example `user`'s `000002_create_users.sql`)
+is applied to a database that already has later versions. `down` reverts one
+migration and refuses to run without `--yes` (or `CONFIRM=1`, matching the
+Makefile). `create` validates a lower_snake_case name, refuses a duplicate name,
+and writes a goose `Up`/`Down` skeleton. The Makefile targets remain available as
+the no-weld fallback.
 
 ## `weld add loom` (stage 4)
 
@@ -692,11 +708,12 @@ What Loom binds, and why it is not ceremonial:
   and registers their methods before startup. It starts no jobs unless that
   seam registers them, and it takes no database or Redis lock.
 - `*redis.Client` (`redis`), `*mailsender.Sender` (`mail`),
-  `*objectstore.Store` (`storage`) and `*jwtauth.Manager` (`jwt`) — declared
-  bindings the default graph never depends on, so Loom prunes them and an
-  unrelated serve needs none of those settings. Each provider lives in a stable
-  seam (`redis_provider.go`, `mail_provider.go`, `storage_provider.go`,
-  `jwt_provider.go`).
+  `*objectstore.Store` (`storage`), `*jwtauth.Manager` (`jwt`) and
+  `*auth.UserService` (`user`) — declared bindings the default graph never
+  depends on, so Loom prunes them and an unrelated serve needs none of those
+  settings. Each provider lives in a stable seam (`redis_provider.go`,
+  `mail_provider.go`, `storage_provider.go`, `jwt_provider.go`,
+  `user_provider.go`).
 - `*App` — the graph root, holding every bound service.
 
 The graph is capability aware and order independent. `weld add` renders
@@ -709,7 +726,8 @@ failure rolls the whole plan back so a project is never left with a graph that
 does not match `loom_gen.go`. Capabilities stay independent of the graph source:
 each contributes its own stable provider seam (`redis_provider.go`,
 `mail_provider.go`, `storage_provider.go`, `jwt_provider.go`,
-`cron_provider.go`, `cron_jobs.go`, `http_policies.go` and `providers.go`) and a
+`user_provider.go`, `cron_provider.go`, `cron_jobs.go`, `http_policies.go` and
+`providers.go`) and a
 `go.mod` go-directive extension point, while `di.go`
 and `loom_gen.go` alone are regenerated.
 
@@ -1218,6 +1236,78 @@ secret by restarting every instance together, and serve the application over
 HTTPS. Never put passwords, API keys or private data in claims: a JWT is signed,
 not encrypted. See `internal/jwtauth/README.md` in the generated project.
 
+## User accounts
+
+`weld add user --with-dependencies` installs `db` and `jwt` (and their chains),
+then adds the account table and the code around it. It follows the project's
+data/auth split rather than adding a top-level `internal/user` package:
+
+```
+db/migrations/000002_create_users.sql   goose schema
+db/query/users.sql                      named sqlc statements
+sqlc.yaml                               the existing single config
+internal/data/sqlc/users.sql.go         generated by `make sqlc` (not shipped)
+internal/data/user_repo.go              UserRepository over the generated queries
+internal/auth/user.go                   bcrypt registration/login + JWT issuance
+internal/di/user_provider.go            stable Loom seam
+```
+
+The table stores `id`, `username`, `password_hash`, `roles`, `created_at` and
+`updated_at`. `id` is a PostgreSQL `bigint GENERATED ALWAYS AS IDENTITY`, so it is
+a compact increasing number assigned by the database rather than a random
+string. It is not a secret: sequential IDs reveal creation order, so every
+read/write must still check ownership; add a separate opaque `public_id` if an
+API needs one. It never stores a plaintext password. The username is normalized
+to lower case by the service and the migration enforces
+`username = lower(username)` with a unique index, so `Alice` and `alice` are one
+account. New accounts have **no roles**.
+
+The service is the reusable account layer:
+
+```go
+accounts, err := auth.NewUserService(data.NewUserRepository(pool), tokens)
+if err != nil {
+	return err
+}
+account, err := accounts.Register(ctx, "alice", "correct horse battery staple")
+session, err := accounts.Login(ctx, "alice", "correct horse battery staple")
+// session.Account has no hash; session.Token is the JWT.
+```
+
+`Login` authenticates with bcrypt and then issues the token, so the subject is
+the decimal account ID and the claims carry the account's current roles. An unknown
+username and a wrong password both return `auth.ErrInvalidCredentials`, and the
+unknown path still runs a dummy bcrypt comparison to reduce account-enumeration
+timing. `Register` grants no roles; an administrator uses
+`accounts.SetRoles(ctx, id, []string{"admin"})` from a controlled command, a
+seeder or an existing administrator, never from an unauthenticated registration
+endpoint.
+
+Installing `user` creates no account and mounts no route. The Loom graph declares
+`NewUserService(pool, jwtManager)` but prunes it until a handler or policy
+consumes it, so an ordinary serve needs no database or JWT secret. Inject
+`*auth.UserService` into a module's `NewService` or into `NewHTTPPolicies`; the
+application still owns the login/registration handlers, their DTOs, rate
+limiting and HTTPS. See `internal/auth/README.md` in the generated project.
+
+The users migration is versioned `000002`. If the database already has later
+migrations, apply it explicitly:
+
+```sh
+weld db migrate up --allow-missing
+```
+
+Installing `user` does not ship generated code. Run the project's existing
+generator once before building:
+
+```sh
+make sqlc
+```
+
+It reads the same single `sqlc.yaml`, all migrations and all query files, and
+writes `internal/data/sqlc/users.sql.go` and the `User` model alongside the
+existing items output.
+
 ## Hooks
 
 `weld.yml` is user-owned, and hooks are the user-owned extension point for the
@@ -1464,6 +1554,15 @@ Test conventions:
   role checks). A scaffold test generates a project, adds jwt, proves the unused
   manager is pruned from the default Loom composition, and runs the generated
   project's gofmt/build/test.
+- The user capability ships a descriptor test (it requires `db` and `jwt`, uses
+  the single `sqlc.yaml`, keeps the repository in `internal/data` and the
+  account service in `internal/auth`, declares its provider seam and creates no
+  default account or route), plus unit tests for bcrypt registration, credential
+  failures, role normalization, token subject/roles, generated-row projections
+  and duplicate-user mapping. A scaffold test generates a project, adds user,
+  proves the unused account service is pruned from the default Loom composition,
+  runs `make sqlc`, then the generated project's gofmt/build/test, and proves a
+  second `make sqlc` leaves `internal/data/sqlc` byte-identical.
 - `internal/db` tests cover dsn resolution precedence (`DATABASE_URL`, an explicit
   dsn, the typed fields and `DB_*` overrides), a missing or invalid config,
   missing fields, the exact pinned goose command, the redacted display form,

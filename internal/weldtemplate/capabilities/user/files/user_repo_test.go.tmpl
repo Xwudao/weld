@@ -1,0 +1,72 @@
+package data
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	sqlc "__module__/internal/data/sqlc"
+)
+
+// TestUserAccountFromSQLC pins the credential-free projection: timestamps are
+// UTC and the roles slice is copied so generated state cannot be mutated through
+// the account.
+func TestUserAccountFromSQLC(t *testing.T) {
+	created := time.Date(2024, 5, 1, 12, 30, 0, 0, time.FixedZone("UTC+2", 2*60*60))
+	roles := []string{"admin", "ops"}
+	account := userAccountFromSQLC(sqlc.User{
+		ID:           1,
+		Username:     "alice",
+		PasswordHash: "hash",
+		Roles:        roles,
+		CreatedAt:    pgtype.Timestamptz{Time: created, Valid: true},
+		UpdatedAt:    pgtype.Timestamptz{Time: created.Add(time.Hour), Valid: true},
+	})
+	if account.ID != 1 || account.Username != "alice" {
+		t.Fatalf("account = %+v", account)
+	}
+	if account.CreatedAt.Location() != time.UTC || account.UpdatedAt.Location() != time.UTC {
+		t.Fatalf("timestamps are not UTC: %v / %v", account.CreatedAt, account.UpdatedAt)
+	}
+	account.Roles[0] = "changed"
+	if roles[0] != "admin" {
+		t.Fatal("userAccountFromSQLC aliased the generated roles slice")
+	}
+}
+
+// TestUserCredentialsFromSQLC keeps the hash only in the login projection.
+func TestUserCredentialsFromSQLC(t *testing.T) {
+	credentials := userCredentialsFromSQLC(sqlc.User{
+		ID:           1,
+		Username:     "alice",
+		PasswordHash: "hash",
+		Roles:        []string{"admin"},
+	})
+	if credentials.ID != 1 || credentials.Username != "alice" || credentials.PasswordHash != "hash" {
+		t.Fatalf("credentials = %+v", credentials)
+	}
+	if len(credentials.Roles) != 1 || credentials.Roles[0] != "admin" {
+		t.Fatalf("roles = %v", credentials.Roles)
+	}
+}
+
+// TestUserStoreErrorMapsExpectedOutcomes proves an absent row and a duplicate
+// username become stable data errors, while an unexpected failure keeps its
+// cause.
+func TestUserStoreErrorMapsExpectedOutcomes(t *testing.T) {
+	if err := userStoreError(pgx.ErrNoRows, "get"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("no rows mapped to %v, want ErrUserNotFound", err)
+	}
+	unique := &pgconn.PgError{Code: "23505"}
+	if err := userStoreError(unique, "create"); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("unique violation mapped to %v, want ErrUsernameTaken", err)
+	}
+	cause := errors.New("connection reset")
+	if err := userStoreError(cause, "create"); !errors.Is(err, cause) {
+		t.Fatalf("unexpected error lost its cause: %v", err)
+	}
+}

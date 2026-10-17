@@ -99,6 +99,31 @@ func TestMigrateBuildsThePinnedGooseCommand(t *testing.T) {
 	}
 }
 
+// TestMigrateAllowMissing pins the opt-in flag for an out-of-order migration:
+// it is placed before the database driver argument and is absent by default.
+func TestMigrateAllowMissing(t *testing.T) {
+	dir := fakeProject(t, true)
+	var gotArgs []string
+	runner := func(_ string, _ string, _ []string, args ...string) error {
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
+	result, err := Migrate(Request{Dir: dir, Action: ActionUp, AllowMissing: true, Runner: runner, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "-allow-missing postgres") {
+		t.Fatalf("args = %v, want -allow-missing before postgres", gotArgs)
+	}
+	if !strings.Contains(result.Step.Display, "-allow-missing postgres $DATABASE_URL up") {
+		t.Fatalf("display = %s", result.Step.Display)
+	}
+	if _, err := Migrate(Request{Dir: dir, Action: ActionStatus, AllowMissing: true, DryRun: true, LookupEnv: noEnv}); err == nil {
+		t.Fatal("status accepted --allow-missing")
+	}
+}
+
 // TestMigrateDownRequiresConfirmation proves the destructive action is refused
 // before any database connection.
 func TestMigrateDownRequiresConfirmation(t *testing.T) {

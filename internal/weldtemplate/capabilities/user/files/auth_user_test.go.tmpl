@@ -1,0 +1,254 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"strconv"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"__module__/internal/data"
+)
+
+const testPassword = "correct horse battery staple"
+
+// fakeUserStore is an in-memory UserStore: the service tests exercise
+// normalization, hashing and token issuance without PostgreSQL.
+type fakeUserStore struct {
+	accounts map[int64]data.UserAccount
+	hashes   map[int64]string
+	nextID   int64
+}
+
+func newFakeUserStore() *fakeUserStore {
+	return &fakeUserStore{accounts: map[int64]data.UserAccount{}, hashes: map[int64]string{}}
+}
+
+func (s *fakeUserStore) CreateUser(_ context.Context, create data.UserCreate) (data.UserAccount, error) {
+	for _, account := range s.accounts {
+		if account.Username == create.Username {
+			return data.UserAccount{}, data.ErrUsernameTaken
+		}
+	}
+	s.nextID++
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	account := data.UserAccount{
+		ID:        s.nextID,
+		Username:  create.Username,
+		Roles:     append([]string{}, create.Roles...),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.accounts[account.ID] = account
+	s.hashes[account.ID] = create.PasswordHash
+	return account, nil
+}
+
+func (s *fakeUserStore) FindUserByUsername(_ context.Context, username string) (data.UserCredentials, error) {
+	for _, account := range s.accounts {
+		if account.Username == username {
+			return data.UserCredentials{
+				ID:           account.ID,
+				Username:     account.Username,
+				PasswordHash: s.hashes[account.ID],
+				Roles:        append([]string{}, account.Roles...),
+			}, nil
+		}
+	}
+	return data.UserCredentials{}, data.ErrUserNotFound
+}
+
+func (s *fakeUserStore) GetUser(_ context.Context, id int64) (data.UserAccount, error) {
+	account, ok := s.accounts[id]
+	if !ok {
+		return data.UserAccount{}, data.ErrUserNotFound
+	}
+	return account, nil
+}
+
+func (s *fakeUserStore) SetUserRoles(_ context.Context, id int64, roles []string) (data.UserAccount, error) {
+	account, ok := s.accounts[id]
+	if !ok {
+		return data.UserAccount{}, data.ErrUserNotFound
+	}
+	account.Roles = append([]string{}, roles...)
+	account.UpdatedAt = account.UpdatedAt.Add(time.Minute)
+	s.accounts[id] = account
+	return account, nil
+}
+
+type fakeTokens struct {
+	calls   int
+	subject string
+	roles   []string
+	err     error
+}
+
+func (f *fakeTokens) Issue(subject string, roles []string) (string, error) {
+	f.calls++
+	f.subject = subject
+	f.roles = append([]string(nil), roles...)
+	if f.err != nil {
+		return "", f.err
+	}
+	return "token", nil
+}
+
+func newTestUserService(t *testing.T) (*UserService, *fakeUserStore, *fakeTokens) {
+	t.Helper()
+	store := newFakeUserStore()
+	tokens := &fakeTokens{}
+	service, err := NewUserService(store, tokens)
+	if err != nil {
+		t.Fatalf("NewUserService: %v", err)
+	}
+	return service, store, tokens
+}
+
+func TestRegisterNormalizesUsernameAndHashesPassword(t *testing.T) {
+	service, store, _ := newTestUserService(t)
+	account, err := service.Register(context.Background(), "  Alice ", testPassword)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if account.Username != "alice" {
+		t.Fatalf("username = %q, want alice", account.Username)
+	}
+	if len(account.Roles) != 0 {
+		t.Fatalf("roles = %v, want none", account.Roles)
+	}
+	if account.ID <= 0 {
+		t.Fatalf("account id = %d, want a positive database identity", account.ID)
+	}
+	if account.CreatedAt.IsZero() || account.UpdatedAt.IsZero() {
+		t.Fatalf("timestamps were not stored: %+v", account)
+	}
+
+	hash := store.hashes[account.ID]
+	if hash == testPassword || hash == "" {
+		t.Fatalf("password hash = %q, want a bcrypt hash", hash)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(testPassword)); err != nil {
+		t.Fatalf("stored hash does not verify: %v", err)
+	}
+
+	if _, err := service.Register(context.Background(), "ALICE", testPassword); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("duplicate register error = %v, want ErrUsernameTaken", err)
+	}
+}
+
+func TestRegisterRejectsInvalidUsernameAndPassword(t *testing.T) {
+	service, _, _ := newTestUserService(t)
+	for _, username := range []string{"ab", "bad name", "bad!", "bad/name"} {
+		if _, err := service.Register(context.Background(), username, testPassword); !errors.Is(err, ErrInvalidUsername) {
+			t.Errorf("Register(%q) error = %v, want ErrInvalidUsername", username, err)
+		}
+	}
+	for _, password := range []string{"short", string(make([]byte, MaxPasswordBytes+1))} {
+		if _, err := service.Register(context.Background(), "alice", password); !errors.Is(err, ErrPasswordTooShort) &&
+			!errors.Is(err, ErrPasswordTooLong) {
+			t.Errorf("Register password length %d error = %v, want a password length error", len(password), err)
+		}
+	}
+}
+
+func TestLoginIssuesTokenWithAccountIDAndRoles(t *testing.T) {
+	service, _, tokens := newTestUserService(t)
+	account, err := service.Register(context.Background(), "alice", testPassword)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	account, err = service.SetRoles(context.Background(), account.ID, []string{"Admin", "admin", "ops"})
+	if err != nil {
+		t.Fatalf("SetRoles: %v", err)
+	}
+	if len(account.Roles) != 2 || account.Roles[0] != "admin" || account.Roles[1] != "ops" {
+		t.Fatalf("roles = %v, want normalized [admin ops]", account.Roles)
+	}
+
+	session, err := service.Login(context.Background(), " ALICE ", testPassword)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if session.Token != "token" {
+		t.Fatalf("token = %q", session.Token)
+	}
+	if want := strconv.FormatInt(account.ID, 10); tokens.subject != want {
+		t.Fatalf("token subject = %q, want account id %q", tokens.subject, want)
+	}
+	if len(tokens.roles) != 2 || tokens.roles[0] != "admin" || tokens.roles[1] != "ops" {
+		t.Fatalf("token roles = %v", tokens.roles)
+	}
+}
+
+func TestAuthenticateDoesNotRevealWhyCredentialsFailed(t *testing.T) {
+	service, _, tokens := newTestUserService(t)
+	if _, err := service.Register(context.Background(), "alice", testPassword); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	for name, credentials := range map[string]struct {
+		username string
+		password string
+	}{
+		"wrong password":   {"alice", "wrong password"},
+		"unknown username": {"bob", testPassword},
+		"invalid username": {"bad name", testPassword},
+	} {
+		_, err := service.Authenticate(context.Background(), credentials.username, credentials.password)
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Errorf("%s error = %v, want ErrInvalidCredentials", name, err)
+		}
+	}
+	if tokens.calls != 0 {
+		t.Fatalf("authentication failures issued %d token(s)", tokens.calls)
+	}
+}
+
+func TestIssueTokenRequiresAPositiveAccountID(t *testing.T) {
+	service, _, tokens := newTestUserService(t)
+	for _, id := range []int64{0, -1} {
+		if _, err := service.IssueToken(data.UserAccount{ID: id}); !errors.Is(err, ErrInvalidAccountID) {
+			t.Fatalf("IssueToken(id=%d) error = %v, want ErrInvalidAccountID", id, err)
+		}
+	}
+	account, err := service.Register(context.Background(), "alice", testPassword)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	session, err := service.Login(context.Background(), "alice", testPassword)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if session.Token != "token" || tokens.subject != "1" || account.ID != 1 {
+		t.Fatalf("session = %+v, token subject = %q, account id = %d", session, tokens.subject, account.ID)
+	}
+}
+
+func TestGetAndSetRolesUseTheStore(t *testing.T) {
+	service, _, _ := newTestUserService(t)
+	account, err := service.Register(context.Background(), "alice", testPassword)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	got, err := service.Get(context.Background(), account.ID)
+	if err != nil || got.ID != account.ID {
+		t.Fatalf("Get = %+v, %v", got, err)
+	}
+	if _, err := service.Get(context.Background(), 999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing Get error = %v, want ErrNotFound", err)
+	}
+	if _, err := service.SetRoles(context.Background(), account.ID, []string{" "}); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("blank role error = %v, want ErrInvalidRole", err)
+	}
+}
+
+func TestNewUserServiceRequiresBothDependencies(t *testing.T) {
+	if _, err := NewUserService(nil, &fakeTokens{}); err == nil {
+		t.Fatal("NewUserService accepted a nil store")
+	}
+	if _, err := NewUserService(newFakeUserStore(), nil); err == nil {
+		t.Fatal("NewUserService accepted a nil token issuer")
+	}
+}

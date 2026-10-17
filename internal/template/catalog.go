@@ -99,6 +99,10 @@ type Capability struct {
 	Requires []string `json:"requires"`
 	Files    []File   `json:"files"`
 	Patches  []Patch  `json:"patches"`
+	// PostInstall carries human-readable next steps shown after a successful
+	// install, for a capability whose payload needs a project generator to run
+	// (for example sqlc) before the project builds.
+	PostInstall []string `json:"postInstall,omitempty"`
 	// DI declares a capability's Loom dependency-graph contribution. It is
 	// rendered per installed capability set when the capability is installed, so
 	// the composed application follows the installed capabilities without a

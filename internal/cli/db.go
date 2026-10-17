@@ -62,6 +62,9 @@ func newDBMigrateCommand(action, short string, destructive bool) *cobra.Command 
 	if destructive {
 		cmd.Flags().Bool("yes", false, "confirm reverting the latest migration")
 	}
+	if action == string(db.ActionUp) {
+		cmd.Flags().Bool("allow-missing", false, "apply out-of-order migrations older than the current version")
+	}
 	return cmd
 }
 
@@ -90,15 +93,23 @@ func runDBMigrate(cmd *cobra.Command, action db.Action, destructive bool) error 
 			confirm = true
 		}
 	}
+	allowMissing := false
+	if action == db.ActionUp {
+		allowMissing, err = cmd.Flags().GetBool("allow-missing")
+		if err != nil {
+			return err
+		}
+	}
 
 	result, err := db.Migrate(db.Request{
-		Dir:        dir,
-		ConfigPath: configPath,
-		Action:     action,
-		Confirm:    confirm,
-		DryRun:     dryRun,
-		Stdout:     stdout,
-		Stderr:     cmd.ErrOrStderr(),
+		Dir:          dir,
+		ConfigPath:   configPath,
+		Action:       action,
+		Confirm:      confirm,
+		AllowMissing: allowMissing,
+		DryRun:       dryRun,
+		Stdout:       stdout,
+		Stderr:       cmd.ErrOrStderr(),
 	})
 	if err != nil {
 		return err
@@ -143,6 +154,8 @@ func dbHelp() string {
 	return `Run the project's SQL migrations with the goose tool pinned in db/tools.
 
   weld db migrate up        apply every pending migration
+  weld db migrate up --allow-missing
+                            apply a migration older than the DB's current version
   weld db migrate status    show which migrations are applied
   weld db migrate down      revert exactly one migration (requires --yes or CONFIRM=1)
   weld db create <name>     write db/migrations/<timestamp>_<name>.sql

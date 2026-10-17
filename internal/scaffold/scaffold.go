@@ -355,6 +355,9 @@ func (p *planner) installCapability(capability *template.Capability) error {
 		}
 	}
 	p.manifest.AddCapability(project.CapabilityRef{Name: capability.Name, Version: capability.Version})
+	for _, note := range capability.PostInstall {
+		p.result.Notes = append(p.result.Notes, string(template.Render([]byte(note), vars)))
+	}
 	p.result.Installed = append(p.result.Installed, capability.Name)
 	return nil
 }

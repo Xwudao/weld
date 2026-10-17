@@ -1,0 +1,159 @@
+package data
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	sqlc "__module__/internal/data/sqlc"
+)
+
+// User errors are separate from ErrNotFound so an item lookup and an account
+// lookup cannot be confused by a caller that only cares about one of them.
+var (
+	ErrUserNotFound  = errors.New("data: user not found")
+	ErrUsernameTaken = errors.New("data: username already exists")
+)
+
+// UserRepository is the account persistence contract.
+//
+// It is the union of the reads and writes the account service needs; a consumer
+// that needs less can declare a narrower interface against the same methods.
+// Password hashes leave this package only through UserCredentials, which the
+// login path asks for explicitly.
+type UserRepository interface {
+	CreateUser(ctx context.Context, create UserCreate) (UserAccount, error)
+	FindUserByUsername(ctx context.Context, username string) (UserCredentials, error)
+	GetUser(ctx context.Context, id int64) (UserAccount, error)
+	SetUserRoles(ctx context.Context, id int64, roles []string) (UserAccount, error)
+}
+
+// UserAccount is one account without its password hash.
+//
+// It is the projection every response and every authenticated identity is built
+// from. It deliberately has no JSON tags: the HTTP DTO owns the wire shape.
+type UserAccount struct {
+	ID        int64
+	Username  string
+	Roles     []string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// UserCredentials is the account a password login checks: the identity plus the
+// stored bcrypt hash. It is the only projection that carries the hash, and only
+// the login service asks for it.
+type UserCredentials struct {
+	ID           int64
+	Username     string
+	PasswordHash string
+	Roles        []string
+}
+
+// UserCreate is the account a registration writes. PasswordHash is already
+// hashed by the account service; the plaintext password never reaches this
+// package.
+type UserCreate struct {
+	Username     string
+	PasswordHash string
+	Roles        []string
+}
+
+// PostgresUserRepository is the pgx-backed UserRepository.
+type PostgresUserRepository struct {
+	queries *sqlc.Queries
+}
+
+// NewUserRepository returns the PostgreSQL account repository backed by pool.
+//
+// The pool is injected, so the application owns its lifecycle and a test can
+// supply its own. Construction does not connect.
+func NewUserRepository(pool *pgxpool.Pool) *PostgresUserRepository {
+	return &PostgresUserRepository{queries: sqlc.New(pool)}
+}
+
+// CreateUser inserts an account and returns its credential-free projection.
+func (r *PostgresUserRepository) CreateUser(ctx context.Context, create UserCreate) (UserAccount, error) {
+	row, err := r.queries.CreateUser(ctx, sqlc.CreateUserParams{
+		Username:     create.Username,
+		PasswordHash: create.PasswordHash,
+		Roles:        append([]string{}, create.Roles...),
+	})
+	if err != nil {
+		return UserAccount{}, userStoreError(err, "create user")
+	}
+	return userAccountFromSQLC(row), nil
+}
+
+// FindUserByUsername returns the stored credentials for username.
+func (r *PostgresUserRepository) FindUserByUsername(ctx context.Context, username string) (UserCredentials, error) {
+	row, err := r.queries.GetUserByUsername(ctx, username)
+	if err != nil {
+		return UserCredentials{}, userStoreError(err, "find user by username")
+	}
+	return userCredentialsFromSQLC(row), nil
+}
+
+// GetUser returns the credential-free account with id, or ErrUserNotFound.
+func (r *PostgresUserRepository) GetUser(ctx context.Context, id int64) (UserAccount, error) {
+	row, err := r.queries.GetUserByID(ctx, id)
+	if err != nil {
+		return UserAccount{}, userStoreError(err, "get user")
+	}
+	return userAccountFromSQLC(row), nil
+}
+
+// SetUserRoles replaces the account's roles and returns the updated account.
+func (r *PostgresUserRepository) SetUserRoles(ctx context.Context, id int64, roles []string) (UserAccount, error) {
+	row, err := r.queries.SetUserRoles(ctx, sqlc.SetUserRolesParams{
+		ID:    id,
+		Roles: append([]string{}, roles...),
+	})
+	if err != nil {
+		return UserAccount{}, userStoreError(err, "set user roles")
+	}
+	return userAccountFromSQLC(row), nil
+}
+
+// userAccountFromSQLC narrows a generated row to the credential-free account.
+// It is the only place that knows the generated row shape, so sqlc detail does
+// not leak past this package.
+func userAccountFromSQLC(row sqlc.User) UserAccount {
+	return UserAccount{
+		ID:        row.ID,
+		Username:  row.Username,
+		Roles:     append([]string{}, row.Roles...),
+		CreatedAt: row.CreatedAt.Time.UTC(),
+		UpdatedAt: row.UpdatedAt.Time.UTC(),
+	}
+}
+
+// userCredentialsFromSQLC narrows a generated row to the login projection,
+// keeping the password hash.
+func userCredentialsFromSQLC(row sqlc.User) UserCredentials {
+	return UserCredentials{
+		ID:           row.ID,
+		Username:     row.Username,
+		PasswordHash: row.PasswordHash,
+		Roles:        append([]string{}, row.Roles...),
+	}
+}
+
+// userStoreError maps the expected database outcomes to stable package errors
+// and wraps everything else with the operation. It never includes the SQL or an
+// argument, so a password hash cannot enter an error record.
+func userStoreError(err error, operation string) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrUserNotFound
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return ErrUsernameTaken
+	}
+	return fmt.Errorf("data: %s: %w", operation, err)
+}

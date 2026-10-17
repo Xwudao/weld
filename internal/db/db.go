@@ -77,6 +77,9 @@ type Request struct {
 	Action Action
 	// Confirm is required for down: it reverts exactly one migration.
 	Confirm bool
+	// AllowMissing lets up apply a migration whose version is older than the
+	// current database version. It is only meaningful for up.
+	AllowMissing bool
 	// DryRun plans the command without running it.
 	DryRun bool
 	// Stdout and Stderr receive the command's output.
@@ -132,6 +135,9 @@ func Migrate(req Request) (*Result, error) {
 	if req.Action == ActionDown && !req.Confirm {
 		return nil, errors.New("weld db migrate down reverts the latest migration; re-run with --yes or CONFIRM=1")
 	}
+	if req.AllowMissing && req.Action != ActionUp {
+		return nil, errors.New("weld db: --allow-missing is only valid with migrate up")
+	}
 
 	manifest, err := project.Load(dir)
 	if err != nil {
@@ -153,7 +159,7 @@ func Migrate(req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	step := gooseStep(filepath.Join(dir, ToolsDir), dsn, req.Action)
+	step := gooseStep(filepath.Join(dir, ToolsDir), dsn, req.Action, req.AllowMissing)
 	result := &Result{Action: req.Action, Step: step, Source: source}
 	if req.DryRun {
 		return result, nil
@@ -173,15 +179,19 @@ func Migrate(req Request) (*Result, error) {
 // gooseStep builds the pinned-tool command. The dsn is an argv element because
 // that is how goose receives a database target; it is deliberately omitted from
 // Display so output and dry runs never echo a credential.
-func gooseStep(toolsDir, dsn string, action Action) Step {
+func gooseStep(toolsDir, dsn string, action Action, allowMissing bool) Step {
 	args := []string{
 		"tool", "goose",
 		"-dir", "../migrations",
 		"-table", gooseTable,
-		"postgres", dsn,
-		string(action),
 	}
-	display := []string{"go", "tool", "goose", "-dir", "../migrations", "-table", gooseTable, "postgres", "$DATABASE_URL", string(action)}
+	display := []string{"go", "tool", "goose", "-dir", "../migrations", "-table", gooseTable}
+	if allowMissing {
+		args = append(args, "-allow-missing")
+		display = append(display, "-allow-missing")
+	}
+	args = append(args, "postgres", dsn, string(action))
+	display = append(display, "postgres", "$DATABASE_URL", string(action))
 	return Step{
 		Name:    "go",
 		Dir:     toolsDir,
