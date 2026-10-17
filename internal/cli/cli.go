@@ -115,12 +115,12 @@ func newNewCommand() *cobra.Command {
 // separate from the additive capability set.
 func newAddCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "add <capability>",
+		Use:   "add <capability> [capability...]",
 		Short: "additively extend an existing project in place",
 		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("usage: %s add <capability> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName)
+			if len(args) < 1 {
+				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName)
 			}
 			return nil
 		},
@@ -135,7 +135,7 @@ func newAddCommand() *cobra.Command {
 // capability list that could go stale when a template capability is added.
 func addHelp() string {
 	var b strings.Builder
-	b.WriteString("Add a capability to an existing project.\n\nAvailable capabilities:\n")
+	b.WriteString("Add one or more capabilities to an existing project.\n\nAvailable capabilities:\n")
 	catalog := template.Load()
 	names, err := catalog.Names()
 	if err != nil {
@@ -148,7 +148,10 @@ func addHelp() string {
 		}
 		fmt.Fprintf(&b, "  %-9s %s\n", name, capability.Summary)
 	}
-	b.WriteString("\nA capability's required capabilities are not installed automatically: a")
+	b.WriteString("\nSeveral capabilities can be added in one command (`weld add loom http redis`);")
+	b.WriteString("\nthey share one plan, so a requirement they have in common is installed once,")
+	b.WriteString("\nand naming more than one implies --with-dependencies.")
+	b.WriteString("\n\nA single capability's required capabilities are not installed automatically: a")
 	b.WriteString("\nmissing requirement is an error unless --with-dependencies is given.")
 	b.WriteString("\n\n`weld add seeder <name>` writes internal/data/seeder/seed_<name>.go and")
 	b.WriteString("\nregisters it in the seed capability's register.go index.")
@@ -940,8 +943,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Naming several capabilities is already an explicit request for the set, so
+	// their shared requirement chain is installed without repeating the opt-in.
+	if len(args) > 1 {
+		withDependencies = true
+	}
 
-	result, err := scaffold.Add(scaffold.Request{Dir: dir, Catalog: template.Load(), WithDependencies: withDependencies}, args[0])
+	result, err := scaffold.Add(scaffold.Request{Dir: dir, Catalog: template.Load(), WithDependencies: withDependencies}, args...)
 	if err != nil {
 		return err
 	}

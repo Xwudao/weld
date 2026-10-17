@@ -130,6 +130,56 @@ func TestAddHTTPThenWebInstallsEachOnce(t *testing.T) {
 	}
 }
 
+func TestAddMultipleCapabilitiesInOneCommand(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	project := filepath.Join(root, "demo")
+
+	// Naming several capabilities implies --with-dependencies, so the shared
+	// config/loom chain is installed without the flag.
+	out, err := run(t, "add", "loom", "http", "redis", "--dir", project)
+	if err != nil {
+		t.Fatalf("add loom http redis: %v", err)
+	}
+	if !strings.Contains(out, "Applied") {
+		t.Fatalf("add output = %q", out)
+	}
+	for _, path := range []string{
+		"internal/httpserver/handler.go",
+		"internal/redisclient/redisclient.go",
+		"internal/di/redis_provider.go",
+	} {
+		if _, err := os.Stat(filepath.Join(project, path)); err != nil {
+			t.Errorf("add did not write %s: %v", path, err)
+		}
+	}
+
+	// A second call with one installed and one new capability installs only the
+	// new one and explains the installed one.
+	out, err = run(t, "add", "redis", "mail", "--dir", project)
+	if err != nil {
+		t.Fatalf("add redis mail: %v", err)
+	}
+	if !strings.Contains(out, "redis 0.1.0 is already installed") {
+		t.Fatalf("repeat capability note missing: %q", out)
+	}
+	if strings.Contains(out, "installing required capability \"redis\"") {
+		t.Fatalf("add reinstalled redis: %q", out)
+	}
+
+	listOut, err := run(t, "list", "--dir", project)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, capability := range []string{"http", "redis", "mail"} {
+		if !strings.Contains(listOut, "* "+capability) {
+			t.Errorf("%s not marked installed in list output: %q", capability, listOut)
+		}
+	}
+}
+
 func TestAddSeederSubcommand(t *testing.T) {
 	root := t.TempDir()
 	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {

@@ -56,26 +56,37 @@ func capabilityNames(order []*template.Capability) []string {
 	return names
 }
 
-// capabilityNamesExcept returns the names of order except excluded, in order.
-func capabilityNamesExcept(order []*template.Capability, excluded string) []string {
+// capabilityNamesExcept returns the names of order that are not in excluded, in
+// order.
+func capabilityNamesExcept(order []*template.Capability, excluded ...*template.Capability) []string {
+	skip := make(map[string]bool, len(excluded))
+	for _, capability := range excluded {
+		skip[capability.Name] = true
+	}
 	var names []string
 	for _, capability := range order {
-		if capability.Name != excluded {
+		if !skip[capability.Name] {
 			names = append(names, capability.Name)
 		}
 	}
 	return names
 }
 
-// requiredCapabilities returns the capabilities an Add plan installs for
-// requested: its transitive requirements first, then requested itself, plus Loom
-// (and the config Loom requires) when Loom is not already accounted for.
-// Capabilities already recorded in the manifest are excluded, so the result is
-// exactly what the plan would write.
-func requiredCapabilities(catalog *template.Catalog, manifest *project.Manifest, requested *template.Capability) ([]*template.Capability, error) {
-	order, err := installOrder(catalog, manifest, requested, map[string]bool{})
-	if err != nil {
-		return nil, err
+// requiredCapabilities returns the capabilities an Add plan installs for the
+// requested capabilities: their transitive requirements first, then each
+// requested capability itself, plus Loom (and the config Loom requires) when
+// Loom is not already accounted for. All requests share one install order, so a
+// requirement two of them need is planned once. Capabilities already recorded in
+// the manifest are excluded, so the result is exactly what the plan would write.
+func requiredCapabilities(catalog *template.Catalog, manifest *project.Manifest, requested ...*template.Capability) ([]*template.Capability, error) {
+	selected := map[string]bool{}
+	var order []*template.Capability
+	for _, capability := range requested {
+		installed, err := installOrder(catalog, manifest, capability, selected)
+		if err != nil {
+			return nil, err
+		}
+		order = append(order, installed...)
 	}
 	// Every capability except the bare base CLI is developed on Loom, so adding
 	// anything plans Loom (and the config it requires) unless it is already
@@ -86,7 +97,7 @@ func requiredCapabilities(catalog *template.Catalog, manifest *project.Manifest,
 		if err != nil {
 			return nil, err
 		}
-		loomOrder, err := installOrder(catalog, manifest, loomCapability, selected(order))
+		loomOrder, err := installOrder(catalog, manifest, loomCapability, selected)
 		if err != nil {
 			return nil, err
 		}

@@ -459,44 +459,59 @@ func (p *planner) writeManifest() error {
 	return nil
 }
 
-// Add plans installing an additive capability into an existing project.
+// Add plans installing one or more additive capabilities into an existing
+// project.
 //
-// A missing requirement is an error by default, naming the capabilities that
+// The capabilities share one plan, so a requirement two of them need is
+// installed once and requested capabilities are installed in argument order. A
+// missing requirement is an error by default, naming the capabilities that
 // would be installed; Request.WithDependencies opts into installing them in the
 // same plan. Capabilities already recorded in the manifest are excluded, so a
 // repeat add is a no-op that only refreshes the generated graph.
-func Add(req Request, name string) (*Result, error) {
+func Add(req Request, names ...string) (*Result, error) {
+	if len(names) == 0 {
+		return nil, errors.New("at least one capability is required")
+	}
 	manifest, err := project.Load(req.Dir)
 	if err != nil {
 		return nil, err
 	}
-	requested, err := req.Catalog.Get(name)
+	requested, err := requestedCapabilities(req.Catalog, names)
 	if err != nil {
 		return nil, err
 	}
-	if requested.Kind != template.KindAdd {
-		return nil, fmt.Errorf("capability %q is not an additive capability", name)
-	}
 
-	result := &Result{Dir: req.Dir, Capability: requested}
-	// An installed capability owns its files: a repeat add is a no-op that only
-	// refreshes the generated graph, and it never installs a requirement.
-	if manifest.HasCapability(name) {
-		result.Notes = alreadyInstalledNotes(req.Dir, manifest, requested)
+	result := &Result{Dir: req.Dir, Capability: requested[0]}
+	var installed, pending []*template.Capability
+	for _, capability := range requested {
+		if manifest.HasCapability(capability.Name) {
+			installed = append(installed, capability)
+			continue
+		}
+		pending = append(pending, capability)
+	}
+	if len(installed) > 0 {
+		result.Notes = append(result.Notes, alreadyInstalledNotes(req.Dir, manifest, installed...)...)
+	}
+	// An installed capability owns its files: when every requested capability is
+	// already installed, the repeat add is a no-op that only refreshes the
+	// generated graph, and it never installs a requirement.
+	if len(pending) == 0 {
 		return result, reconcileInstalled(req, manifest, result)
 	}
 
-	order, err := requiredCapabilities(req.Catalog, manifest, requested)
+	order, err := requiredCapabilities(req.Catalog, manifest, pending...)
 	if err != nil {
 		return nil, err
 	}
 	// Dependencies are never installed silently: a missing requirement is an
-	// error unless the caller opted in with WithDependencies.
-	if missing := capabilityNamesExcept(order, name); len(missing) > 0 && !req.WithDependencies {
-		return nil, &MissingRequirementsError{Subject: fmt.Sprintf("capability %q", name), Missing: missing}
+	// error unless the caller opted in with WithDependencies. A requested
+	// capability that another request needs is part of the plan, not missing.
+	if missing := capabilityNamesExcept(order, pending...); len(missing) > 0 && !req.WithDependencies {
+		return nil, &MissingRequirementsError{Subject: capabilitySubject(pending), Missing: missing}
 	}
 	for _, capability := range order {
-		if capability.Name != requested.Name {
+		if !containsCapability(pending, capability.Name) {
 			result.Notes = append(result.Notes, fmt.Sprintf("installing required capability %q", capability.Name))
 		}
 	}
@@ -511,6 +526,38 @@ func Add(req Request, name string) (*Result, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// requestedCapabilities resolves names to additive capabilities, preserving
+// argument order and dropping duplicates so one plan never installs a
+// capability twice.
+func requestedCapabilities(catalog *template.Catalog, names []string) ([]*template.Capability, error) {
+	seen := make(map[string]bool, len(names))
+	requested := make([]*template.Capability, 0, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		capability, err := catalog.Get(name)
+		if err != nil {
+			return nil, err
+		}
+		if capability.Kind != template.KindAdd {
+			return nil, fmt.Errorf("capability %q is not an additive capability", name)
+		}
+		requested = append(requested, capability)
+	}
+	return requested, nil
+}
+
+// capabilitySubject names the requested capabilities in a missing-requirement
+// error, keeping the single-capability wording unchanged.
+func capabilitySubject(requested []*template.Capability) string {
+	if len(requested) == 1 {
+		return fmt.Sprintf("capability %q", requested[0].Name)
+	}
+	return fmt.Sprintf("capabilities %s", quoteNames(capabilityNames(requested)))
 }
 
 // reconcileInstalled re-renders the generated dependency graph for an unchanged
@@ -720,14 +767,17 @@ func bootstrapContent(root, path string, patch template.Patch, manifest *project
 	return content, nil
 }
 
-func alreadyInstalledNotes(root string, manifest *project.Manifest, capability *template.Capability) []string {
-	recorded := manifest.CapabilityVersion(capability.Name)
-	notes := []string{fmt.Sprintf("%s %s is already installed", capability.Name, recorded)}
-	// A repeat add never upgrades: the payload that would move the project
-	// forward is `weld upgrade`, so point at it rather than leaving the newer
-	// version undiscovered.
-	if newer, err := semver.IsNewer(capability.Version, recorded); err == nil && newer {
-		notes = append(notes, fmt.Sprintf("this weld ships %s %s; run: weld upgrade %s", capability.Name, capability.Version, capability.Name))
+func alreadyInstalledNotes(root string, manifest *project.Manifest, capabilities ...*template.Capability) []string {
+	var notes []string
+	for _, capability := range capabilities {
+		recorded := manifest.CapabilityVersion(capability.Name)
+		notes = append(notes, fmt.Sprintf("%s %s is already installed", capability.Name, recorded))
+		// A repeat add never upgrades: the payload that would move the project
+		// forward is `weld upgrade`, so point at it rather than leaving the newer
+		// version undiscovered.
+		if newer, err := semver.IsNewer(capability.Version, recorded); err == nil && newer {
+			notes = append(notes, fmt.Sprintf("this weld ships %s %s; run: weld upgrade %s", capability.Name, capability.Version, capability.Name))
+		}
 	}
 	drift := manifest.Drift(root)
 	if len(drift) == 0 {

@@ -49,7 +49,7 @@ runtime. Template changes and the CLI are tested and released together.
 
 ```
 weld new <name> [--module path] [--dir dir] [--dry-run]
-weld add <capability> [--dir dir] [--dry-run]
+weld add <capability> [capability...] [--dir dir] [--dry-run]
 weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
@@ -254,7 +254,10 @@ Capabilities:
 
 Requirements are never installed silently. `weld add <capability>` on a project
 that lacks one of its requirements fails and names the missing capabilities;
-`--with-dependencies` installs the whole chain in the same plan. `loom` requires
+`--with-dependencies` installs the whole chain in the same plan. Several
+capabilities can be named in one command (`weld add loom http redis`); they
+share one plan, so a requirement they have in common is installed once, and
+naming more than one implies `--with-dependencies`. `loom` requires
 `config`, and every capability requires `loom`, so the opt-in installs Loom and
 the shared loader together and the user never adds `config` by hand. On a fresh project it generates the local `config.yml`
 (git-ignored) from the committed `config.example.yml` and appends only the

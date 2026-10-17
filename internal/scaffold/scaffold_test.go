@@ -40,14 +40,14 @@ func create(t *testing.T, root string) string {
 	return filepath.Join(root, testName)
 }
 
-func add(t *testing.T, dir, name string) *Result {
+func add(t *testing.T, dir string, names ...string) *Result {
 	t.Helper()
-	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, name)
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, names...)
 	if err != nil {
-		t.Fatalf("Add %s: %v", name, err)
+		t.Fatalf("Add %s: %v", strings.Join(names, " "), err)
 	}
 	if err := result.Apply(); err != nil {
-		t.Fatalf("Apply add %s: %v", name, err)
+		t.Fatalf("Apply add %s: %v", strings.Join(names, " "), err)
 	}
 	return result
 }
@@ -268,6 +268,78 @@ func TestAddWebInstallsHTTPDependency(t *testing.T) {
 
 	if !buildAndTestGeneratedProject(t, dir) {
 		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
+
+func TestAddMultipleCapabilitiesSharesOnePlan(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+
+	result := add(t, dir, "loom", "http", "redis")
+	if got, want := strings.Join(result.Installed, ","), "config,loom,http,redis"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
+	}
+	for _, path := range []string{
+		"internal/config/config.go",
+		"internal/di/di.go",
+		"internal/di/redis_provider.go",
+		"internal/httpserver/handler.go",
+		"internal/redisclient/redisclient.go",
+		"internal/app/serve.go",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
+			t.Errorf("expected %s: %v", path, err)
+		}
+	}
+	manifest, err := project.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, capability := range []string{"config", "loom", "http", "redis"} {
+		if !manifest.HasCapability(capability) {
+			t.Errorf("%s not recorded in the manifest", capability)
+		}
+	}
+	if len(manifest.Drift(dir)) != 0 {
+		t.Fatalf("drift after add: %+v", manifest.Drift(dir))
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
+
+// TestAddMultipleCapabilitiesDeduplicates proves a capability named twice is
+// installed once, so a repeated argument cannot plan one file twice.
+func TestAddMultipleCapabilitiesDeduplicates(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+
+	result := add(t, dir, "redis", "redis")
+	if got, want := strings.Join(result.Installed, ","), "config,loom,redis"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
+	}
+}
+
+// TestAddMultipleMissingRequirementsErrorsByDefault proves the aggregate error
+// names both requested capabilities and every missing requirement, without
+// repeating a requirement two requests share.
+func TestAddMultipleMissingRequirementsErrorsByDefault(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+
+	_, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "http", "redis")
+	missing, ok := err.(*MissingRequirementsError)
+	if !ok {
+		t.Fatalf("Add http redis error = %v, want *MissingRequirementsError", err)
+	}
+	if got, want := strings.Join(missing.Missing, ","), "config,loom"; got != want {
+		t.Fatalf("missing = %q, want %q", got, want)
+	}
+	if !strings.Contains(err.Error(), `capabilities "http" and "redis"`) {
+		t.Fatalf("error does not name both requested capabilities: %v", err)
 	}
 }
 
