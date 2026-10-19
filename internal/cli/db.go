@@ -167,5 +167,9 @@ DATABASE_URL, which takes precedence. An empty DATABASE_URL is ignored. The dsn
 is passed to goose but never printed: dry runs show $DATABASE_URL instead.
 
 --config names a different application configuration file, relative to --dir.
-down reverts one migration and refuses to run without an explicit confirmation.`
+down reverts one migration and refuses to run without an explicit confirmation.
+
+The PostgreSQL integration tests use a separate test database, not the dsn
+above: configure database_test in config.yml (or set PG_TEST_DSN) and run
+weld test. See internal/data/README.md.`
 }

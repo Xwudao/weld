@@ -234,6 +234,8 @@ func TestDBCapabilityRequiresLoomNeverHTTP(t *testing.T) {
 		"internal/data/sqlc/items.sql.go",
 		"internal/data/data_test.go",
 		"internal/data/postgres_integration_test.go",
+		"internal/testdb/testdb.go",
+		"internal/testdb/testdb_test.go",
 		"internal/data/README.md",
 	} {
 		if !paths[want] {
@@ -461,15 +463,29 @@ func TestDBCapabilityMigrationAndTestSafety(t *testing.T) {
 	if strings.Contains(testText, "DROP TABLE") {
 		t.Errorf("db integration test drops tables outside its own schema:\n%s", testText)
 	}
+	if !strings.Contains(testText, "testdb.Pool(t)") {
+		t.Errorf("db integration test does not use the testdb helper:\n%s", testText)
+	}
+
+	helper, err := fs.ReadFile(FS(), "capabilities/db/files/testdb.go.tmpl")
+	if err != nil {
+		t.Fatalf("read db testdb helper: %v", err)
+	}
+	helperText := string(helper)
+	if strings.Contains(helperText, "DROP TABLE") {
+		t.Errorf("db testdb helper drops tables outside its own schema:\n%s", helperText)
+	}
 	for _, want := range []string{
 		"CREATE SCHEMA",
 		"search_path",
 		"DROP SCHEMA",
 		"CASCADE",
 		"PG_TEST_DSN",
+		"WELD_REQUIRE_DB_TESTS",
+		"database_test",
 	} {
-		if !strings.Contains(testText, want) {
-			t.Errorf("db integration test is missing %q", want)
+		if !strings.Contains(helperText, want) {
+			t.Errorf("db testdb helper is missing %q", want)
 		}
 	}
 }

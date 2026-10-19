@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Xwudao/weld/internal/db"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/projectcfg"
 	"github.com/Xwudao/weld/internal/scaffold"
@@ -56,6 +57,9 @@ type Request struct {
 	Catalog *template.Catalog
 	// LookPath overrides tool lookup. A nil function uses exec.LookPath.
 	LookPath func(string) (string, error)
+	// LookupEnv overrides the process environment for the test-database check.
+	// A nil function uses os.LookupEnv.
+	LookupEnv func(string) (string, bool)
 }
 
 // Failed reports whether any check failed.
@@ -112,6 +116,7 @@ func Run(req Request) *Result {
 	checkCapabilities(manifest, req.Catalog, add)
 	checkGeneratedFiles(dir, manifest, add)
 	checkDatabaseFiles(dir, manifest, add)
+	checkTestDatabase(dir, manifest, req.LookupEnv, add)
 	return result
 }
 
@@ -359,6 +364,24 @@ func checkDatabaseFiles(dir string, manifest *project.Manifest, add func(string,
 		return
 	}
 	add("database", LevelOK, "migration tool and migrations present")
+}
+
+// checkTestDatabase reports whether a test database is configured for the
+// generated integration tests. It never connects: it resolves config.yml (or
+// PG_TEST_DSN) and reports the source, never the dsn.
+func checkTestDatabase(dir string, manifest *project.Manifest, lookupEnv func(string) (string, bool), add func(string, Level, string, ...any)) {
+	if !manifest.HasCapability("db") {
+		return
+	}
+	_, source, err := db.ResolveTestDSN(dir, "", lookupEnv)
+	switch {
+	case err == nil:
+		add("database test", LevelOK, "configured from %s", source)
+	case errors.Is(err, db.ErrTestDatabaseNotConfigured):
+		add("database test", LevelWarn, "no test database configured; set database_test.name in config.yml or %s", db.EnvTestDatabaseURL)
+	default:
+		add("database test", LevelFail, "%v", err)
+	}
 }
 
 // goModulePath returns the path from a go.mod module directive.

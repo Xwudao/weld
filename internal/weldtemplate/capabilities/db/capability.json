@@ -1,6 +1,6 @@
 {
   "name": "db",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "kind": "add",
   "summary": "PostgreSQL persistence: SQL migrations and queries, sqlc-generated code, an injectable pool and repository.",
   "requires": ["loom"],
@@ -11,6 +11,8 @@
     { "path": "db/tools/go.mod", "source": "files/tools/go.mod.tmpl" },
     { "path": "db/tools/go.sum", "source": "files/tools/go.sum" },
     { "path": "internal/data/data.go", "source": "files/data.go.tmpl" },
+    { "path": "internal/testdb/testdb.go", "source": "files/testdb.go.tmpl" },
+    { "path": "internal/testdb/testdb_test.go", "source": "files/testdb_test.go.tmpl" },
     { "path": "internal/data/sqlc/db.go", "source": "files/sqlc/db.go.tmpl" },
     { "path": "internal/data/sqlc/models.go", "source": "files/sqlc/models.go.tmpl" },
     { "path": "internal/data/sqlc/items.sql.go", "source": "files/sqlc/items.sql.go.tmpl" },

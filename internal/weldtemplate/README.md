@@ -108,7 +108,8 @@ capabilities/
     capability.json
     files/         db/migrations (goose), db/query, sqlc.yaml, db/tools (nested
                    module pinning sqlc and goose), internal/data (Repository +
-                   pool), generated internal/data/sqlc, snippets
+                   pool), generated internal/data/sqlc, internal/testdb
+                   (database_test resolver and per-test-schema pool), snippets
   seed/            kind: add    -> database seeding, requires db
     capability.json
     files/         internal/data/seeder (Deps, Registry, Runner, the stable
@@ -348,7 +349,11 @@ hand-written `internal/data/data.go` wraps the generated queries behind a small
 
 The generated package is shipped, so `weld add db` produces a project that
 compiles and tests immediately with no generator installed and no PostgreSQL
-running. Regeneration is reproducible: the sqlc version is pinned by a `tool`
+running. The SQL integration test asks `internal/testdb.Pool(t)` for a pool and
+never builds a dsn; the helper reads the `database_test` section of `config.yml`
+(or `PG_TEST_DSN`), refuses the application database, isolates each test in a
+unique throwaway schema, applies the migrations there and drops only that
+schema. Regeneration is reproducible: the sqlc version is pinned by a `tool`
 directive in the nested `db/tools/go.mod` module
 (`tool github.com/sqlc-dev/sqlc/cmd/sqlc`), alongside the goose migration tool
 (`tool github.com/pressly/goose/v3/cmd/goose`). That module is separate on

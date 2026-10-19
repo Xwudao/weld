@@ -163,27 +163,65 @@ cd db/tools && go tool goose -dir ../migrations postgres "$DATABASE_URL" up
 The unit tests run with no database:
 
 ```sh
-go test ./internal/data/...
+make test            # or: go test ./...
 ```
 
-They cover the row-to-domain conversion and dsn validation. The SQL itself is
-exercised only by a focused integration test against real PostgreSQL:
+They cover the row-to-domain conversion, dsn validation and the test-database
+resolver. The SQL itself is exercised only by a focused integration test
+against real PostgreSQL. Configure a dedicated test database in `config.yml`:
+
+```yaml
+database:
+  host: localhost
+  port: 5432
+  user: app
+  password: secret
+  name: app
+database_test:
+  name: app_test
+```
+
+Then run:
+
+```sh
+go test ./internal/data/... -run TestPostgresRepositoryIntegration -v
+# or, to fail rather than skip when the test database is missing:
+make test-integration
+```
+
+A test never constructs a dsn. It asks `internal/testdb` for a pool:
+
+```go
+pool := testdb.Pool(t)
+```
+
+`testdb.Pool(t)` resolves the test database from `PG_TEST_DSN` (or
+`TEST_DATABASE_URL`) or from `config.yml`'s `database_test` section, then:
+
+- **never falls back to the application database**: `database.dsn` and
+  `DATABASE_URL` are not used to name the test database, so a stray environment
+  variable cannot point the tests at a live database. The one exception is
+  `database_test.schema_only: true`, which reuses the application database in a
+  throwaway schema and is refused outside a local, development or test
+  environment;
+- **refuses the application database**: it compares host, port and database and
+  fails if the test target is the application target;
+- **isolates itself**: it creates a unique throwaway schema, pins the pool's
+  `search_path` to it, applies every migration under `db/migrations` there, and
+  drops only that schema with `CASCADE` (so the role needs `CREATE` on the
+  database). It never runs a bare `DROP TABLE` against the database's real
+  tables, and it never logs a credential;
+- **skips visibly** when no test database is configured, unless
+  `WELD_REQUIRE_DB_TESTS=1` turns the skip into a failure. Set that in CI so a
+  missing test database cannot look like a pass.
+
+In CI, where `config.yml` is git-ignored, set the full dsn instead:
 
 ```sh
 PG_TEST_DSN='postgres://user:pw@localhost:5432/app_test?sslmode=disable' \
+  WELD_REQUIRE_DB_TESTS=1 \
   go test ./internal/data/... -run TestPostgresRepositoryIntegration -v
 ```
-
-`PG_TEST_DSN` must point at a **dedicated, disposable test database**. There is
-no fallback to `DATABASE_URL`, so the test can never target the application
-database by accident; when `DATABASE_URL` is set the test also refuses to run if
-both name the same database. The test does not assume it owns the database
-either: it creates a unique throwaway schema, pins the pool's `search_path` to
-it, applies the migration there, and drops only that schema with `CASCADE` (so
-the role needs `CREATE` on the database). It never runs a bare `DROP TABLE`
-against the database's real tables, and it never logs a credential. With
-`PG_TEST_DSN` unset the integration test skips, and `go test ./...` stays green
-without PostgreSQL.
 
 `go test ./...` from the project root does not descend into `db/tools`, because
 that is a separate module.

@@ -1,0 +1,534 @@
+// Package testdb opens a PostgreSQL pool for the generated project's
+// integration tests.
+//
+// A test asks for a pool with Pool(t) and never constructs a dsn itself. Pool
+// resolves the test database from PG_TEST_DSN (or TEST_DATABASE_URL) or from
+// config.yml's database_test section, creates a unique throwaway schema, pins
+// the pool's search_path to it, applies db/migrations there, and drops only that
+// schema when the test ends. It never falls back to the application database
+// unless database_test.schema_only is set on purpose.
+//
+// No test database configured means the test skips, so `go test ./...` stays
+// green without PostgreSQL. Set WELD_REQUIRE_DB_TESTS=1 to turn that skip into a
+// failure in CI, where a missing test database must not look like a pass.
+//
+// The database_test section is deliberately read here rather than through
+// internal/config: the test-database contract belongs to the db capability, so
+// `weld upgrade db` ships the resolver and its tests together and does not
+// depend on a newer shared config payload. The application loader ignores the
+// database_test key.
+package testdb
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"gopkg.in/yaml.v3"
+)
+
+// Test-database environment names. PG_TEST_DSN is the full override a CI job
+// sets; TEST_DATABASE_URL is an accepted alias. The DB_TEST_* names override
+// the individual fields of the database_test section.
+const (
+	envTestDatabaseURL    = "PG_TEST_DSN"
+	envTestDatabaseURLAlt = "TEST_DATABASE_URL"
+	envTestDBHost         = "DB_TEST_HOST"
+	envTestDBPort         = "DB_TEST_PORT"
+	envTestDBUser         = "DB_TEST_USER"
+	envTestDBPassword     = "DB_TEST_PASSWORD"
+	envTestDBName         = "DB_TEST_NAME"
+	envRequireDBTests     = "WELD_REQUIRE_DB_TESTS"
+	envAppEnvironment     = "APP_ENV"
+	envDatabaseURL        = "DATABASE_URL"
+	envDBHost             = "DB_HOST"
+	envDBPort             = "DB_PORT"
+	envDBUser             = "DB_USER"
+	envDBPassword         = "DB_PASSWORD"
+	envDBName             = "DB_NAME"
+)
+
+// Default application connection values, matching internal/config.
+const (
+	defaultDBHost = "localhost"
+	defaultDBPort = 5432
+)
+
+// errTestDatabaseNotConfigured reports that no test database is configured.
+// Pool turns it into a skip unless WELD_REQUIRE_DB_TESTS=1.
+var errTestDatabaseNotConfigured = errors.New("test database is not configured")
+
+// testConfig is the subset of config.yml the integration tests read.
+type testConfig struct {
+	Environment  string               `yaml:"environment"`
+	Database     databaseSettings     `yaml:"database"`
+	DatabaseTest testDatabaseSettings `yaml:"database_test"`
+}
+
+type databaseSettings struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	Name     string `yaml:"name"`
+	DSN      string `yaml:"dsn"`
+}
+
+type testDatabaseSettings struct {
+	Host       string `yaml:"host"`
+	Port       int    `yaml:"port"`
+	User       string `yaml:"user"`
+	Password   string `yaml:"password"`
+	Name       string `yaml:"name"`
+	DSN        string `yaml:"dsn"`
+	SchemaOnly bool   `yaml:"schema_only"`
+}
+
+// Pool returns a pool bound to a per-test schema in the configured test
+// database, with the project's migrations applied.
+//
+// It skips the test when no test database is configured, unless
+// WELD_REQUIRE_DB_TESTS is set to a true value, in which case it fails. A
+// configured but unreachable database always fails: an explicit test database
+// that cannot be used is an error, not a skip.
+func Pool(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+
+	root := projectRoot(t)
+	dsn, cfg := resolveDSN(t, root, os.LookupEnv)
+	guard(t, cfg, dsn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	schema := uniqueSchema()
+	pool, err := newPool(ctx, dsn, schema)
+	if err != nil {
+		t.Fatalf("testdb: %v", err)
+	}
+	// Registered first so it runs last (cleanups are LIFO) and the schema can
+	// still be dropped before the pool closes.
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, "CREATE SCHEMA "+quoteIdentifier(schema)); err != nil {
+		t.Fatalf("testdb: create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), "DROP SCHEMA "+quoteIdentifier(schema)+" CASCADE"); err != nil {
+			t.Errorf("testdb: drop schema: %v", err)
+		}
+	})
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("testdb: connect to the configured test database: %v", err)
+	}
+	applyMigrations(t, ctx, pool, root)
+	return pool
+}
+
+// resolveDSN returns the test dsn and, when config.yml is available, the parsed
+// configuration the guard compares against. The dsn is never logged.
+func resolveDSN(t testing.TB, root string, lookupEnv func(string) (string, bool)) (string, *testConfig) {
+	t.Helper()
+	if dsn := firstEnv(lookupEnv, envTestDatabaseURL, envTestDatabaseURLAlt); dsn != "" {
+		return dsn, loadConfigOptional(root)
+	}
+	cfg := loadConfig(t, root)
+	dsn, err := cfg.testDSN(lookupEnv)
+	switch {
+	case errors.Is(err, errTestDatabaseNotConfigured):
+		skipOrFail(t, "no test database is configured; set database_test.name in config.yml (for example app_test) or PG_TEST_DSN")
+	case err != nil:
+		// A misconfiguration (for example database_test.name without a user) is
+		// actionable, so it fails rather than skips.
+		t.Fatalf("testdb: %v", err)
+	}
+	return dsn, cfg
+}
+
+// testDSN resolves the dedicated test database from the database_test section,
+// inheriting the application connection fields. It never uses database.dsn to
+// name the test database; only schema_only reuses the application dsn.
+func (c *testConfig) testDSN(lookupEnv func(string) (string, bool)) (string, error) {
+	test := c.DatabaseTest
+	if value, ok := lookupEnv(envTestDBHost); ok {
+		test.Host = strings.TrimSpace(value)
+	}
+	if value, ok := lookupEnv(envTestDBPort); ok {
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return "", fmt.Errorf("%s is not a number", envTestDBPort)
+		}
+		test.Port = port
+	}
+	if value, ok := lookupEnv(envTestDBUser); ok {
+		test.User = strings.TrimSpace(value)
+	}
+	if value, ok := lookupEnv(envTestDBPassword); ok {
+		test.Password = value
+	}
+	if value, ok := lookupEnv(envTestDBName); ok {
+		test.Name = strings.TrimSpace(value)
+	}
+
+	if dsn := strings.TrimSpace(test.DSN); dsn != "" {
+		return dsn, nil
+	}
+	if test.SchemaOnly {
+		environment := c.Environment
+		if value, ok := lookupEnv(envAppEnvironment); ok {
+			environment = strings.TrimSpace(value)
+		}
+		if !isLocalEnvironment(environment) {
+			return "", errors.New("database_test.schema_only requires environment local, development or test")
+		}
+		return c.appDSN(lookupEnv)
+	}
+	name := strings.TrimSpace(test.Name)
+	if name == "" {
+		return "", errTestDatabaseNotConfigured
+	}
+
+	app := c.Database
+	if err := applyAppEnv(&app, lookupEnv); err != nil {
+		return "", err
+	}
+	host := firstNonBlank(test.Host, app.Host)
+	if host == "" {
+		host = defaultDBHost
+	}
+	port := test.Port
+	if port == 0 {
+		port = app.Port
+	}
+	if port == 0 {
+		port = defaultDBPort
+	}
+	user := firstNonBlank(test.User, app.User)
+	password := test.Password
+	if password == "" {
+		password = app.Password
+	}
+	switch {
+	case port <= 0:
+		return "", errors.New("database_test.port must be positive")
+	case user == "":
+		return "", fmt.Errorf("database_test.name is set but database.user is empty (set it in config.yml, %s or %s)", envTestDBUser, envTestDatabaseURL)
+	}
+	return buildDSN(host, port, user, password, name), nil
+}
+
+// appDSN returns the application database dsn, matching internal/config's
+// precedence: DATABASE_URL, then database.dsn, then the fields with DB_*
+// overrides. It is used only by schema_only.
+func (c *testConfig) appDSN(lookupEnv func(string) (string, bool)) (string, error) {
+	if value, ok := lookupEnv(envDatabaseURL); ok {
+		if dsn := strings.TrimSpace(value); dsn != "" {
+			return dsn, nil
+		}
+	}
+	app := c.Database
+	if dsn := strings.TrimSpace(app.DSN); dsn != "" {
+		return dsn, nil
+	}
+	if err := applyAppEnv(&app, lookupEnv); err != nil {
+		return "", err
+	}
+	if app.Host == "" {
+		app.Host = defaultDBHost
+	}
+	if app.Port == 0 {
+		app.Port = defaultDBPort
+	}
+	switch {
+	case app.Port <= 0:
+		return "", errors.New("database.port must be positive")
+	case strings.TrimSpace(app.User) == "":
+		return "", errors.New("database.user is required for database_test.schema_only")
+	}
+	return buildDSN(app.Host, app.Port, app.User, app.Password, app.Name), nil
+}
+
+// applyAppEnv overlays the application DB_* environment names on app.
+func applyAppEnv(app *databaseSettings, lookupEnv func(string) (string, bool)) error {
+	if value, ok := lookupEnv(envDBHost); ok {
+		app.Host = strings.TrimSpace(value)
+	}
+	if value, ok := lookupEnv(envDBPort); ok {
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("%s is not a number", envDBPort)
+		}
+		app.Port = port
+	}
+	if value, ok := lookupEnv(envDBUser); ok {
+		app.User = strings.TrimSpace(value)
+	}
+	if value, ok := lookupEnv(envDBPassword); ok {
+		app.Password = value
+	}
+	if value, ok := lookupEnv(envDBName); ok {
+		app.Name = strings.TrimSpace(value)
+	}
+	return nil
+}
+
+func buildDSN(host string, port int, user, password, name string) string {
+	return (&url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, password),
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Path:   name,
+	}).String()
+}
+
+// guard refuses a test target that names the application database, so a
+// misconfigured test database cannot mutate live data. schema_only is the one
+// explicit exception and is already bounded by environment.
+func guard(t testing.TB, cfg *testConfig, dsn string) {
+	t.Helper()
+	if cfg == nil {
+		return
+	}
+	if cfg.DatabaseTest.SchemaOnly {
+		environment := cfg.Environment
+		if value, ok := os.LookupEnv(envAppEnvironment); ok {
+			environment = strings.TrimSpace(value)
+		}
+		if !isLocalEnvironment(environment) {
+			t.Fatalf("testdb: database_test.schema_only requires environment local, development or test")
+		}
+		return
+	}
+	appDSN, err := cfg.appDSN(os.LookupEnv)
+	if err != nil || strings.TrimSpace(appDSN) == "" {
+		return
+	}
+	app, ok := parseTarget(appDSN)
+	if !ok {
+		return
+	}
+	test, ok := parseTarget(dsn)
+	if !ok {
+		return
+	}
+	if app == test {
+		t.Fatalf("testdb: the test database %q is the application database; point database_test.name at a dedicated test database", test.database)
+	}
+}
+
+// target is the part of a dsn the guard compares. Comparing host, port and
+// database avoids refusing a same-named database on a different server.
+type target struct {
+	host     string
+	port     uint16
+	database string
+}
+
+func parseTarget(dsn string) (target, bool) {
+	parsed, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return target{}, false
+	}
+	conn := parsed.ConnConfig
+	if conn.Database == "" {
+		return target{}, false
+	}
+	return target{host: conn.Host, port: conn.Port, database: conn.Database}, true
+}
+
+// newPool builds the test pool with search_path pinned to schema, so every
+// unqualified statement the generated code runs resolves inside the throwaway
+// schema rather than the database's real tables.
+func newPool(ctx context.Context, dsn, schema string) (*pgxpool.Pool, error) {
+	parsed, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		// Do not echo the dsn or the parser error: either may carry a credential.
+		return nil, errors.New("the configured test dsn is not a valid PostgreSQL connection string")
+	}
+	if parsed.ConnConfig.RuntimeParams == nil {
+		parsed.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	parsed.ConnConfig.RuntimeParams["search_path"] = schema
+	return pgxpool.NewWithConfig(ctx, parsed)
+}
+
+// loadConfig reads config.yml from the project root. A missing file is a skip
+// (or a failure under WELD_REQUIRE_DB_TESTS); an unreadable or invalid file is
+// an error, because the operator has a config.yml and it does not load.
+func loadConfig(t testing.TB, root string) *testConfig {
+	t.Helper()
+	path := filepath.Join(root, "config.yml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			skipOrFail(t, "config.yml not found; set PG_TEST_DSN to run the integration tests")
+		}
+		t.Fatalf("testdb: read config.yml: %v", err)
+	}
+	var cfg testConfig
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("testdb: config.yml is not valid YAML")
+	}
+	return &cfg
+}
+
+// loadConfigOptional returns the parsed config.yml, or nil when it is absent or
+// unreadable. It is used only to compare the test database against the
+// application database when the dsn came from the environment.
+func loadConfigOptional(root string) *testConfig {
+	raw, err := os.ReadFile(filepath.Join(root, "config.yml"))
+	if err != nil {
+		return nil
+	}
+	var cfg testConfig
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	return &cfg
+}
+
+// projectRoot returns the directory that holds go.mod, found by walking up from
+// the test's working directory (the package directory under `go test`).
+func projectRoot(t testing.TB) string {
+	t.Helper()
+	root, err := findProjectRoot()
+	if err != nil {
+		skipOrFail(t, "cannot find the project root (go.mod); set PG_TEST_DSN to run the integration tests")
+	}
+	return root
+}
+
+func findProjectRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", errors.New("go.mod not found")
+		}
+		dir = parent
+	}
+}
+
+// uniqueSchema returns a schema name that cannot collide with another run, so
+// the test does not assume it has the database to itself.
+func uniqueSchema() string {
+	return fmt.Sprintf("weld_test_%d_%d", os.Getpid(), time.Now().UnixNano())
+}
+
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// applyMigrations builds the schema from the real migration files, in filename
+// order, so the SQL under test is never duplicated here.
+func applyMigrations(t testing.TB, ctx context.Context, pool *pgxpool.Pool, root string) {
+	t.Helper()
+	dir := filepath.Join(root, "db", "migrations")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("testdb: read migrations: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, err := pool.Exec(ctx, readMigrationUp(t, dir, name)); err != nil {
+			t.Fatalf("testdb: apply migration %s: %v", name, err)
+		}
+	}
+}
+
+// readMigrationUp returns only the applied part of a goose migration: the text
+// before the "-- +goose Down" marker. The down section is never run against the
+// test database; the schema is dropped CASCADE instead, which can only ever
+// touch the schema this test created.
+func readMigrationUp(t testing.TB, dir, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("testdb: read migration %s: %v", name, err)
+	}
+	contents := string(raw)
+	if i := strings.Index(contents, "-- +goose Down"); i >= 0 {
+		contents = contents[:i]
+	}
+	return contents
+}
+
+// skipOrFail skips when no test database is configured, unless the run demands
+// one. A skipped integration test must be visible, and a CI run that requires
+// one must fail rather than pass without it.
+func skipOrFail(t testing.TB, reason string) {
+	t.Helper()
+	if requireDB(os.LookupEnv) {
+		t.Fatalf("testdb: %s (%s is set)", reason, envRequireDBTests)
+	}
+	t.Skipf("testdb: %s", reason)
+}
+
+func requireDB(lookupEnv func(string) (string, bool)) bool {
+	value, ok := lookupEnv(envRequireDBTests)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// firstEnv returns the first non-blank environment value, so PG_TEST_DSN and
+// its alias are one lookup.
+func firstEnv(lookupEnv func(string) (string, bool), names ...string) string {
+	for _, name := range names {
+		if value, ok := lookupEnv(name); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+// firstNonBlank returns the first value that is not blank after trimming.
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// isLocalEnvironment reports whether the configured environment allows the
+// same-database schema_only mode.
+func isLocalEnvironment(environment string) bool {
+	switch strings.ToLower(strings.TrimSpace(environment)) {
+	case "local", "development", "test":
+		return true
+	default:
+		return false
+	}
+}

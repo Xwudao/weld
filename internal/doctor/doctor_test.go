@@ -195,6 +195,46 @@ func TestCheckDatabaseFilesReportsMissingTool(t *testing.T) {
 	}
 }
 
+func noEnvLookup(string) (string, bool) { return "", false }
+
+// TestCheckTestDatabaseReportsConfigured proves the test-database check resolves
+// config.yml and reports the source, never the dsn.
+func TestCheckTestDatabaseReportsConfigured(t *testing.T) {
+	dir := t.TempDir()
+	config := "environment: local\ndatabase:\n  host: db.internal\n  port: 6543\n  user: app\n  password: file-secret\n  name: appdb\ndatabase_test:\n  name: appdb_test\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &project.Manifest{Capabilities: []project.CapabilityRef{{Name: "db", Version: "0.2.0"}}}
+	result, add := collector()
+	checkTestDatabase(dir, manifest, noEnvLookup, add)
+	check := findCheck(t, result, "database test")
+	if check.Level != LevelOK || !strings.Contains(check.Message, "config.yml") {
+		t.Fatalf("database test check = %+v", check)
+	}
+	if strings.Contains(check.Message, "file-secret") {
+		t.Fatalf("database test check leaked the password: %+v", check)
+	}
+}
+
+// TestCheckTestDatabaseWarnsWhenMissing proves an unconfigured test database is
+// a warning, not a failure, so a project that intentionally runs no integration
+// tests stays healthy.
+func TestCheckTestDatabaseWarnsWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	config := "database:\n  host: db\n  user: app\n  name: appdb\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &project.Manifest{Capabilities: []project.CapabilityRef{{Name: "db", Version: "0.2.0"}}}
+	result, add := collector()
+	checkTestDatabase(dir, manifest, noEnvLookup, add)
+	check := findCheck(t, result, "database test")
+	if check.Level != LevelWarn || !strings.Contains(check.Message, "database_test.name") {
+		t.Fatalf("database test check = %+v", check)
+	}
+}
+
 // TestHelpers covers the small parsing helpers used by the checks.
 func TestHelpers(t *testing.T) {
 	if got := goModulePath("module example.com/demo\n\ngo 1.25.0\n"); got != "example.com/demo" {

@@ -37,6 +37,7 @@ weld dev               # backend + pnpm frontend dev servers, side by side
 weld build             # builds the frontend and cross-compiles the binary
 weld docker init       # scaffolds the user-owned Dockerfile and .dockerignore
 weld seed              # runs the database seeders (seed build tag)
+weld test              # runs go test, pointing SQL tests at database_test
 weld deploy            # builds the linux binary, uploads it and runs the remote script
 make build             # the Makefile stays as the no-weld fallback
 make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
@@ -67,6 +68,7 @@ weld dev [--dir dir]
 weld build [--docker] [--image tag] [--dockerfile path] [--platform os/arch] [--dir dir]
 weld docker init [--dir dir] [--dry-run]
 weld seed [name] [--tag tag] [--dir dir]
+weld test [--db auto|off|require] [--db-url dsn] [--config path] [--] [go test args]
 weld deploy [--no-build] [--artifact file] [--dir dir]
 weld config example
 weld config init [--force]
@@ -615,7 +617,15 @@ What lands in the project:
 - `internal/data/sqlc/`, the generated code, shipped so the project compiles and
   tests immediately with no tool installed;
 - `internal/data/data.go`, the `Repository`/`Item` wrapper, `NewPool` and
-  `WithTx`, plus a unit test and a `PG_TEST_DSN`-gated integration test;
+  `WithTx`, plus a unit test and a gated integration test;
+- `internal/testdb/`, the test helper the integration test asks for a pool
+  (`testdb.Pool(t)`). It resolves the dedicated test database from
+  `config.yml`'s `database_test` section or `PG_TEST_DSN`, isolates each test in
+  a throwaway schema, applies `db/migrations` there and drops only that schema;
+- the `database_test` section in `config.yml` / `config.example.yml`. The db
+  capability reads it from `internal/testdb`; the application config loader
+  ignores the key, so `weld upgrade db` does not depend on a newer config
+  payload;
 - `internal/data/README.md`, and the `go.mod` dependency and `Makefile` `db`
   regions patched.
 
@@ -636,6 +646,59 @@ imports `net/http`, so the capability can be added to a
 CLI-only project and composes with the HTTP capabilities in any order. Loom
 declares the pool and repository as bindings but prunes them until a provider
 asks for the repository, so an unrelated serve needs no database credential.
+
+### Database integration tests
+
+The SQL is exercised by a focused integration test against real PostgreSQL. It
+is off unless a **dedicated test database** is configured, so `go test ./...`
+stays green without one. Add to the local, git-ignored `config.yml`:
+
+```yaml
+database:
+  host: localhost
+  port: 5432
+  user: app
+  password: secret
+  name: app
+database_test:
+  name: app_test
+```
+
+`database_test` inherits host, port, user and password from `database` and only
+changes the database name; every field can be overridden. An existing project
+upgraded from an older db payload adds the `database_test` block to its
+project-owned `config.yml` by hand: `weld upgrade` never rewrites that file.
+Then run:
+
+```sh
+go test ./...                  # integration tests run when database_test is set
+weld test                     # same, with PG_TEST_DSN injected for the child
+weld test --db=require        # fail if no test database is configured
+weld test ./internal/data/... -- -run TestPostgresRepositoryIntegration -v
+make test-integration         # the no-weld fallback, with WELD_REQUIRE_DB_TESTS=1
+```
+
+`weld test` never starts a database. It resolves `database_test` (or a
+`PG_TEST_DSN` / `TEST_DATABASE_URL` override) and runs `go test`; a configured
+test database is passed to the child through `PG_TEST_DSN`, never argv, and the
+dsn is never printed. CI, where `config.yml` is git-ignored, sets the full dsn
+instead:
+
+```sh
+PG_TEST_DSN='postgres://user:pw@localhost:5432/app_test?sslmode=disable' \
+  WELD_REQUIRE_DB_TESTS=1 \
+  go test ./...
+```
+
+The generated `internal/testdb` helper never falls back to the application
+database: it does not use `database.dsn` or `DATABASE_URL` to name the test
+database, it refuses a test target that matches the application target, and it
+creates and drops only a unique throwaway schema. The explicit
+`database_test.schema_only: true` mode reuses the application database in that
+schema and is refused outside a local, development or test environment. With no
+test database configured the integration test skips visibly; setting
+`WELD_REQUIRE_DB_TESTS=1` turns that skip into a failure so CI cannot pass
+without exercising the SQL.
 
 ### `weld db`
 
@@ -1464,13 +1527,16 @@ Test conventions:
   exercise the no-input route, query binding,
   validation failure, the administrator policy rejection and a raw response.
 - The generated `db` unit tests run with no PostgreSQL: they cover the
-  row-to-domain conversion and dsn validation, and the gated integration test
-  skips when `PG_TEST_DSN` is unset. `PG_TEST_DSN` must name a dedicated,
-  disposable test database; there is no fallback to the application dsn, so the
-  suite never targets a live database by accident. The integration test also
-  isolates itself: it creates a unique throwaway schema, points the pool's
-  `search_path` at it, applies the migration there, and drops only that schema
-  with `CASCADE`, so it never drops or mutates the database's real tables.
+  row-to-domain conversion, dsn validation and the test-database resolver. The
+  integration test is off unless `config.yml`'s `database_test` section (or
+  `PG_TEST_DSN`) names a dedicated, disposable test database; there is no
+  fallback to the application dsn, so the suite never targets a live database by
+  accident. `internal/testdb` refuses a test target that matches the application
+  target, isolates itself in a unique throwaway schema, points the pool's
+  `search_path` at it, applies the migrations there, and drops only that schema
+  with `CASCADE`, so it never drops or mutates the database's real tables. With
+  no test database configured the test skips visibly; `WELD_REQUIRE_DB_TESTS=1`
+  turns the skip into a failure for CI.
 - The scaffold tests for `db` generate a real project and run `gofmt`, `go
   build`, `go vet`, the generated `go test ./...`, and a sqlc regeneration that
   must produce no diff. Combination tests cover `base`→`db` and `web`→`db` in

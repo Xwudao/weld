@@ -85,6 +85,7 @@ func newRootCommand() *cobra.Command {
 		newDockerCommand(),
 		newDevCommand(),
 		newSeedCommand(),
+		newTestCommand(),
 		newDeployCommand(),
 		newDBCommand(),
 		newDoctorCommand(),
@@ -744,8 +745,10 @@ place, one capability at a time. It also drives the assembled project:
 weld dev runs the backend and frontend together and weld build builds the
 frontend and cross-compiles the binary, both configured by the optional,
 user-owned weld.yml; weld seed runs the project's seeders behind the seed
-build tag, so the built binary carries no seeder data, and weld deploy uploads
-the built binary to the configured host and runs its remote script.
+build tag, so the built binary carries no seeder data, weld test runs go test
+with the dedicated test database configured in config.yml's database_test
+section, and weld deploy uploads the built binary to the configured host and
+runs its remote script.
 
 Capabilities:
   base   (scaffold) minimal Go CLI on a Cobra command tree with a tint-backed

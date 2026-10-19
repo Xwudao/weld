@@ -1,0 +1,211 @@
+package testdb
+
+import (
+	"errors"
+	"strings"
+	"testing"
+)
+
+func fakeEnv(values map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	}
+}
+
+// TestTestDSNRequiresExplicitConfiguration proves an application database alone
+// never opts the integration tests in: without database_test.name (or a dsn) the
+// resolver reports "not configured" instead of guessing.
+func TestTestDSNRequiresExplicitConfiguration(t *testing.T) {
+	cfg := &testConfig{Database: databaseSettings{Host: "db", Port: 5432, User: "app", Password: "pw", Name: "appdb"}}
+	if _, err := cfg.testDSN(fakeEnv(nil)); !errors.Is(err, errTestDatabaseNotConfigured) {
+		t.Fatalf("testDSN = %v, want errTestDatabaseNotConfigured", err)
+	}
+}
+
+// TestTestDSNNeverUsesApplicationDSN proves an explicit application dsn is not
+// reused for the test database, so DATABASE_URL cannot point the tests at a live
+// database.
+func TestTestDSNNeverUsesApplicationDSN(t *testing.T) {
+	cfg := &testConfig{Database: databaseSettings{DSN: "postgres://app-only/appdb", Name: "appdb"}}
+	if _, err := cfg.testDSN(fakeEnv(map[string]string{envDatabaseURL: "postgres://app-only/appdb"})); !errors.Is(err, errTestDatabaseNotConfigured) {
+		t.Fatalf("testDSN = %v, want errTestDatabaseNotConfigured", err)
+	}
+}
+
+// TestTestDSNInheritsConnectionFields proves the test section overrides only the
+// database name and inherits host, port, user and password.
+func TestTestDSNInheritsConnectionFields(t *testing.T) {
+	cfg := &testConfig{
+		Database:     databaseSettings{Host: "db", Port: 5432, User: "app", Password: "pw", Name: "appdb"},
+		DatabaseTest: testDatabaseSettings{Name: "appdb_test"},
+	}
+	dsn, err := cfg.testDSN(fakeEnv(nil))
+	if err != nil {
+		t.Fatalf("testDSN: %v", err)
+	}
+	if !strings.HasPrefix(dsn, "postgres://app:") || !strings.Contains(dsn, "@db:5432/appdb_test") {
+		t.Fatalf("testDSN = %q", dsn)
+	}
+}
+
+// TestTestDSNOverridesConnectionFields proves every field can be overridden.
+func TestTestDSNOverridesConnectionFields(t *testing.T) {
+	cfg := &testConfig{
+		Database:     databaseSettings{Host: "db", Port: 5432, User: "app", Password: "pw", Name: "appdb"},
+		DatabaseTest: testDatabaseSettings{Host: "test-db", Port: 6543, User: "tester", Password: "test-pw", Name: "appdb_test"},
+	}
+	dsn, err := cfg.testDSN(fakeEnv(nil))
+	if err != nil {
+		t.Fatalf("testDSN: %v", err)
+	}
+	for _, want := range []string{"tester:", "@test-db:6543/appdb_test"} {
+		if !strings.Contains(dsn, want) {
+			t.Fatalf("testDSN = %q, missing %q", dsn, want)
+		}
+	}
+}
+
+// TestTestDSNExplicitDSNWins proves database_test.dsn is used verbatim.
+func TestTestDSNExplicitDSNWins(t *testing.T) {
+	cfg := &testConfig{
+		Database:     databaseSettings{Name: "appdb"},
+		DatabaseTest: testDatabaseSettings{Name: "appdb_test", DSN: "postgres://explicit/test"},
+	}
+	dsn, err := cfg.testDSN(fakeEnv(nil))
+	if err != nil {
+		t.Fatalf("testDSN: %v", err)
+	}
+	if dsn != "postgres://explicit/test" {
+		t.Fatalf("testDSN = %q, want the explicit value", dsn)
+	}
+}
+
+// TestTestDSNSchemaOnlyReusesApplicationDSN proves the explicit same-database
+// mode resolves to the application dsn.
+func TestTestDSNSchemaOnlyReusesApplicationDSN(t *testing.T) {
+	cfg := &testConfig{
+		Environment:  "local",
+		Database:     databaseSettings{Host: "db", Port: 5432, User: "app", Password: "pw", Name: "appdb"},
+		DatabaseTest: testDatabaseSettings{SchemaOnly: true},
+	}
+	dsn, err := cfg.testDSN(fakeEnv(nil))
+	if err != nil {
+		t.Fatalf("testDSN: %v", err)
+	}
+	if !strings.Contains(dsn, "@db:5432/appdb") {
+		t.Fatalf("testDSN = %q", dsn)
+	}
+}
+
+// TestTestDSNSchemaOnlyRefusesProduction proves the same-database mode is
+// refused outside a local, development or test environment.
+func TestTestDSNSchemaOnlyRefusesProduction(t *testing.T) {
+	for _, environment := range []string{"production", ""} {
+		cfg := &testConfig{
+			Environment:  environment,
+			Database:     databaseSettings{Host: "db", Port: 5432, User: "app", Name: "appdb"},
+			DatabaseTest: testDatabaseSettings{SchemaOnly: true},
+		}
+		if _, err := cfg.testDSN(fakeEnv(nil)); err == nil {
+			t.Fatalf("environment %q: expected schema_only to be refused", environment)
+		}
+	}
+}
+
+// TestTestDSNSchemaOnlyHonorsAppEnv proves APP_ENV overrides the file when
+// deciding whether schema_only is allowed.
+func TestTestDSNSchemaOnlyHonorsAppEnv(t *testing.T) {
+	cfg := &testConfig{
+		Environment:  "production",
+		Database:     databaseSettings{Host: "db", Port: 5432, User: "app", Name: "appdb"},
+		DatabaseTest: testDatabaseSettings{SchemaOnly: true},
+	}
+	if _, err := cfg.testDSN(fakeEnv(map[string]string{envAppEnvironment: "local"})); err != nil {
+		t.Fatalf("testDSN with APP_ENV=local: %v", err)
+	}
+}
+
+// TestTestDSNEnvironmentOverrides proves DB_TEST_* overrides the file and the
+// test section inherits DB_* application overrides.
+func TestTestDSNEnvironmentOverrides(t *testing.T) {
+	cfg := &testConfig{
+		Database:     databaseSettings{Host: "db", Port: 5432, User: "app", Password: "pw", Name: "appdb"},
+		DatabaseTest: testDatabaseSettings{Name: "file_test"},
+	}
+	dsn, err := cfg.testDSN(fakeEnv(map[string]string{
+		envTestDBName: "env_test",
+		envTestDBHost: "env-db",
+		envTestDBPort: "6544",
+		envDBUser:     "env-user",
+	}))
+	if err != nil {
+		t.Fatalf("testDSN: %v", err)
+	}
+	if !strings.Contains(dsn, "env-user:") || !strings.Contains(dsn, "@env-db:6544/env_test") {
+		t.Fatalf("testDSN = %q", dsn)
+	}
+}
+
+// TestTestDSNMissingUserIsAnError proves a configured test name without a user
+// is actionable rather than a silent skip.
+func TestTestDSNMissingUserIsAnError(t *testing.T) {
+	cfg := &testConfig{DatabaseTest: testDatabaseSettings{Name: "appdb_test"}}
+	if _, err := cfg.testDSN(fakeEnv(nil)); err == nil || errors.Is(err, errTestDatabaseNotConfigured) {
+		t.Fatalf("testDSN = %v, want a configuration error", err)
+	}
+}
+
+// TestTestDSNMalformedAppPortIsAnError proves a malformed DB_PORT is a
+// configuration error, matching the application loader.
+func TestTestDSNMalformedAppPortIsAnError(t *testing.T) {
+	cfg := &testConfig{DatabaseTest: testDatabaseSettings{Name: "appdb_test"}}
+	if _, err := cfg.testDSN(fakeEnv(map[string]string{envDBPort: "not-a-number"})); err == nil {
+		t.Fatal("expected an error for a non-numeric DB_PORT")
+	}
+}
+
+// TestRequireDBReadsTheEnvironment proves the CI switch is opt-in.
+func TestRequireDBReadsTheEnvironment(t *testing.T) {
+	for value, want := range map[string]bool{
+		"": false, "0": false, "false": false, "no": false, "off": false,
+		"1": true, "true": true, "yes": true, "on": true,
+	} {
+		if got := requireDB(fakeEnv(map[string]string{envRequireDBTests: value})); got != want {
+			t.Errorf("requireDB(%q) = %t, want %t", value, got, want)
+		}
+	}
+}
+
+// TestParseTargetReadsHostPortAndDatabase pins the guard's comparison key
+// without a database.
+func TestParseTargetReadsHostPortAndDatabase(t *testing.T) {
+	got, ok := parseTarget("postgres://user:pw@db.internal:6543/app_test?sslmode=disable")
+	if !ok {
+		t.Fatal("parseTarget rejected a valid dsn")
+	}
+	want := target{host: "db.internal", port: 6543, database: "app_test"}
+	if got != want {
+		t.Fatalf("parseTarget = %+v, want %+v", got, want)
+	}
+}
+
+// TestParseTargetRejectsMalformedDSN proves a malformed dsn is not comparable
+// rather than compared with zero values.
+func TestParseTargetRejectsMalformedDSN(t *testing.T) {
+	if _, ok := parseTarget("://not-a-dsn"); ok {
+		t.Fatal("parseTarget accepted a malformed dsn")
+	}
+}
+
+// TestUniqueSchemaIsSafeToQuote proves the generated schema name is a plain
+// identifier and that quoting escapes an embedded quote.
+func TestUniqueSchemaIsSafeToQuote(t *testing.T) {
+	schema := uniqueSchema()
+	if !strings.HasPrefix(schema, "weld_test_") {
+		t.Fatalf("uniqueSchema = %q", schema)
+	}
+	if got := quoteIdentifier(`a"b`); got != `"a""b"` {
+		t.Fatalf("quoteIdentifier = %q", got)
+	}
+}

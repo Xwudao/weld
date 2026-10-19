@@ -740,3 +740,41 @@ func TestApplyRollsBackOnANewDiagnostic(t *testing.T) {
 		t.Fatalf("the rollback touched a file the plan did not write: %v", statErr)
 	}
 }
+
+// TestUpgradeDBAddsTheTestDatabaseHelper proves `weld upgrade db` is
+// self-contained: a project with an older db payload gains internal/testdb
+// without also needing a newer config payload, and the upgraded project still
+// builds and tests.
+func TestUpgradeDBAddsTheTestDatabaseHelper(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "db")
+
+	// Stand in for the older db payload: the helper did not ship yet. Removing it
+	// leaves the new integration test referencing a missing package, which is a
+	// pre-existing failure the upgrade is allowed to repair.
+	if err := os.RemoveAll(filepath.Join(dir, "internal", "testdb")); err != nil {
+		t.Fatalf("remove internal/testdb: %v", err)
+	}
+	manifest := mustLoad(t, dir)
+	for _, path := range []string{"internal/testdb/testdb.go", "internal/testdb/testdb_test.go"} {
+		manifest.RemoveFile(path)
+	}
+	manifest.SetCapabilityVersion("db", "0.1.1")
+	writeManifestFile(t, dir, manifest)
+
+	result := upgrade(t, dir, []string{"db"}, false)
+	for _, path := range []string{"internal/testdb/testdb.go", "internal/testdb/testdb_test.go"} {
+		plannedOperation(t, result.Result, path)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal", "testdb", "testdb.go")); err != nil {
+		t.Fatalf("the testdb helper was not written: %v", err)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}

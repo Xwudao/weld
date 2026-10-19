@@ -715,6 +715,8 @@ func TestAddDBInstallsAlone(t *testing.T) {
 		"internal/data/sqlc/items.sql.go",
 		"internal/data/data_test.go",
 		"internal/data/postgres_integration_test.go",
+		"internal/testdb/testdb.go",
+		"internal/testdb/testdb_test.go",
 		"internal/data/README.md",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
@@ -754,6 +756,7 @@ func TestAddDBInstallsAlone(t *testing.T) {
 		"migrate-up:",
 		"migrate-status:",
 		"migrate-down:",
+		"test-integration:",
 		"go tool sqlc generate",
 		"go tool goose",
 		`test -n "$$DATABASE_URL"`,
@@ -934,9 +937,16 @@ func TestAddDBMigrationTargetsAreGuarded(t *testing.T) {
 	if strings.Contains(integration, "DROP TABLE") {
 		t.Errorf("generated integration test contains a global DROP TABLE:\n%s", integration)
 	}
-	for _, want := range []string{"CREATE SCHEMA", "search_path", "DROP SCHEMA", "CASCADE"} {
-		if !strings.Contains(integration, want) {
-			t.Errorf("generated integration test is missing %q", want)
+	if !strings.Contains(integration, "testdb.Pool(t)") {
+		t.Errorf("generated integration test does not use the testdb helper:\n%s", integration)
+	}
+	helper := readFile(t, filepath.Join(dir, "internal", "testdb", "testdb.go"))
+	if strings.Contains(helper, "DROP TABLE") {
+		t.Errorf("generated testdb helper contains a global DROP TABLE:\n%s", helper)
+	}
+	for _, want := range []string{"CREATE SCHEMA", "search_path", "DROP SCHEMA", "CASCADE", "WELD_REQUIRE_DB_TESTS"} {
+		if !strings.Contains(helper, want) {
+			t.Errorf("generated testdb helper is missing %q", want)
 		}
 	}
 }
