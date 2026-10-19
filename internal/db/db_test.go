@@ -290,6 +290,27 @@ func TestCreateWritesTimestampedGooseSkeleton(t *testing.T) {
 	}
 }
 
+// TestCreateSortsAfterTheHighestMigration proves a new skeleton never lands
+// before a migration the project already has: goose refuses an older pending
+// migration without --allow-missing.
+func TestCreateSortsAfterTheHighestMigration(t *testing.T) {
+	dir := fakeProject(t, true)
+	existing := filepath.Join(dir, MigrationsDir, "20300101000000_future.sql")
+	if err := os.WriteFile(existing, []byte("-- +goose Up\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fixed := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+	result, err := Create(CreateRequest{Dir: dir, Name: "create_orders", Now: func() time.Time { return fixed }})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := filepath.Join(MigrationsDir, "20300101000001_create_orders.sql")
+	if result.Path != want {
+		t.Fatalf("path = %s, want %s (one past the highest existing)", result.Path, want)
+	}
+}
+
 // TestCommandsRequireTheDBCapability proves a project without db is rejected
 // before any command is planned.
 func TestCommandsRequireTheDBCapability(t *testing.T) {

@@ -78,7 +78,7 @@ func AddSeeder(req Request, name string) (*Result, error) {
 		}
 	}
 
-	if err := p.planNewFile(path, "seed:"+name, project.RoleSeam, seederFile(name)); err != nil {
+	if err := p.planNewFile(path, "seed:"+name, "", project.RoleSeam, seederFile(name)); err != nil {
 		return nil, err
 	}
 	registration := fmt.Sprintf("\t// weld:seed:%s:installed %s\n\tr.Register(%q, seed%s)\n",

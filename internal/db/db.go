@@ -1,6 +1,6 @@
 // Package db implements the `weld db` commands: it runs the project's pinned
 // goose migration tool against the database described by the project's own
-// config.yml (or DATABASE_URL), and creates timestamped migration files.
+// config.yml (or DATABASE_URL), and creates versioned migration files.
 //
 // The generated project already ships a nested db/tools module that pins goose,
 // and a Makefile that runs it. These commands add the same operations without
@@ -25,6 +25,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Xwudao/weld/internal/migration"
 	"github.com/Xwudao/weld/internal/project"
 )
 
@@ -315,7 +316,7 @@ type CreateRequest struct {
 	Name string
 	// DryRun prints the planned path without writing.
 	DryRun bool
-	// Now overrides the clock used for the timestamp prefix. A nil clock uses
+	// Now overrides the clock used for the version prefix. A nil clock uses
 	// time.Now.
 	Now func() time.Time
 }
@@ -329,10 +330,15 @@ type CreateResult struct {
 }
 
 // migrationNamePattern matches a migration name: lower_snake_case, suitable for
-// the filename suffix after the timestamp.
+// the filename suffix after the version.
 var migrationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
 
-// Create writes a timestamped goose migration skeleton.
+// Create writes a goose migration skeleton.
+//
+// The version follows goose's timestamp convention and is never smaller than one
+// past the highest version already in the directory: goose refuses an older
+// pending migration without --allow-missing, so the skeleton has to sort after
+// whatever the project or an installed capability already wrote.
 func Create(req CreateRequest) (*CreateResult, error) {
 	dir := strings.TrimSpace(req.Dir)
 	if dir == "" {
@@ -364,11 +370,11 @@ func Create(req CreateRequest) (*CreateResult, error) {
 		return nil, fmt.Errorf("weld db: migration %q already exists at %s", name, matches[0])
 	}
 
-	now := req.Now
-	if now == nil {
-		now = time.Now
+	version, err := migration.NewAllocator(migrationsDir, req.Now).Next()
+	if err != nil {
+		return nil, fmt.Errorf("weld db: inspect %s: %w", MigrationsDir, err)
 	}
-	target := filepath.Join(MigrationsDir, now().UTC().Format("20060102150405")+"_"+name+".sql")
+	target := filepath.Join(MigrationsDir, migration.Name(version, name))
 	result := &CreateResult{Path: target}
 	if req.DryRun {
 		return result, nil

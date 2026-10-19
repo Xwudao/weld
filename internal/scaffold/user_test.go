@@ -23,7 +23,6 @@ func TestAddUserUsesDataAndAuth(t *testing.T) {
 		t.Fatalf("installed = %q, want %q", got, want)
 	}
 	for _, path := range []string{
-		"db/migrations/000002_create_users.sql",
 		"db/query/users.sql",
 		"internal/data/user_repo.go",
 		"internal/data/user_repo_test.go",
@@ -60,7 +59,7 @@ func TestAddUserUsesDataAndAuth(t *testing.T) {
 		}
 	}
 
-	migration := readFile(t, filepath.Join(dir, "db", "migrations", "000002_create_users.sql"))
+	migration := readFile(t, migrationFile(t, dir, "create_users"))
 	for _, want := range []string{"bigint GENERATED ALWAYS AS IDENTITY", "username", "password_hash", "created_at", "updated_at", "roles"} {
 		if !strings.Contains(migration, want) {
 			t.Errorf("migration is missing %q:\n%s", want, migration)

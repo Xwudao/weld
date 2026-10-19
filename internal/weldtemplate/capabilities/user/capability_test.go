@@ -20,10 +20,11 @@ type descriptor struct {
 	Summary  string   `json:"summary"`
 	Requires []string `json:"requires"`
 	Files    []struct {
-		Path   string   `json:"path"`
-		Source string   `json:"source"`
-		Role   string   `json:"role"`
-		When   []string `json:"when"`
+		Path      string   `json:"path"`
+		Source    string   `json:"source"`
+		Role      string   `json:"role"`
+		Versioned bool     `json:"versioned"`
+		When      []string `json:"when"`
 	} `json:"files"`
 	Patches []struct {
 		Path   string `json:"path"`
@@ -67,7 +68,7 @@ func TestUserUsesTheDataAndAuthPackages(t *testing.T) {
 		paths[file.Path] = file.Source
 	}
 	for _, want := range []string{
-		"db/migrations/000002_create_users.sql",
+		"db/migrations/create_users.sql",
 		"db/query/users.sql",
 		"internal/data/user_repo.go",
 		"internal/data/user_repo_test.go",
@@ -87,6 +88,17 @@ func TestUserUsesTheDataAndAuthPackages(t *testing.T) {
 		if strings.HasPrefix(path, "internal/data/sqlc/") || strings.Contains(path, "usersqlc") {
 			t.Errorf("user ships generated sqlc output instead of letting make sqlc write it: %s", path)
 		}
+	}
+	// The migration is versioned: weld chooses its goose version at install time so
+	// it sorts after the project's own migrations.
+	var versioned bool
+	for _, file := range d.Files {
+		if file.Path == "db/migrations/create_users.sql" {
+			versioned = file.Versioned
+		}
+	}
+	if !versioned {
+		t.Error("user migration is not declared versioned")
 	}
 	var providerSeam bool
 	for _, file := range d.Files {
@@ -128,7 +140,7 @@ func TestUserUsesTheExistingSQLCConfigAndGenerator(t *testing.T) {
 }
 
 func TestUserMigrationHasTheAccountColumnsWithoutPlaintextPasswords(t *testing.T) {
-	raw, err := fs.ReadFile(weldtemplate.FS(), "capabilities/user/files/migrations/000002_create_users.sql")
+	raw, err := fs.ReadFile(weldtemplate.FS(), "capabilities/user/files/migrations/create_users.sql")
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}

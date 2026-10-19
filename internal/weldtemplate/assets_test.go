@@ -28,6 +28,7 @@ type descriptor struct {
 		Path       string   `json:"path"`
 		Source     string   `json:"source"`
 		Role       string   `json:"role"`
+		Versioned  bool     `json:"versioned"`
 		When       []string `json:"when"`
 		WhenAbsent []string `json:"whenAbsent"`
 	} `json:"files"`
@@ -224,7 +225,7 @@ func TestDBCapabilityRequiresLoomNeverHTTP(t *testing.T) {
 	}
 	for _, want := range []string{
 		"sqlc.yaml",
-		"db/migrations/000001_create_items.sql",
+		"db/migrations/create_items.sql",
 		"db/query/items.sql",
 		"db/tools/go.mod",
 		"db/tools/go.sum",
@@ -241,6 +242,18 @@ func TestDBCapabilityRequiresLoomNeverHTTP(t *testing.T) {
 		if !paths[want] {
 			t.Errorf("db capability does not ship %s", want)
 		}
+	}
+	// The migration must be versioned: its goose version is chosen when the
+	// capability is installed, so it sorts after the project's own migrations and
+	// never forces --allow-missing.
+	var versioned bool
+	for _, file := range d.Files {
+		if file.Path == "db/migrations/create_items.sql" {
+			versioned = file.Versioned
+		}
+	}
+	if !versioned {
+		t.Error("db migration is not declared versioned")
 	}
 	var deps, makefile, configLocal, configExample bool
 	for _, patch := range d.Patches {
@@ -445,7 +458,7 @@ func TestDBCapabilityMigrationAndTestSafety(t *testing.T) {
 		t.Errorf("the goose migration tool is not pinned in db/tools:\n%s", toolsMod)
 	}
 
-	migration, err := fs.ReadFile(FS(), "capabilities/db/files/migrations/000001_create_items.sql")
+	migration, err := fs.ReadFile(FS(), "capabilities/db/files/migrations/create_items.sql")
 	if err != nil {
 		t.Fatalf("read db migration: %v", err)
 	}

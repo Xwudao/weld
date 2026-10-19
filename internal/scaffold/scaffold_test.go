@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Xwudao/weld/internal/migration"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/template"
 )
@@ -102,6 +103,21 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(raw)
+}
+
+// migrationFile returns the single goose migration named name, whose version
+// prefix weld chose when the capability was installed. A test that hard-coded
+// one would re-introduce the fixed numbering this layout removed.
+func migrationFile(t *testing.T, dir, name string) string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "db", "migrations", "*_"+name+".sql"))
+	if err != nil {
+		t.Fatalf("glob migration %s: %v", name, err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("migrations named %s = %v, want exactly one", name, matches)
+	}
+	return matches[0]
 }
 
 func TestCreateWritesMinimalCLI(t *testing.T) {
@@ -705,7 +721,6 @@ func TestAddDBInstallsAlone(t *testing.T) {
 		"config.yml",
 		"config.example.yml",
 		"sqlc.yaml",
-		"db/migrations/000001_create_items.sql",
 		"db/query/items.sql",
 		"db/tools/go.mod",
 		"db/tools/go.sum",
@@ -833,7 +848,11 @@ func TestAddDBIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestAddDBRejectsUnmanagedFile(t *testing.T) {
+// TestAddDBNeverOverwritesAnUnmanagedMigration proves the migration a project
+// already wrote is left alone and the capability's own migration is versioned
+// after it, so installing db into a project with SQL of its own never needs
+// --allow-missing and never clobbers a user file.
+func TestAddDBNeverOverwritesAnUnmanagedMigration(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
@@ -841,23 +860,25 @@ func TestAddDBRejectsUnmanagedFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "db", "migrations"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	userFile := filepath.Join(dir, "db", "migrations", "000001_create_items.sql")
+	userFile := filepath.Join(dir, "db", "migrations", migration.Name(migration.Version(fixedClock()), "items"))
 	if err := os.WriteFile(userFile, []byte("-- mine\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	makefileBefore := readFile(t, filepath.Join(dir, "Makefile"))
-	if _, err := Add(Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true}, "db"); err == nil {
-		t.Fatal("expected conflict for unmanaged file")
+	request := Request{Dir: dir, Catalog: newCatalog(), WithDependencies: true, Now: fixedNow()}
+	result, err := Add(request, "db")
+	if err != nil {
+		t.Fatalf("Add db: %v", err)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("Apply add db: %v", err)
 	}
 	if readFile(t, userFile) != "-- mine\n" {
-		t.Fatal("user file was modified")
+		t.Fatal("the project's own migration was modified")
 	}
-	if readFile(t, filepath.Join(dir, "Makefile")) != makefileBefore {
-		t.Fatal("Makefile changed on conflicting add")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "internal/data")); !os.IsNotExist(err) {
-		t.Fatal("partial files were written on failure")
+	migrated := migrationFile(t, dir, "create_items")
+	if versionOf(t, migrated) <= versionOf(t, userFile) {
+		t.Fatalf("%s does not sort after the project's own migration %s", migrated, userFile)
 	}
 }
 

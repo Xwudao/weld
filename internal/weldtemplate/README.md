@@ -338,7 +338,8 @@ exists.
 ## Database: SQL source of truth and generated code
 
 `db` keeps the SQL authoritative. `db/migrations` holds the schema (one goose
-migration file per change, with `-- +goose Up` / `-- +goose Down` sections),
+migration file per change, with `-- +goose Up` / `-- +goose Down` sections and a
+version chosen at install or creation time, never a fixed payload number),
 `db/query` holds the named sqlc queries, and `sqlc.yaml` lists the query files
 and generates `internal/data/sqlc`. A capability that adds another query package
 appends a second entry to the same `sqlc.yaml`, so there is still one config and
@@ -410,6 +411,19 @@ Two optional fields let a payload vary with the installed set:
   planned only when those capabilities are (or are not) installed; and
 - a `patch` may carry `mode: "replace"` to rewrite its region instead of
   appending, which is how `loom`, `mail` and `storage` set the `go` directive.
+
+A `file` may carry `versioned: true`, which marks a **goose migration**. Its
+`path` is the file's name without a version (`db/migrations/create_users.sql`) and
+the project receives `<version>_create_users.sql`. The version is chosen when the
+capability is installed — the later of the UTC timestamp and one past the highest
+version already in that directory — because goose orders migrations by that
+integer and refuses an out-of-order file without `--allow-missing`. A fixed
+number in a payload would always sort before the project's own timestamped
+migrations, and would collide with a migration the project wrote itself. The
+manifest records both the chosen path and the payload `source`, so upgrade
+rewrites that file and never renames it (a migration may already be applied), and
+`--prune` does not mistake it for a retired file. `weld db create` follows the
+same rule, so a project has one numbering convention.
 
 A capability may also declare a `di` object (`dir`, `source`, `test`). It is a
 `text/template` rendered against the installed capability set and formatted as

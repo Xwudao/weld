@@ -14,8 +14,10 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Xwudao/weld/internal/loomgen"
+	"github.com/Xwudao/weld/internal/migration"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/semver"
 	"github.com/Xwudao/weld/internal/template"
@@ -52,6 +54,9 @@ type Request struct {
 	// list writes the plan unchecked, which is the library default; the CLI sets
 	// it, so `weld upgrade` cannot leave a project that does not compile.
 	Verify []string
+	// Now overrides the clock used to version a capability migration. A nil clock
+	// uses time.Now; tests set it so a planned migration filename is predictable.
+	Now func() time.Time
 }
 
 // Result is a planned scaffold action.
@@ -262,6 +267,9 @@ type planner struct {
 	// planned, so a capability's conditional payload follows the set that will
 	// exist once the plan is applied.
 	present map[string]bool
+	// migrations allocates goose versions per migration directory, created on
+	// first use so a plan that ships no migration never reads the project.
+	migrations map[string]*migration.Allocator
 }
 
 func newPlanner(req Request, manifest *project.Manifest, result *Result) *planner {
@@ -288,7 +296,7 @@ func (p *planner) upsert(operation project.Operation) {
 // planNewFile plans a file that must not already exist. A path planned twice by
 // two payloads, and a path that exists without weld owning it, are both
 // conflicts, so a user file is never overwritten.
-func (p *planner) planNewFile(path, capability string, role project.Role, content []byte) error {
+func (p *planner) planNewFile(path, capability, source string, role project.Role, content []byte) error {
 	if _, exists := p.planned[path]; exists {
 		return &project.ConflictError{Path: path, Reason: "planned by another capability"}
 	}
@@ -299,8 +307,50 @@ func (p *planner) planNewFile(path, capability string, role project.Role, conten
 	}
 	p.planned[path] = content
 	p.upsert(project.Operation{Path: path, Content: content})
-	p.manifest.SetFile(path, capability, role, content)
+	p.manifest.SetPayloadFile(path, capability, source, role, content)
 	return nil
+}
+
+// payloadPath returns the project path for a capability file.
+//
+// A versioned file (a goose migration) gets a version allocated now, so an
+// installed capability never writes a migration that sorts before one the project
+// already has; every other file keeps its declared path.
+func (p *planner) payloadPath(capability string, file template.File) (string, error) {
+	if !file.Versioned {
+		return file.Path, nil
+	}
+	dir := path.Dir(file.Path)
+	// A migration with the payload's own name already in the project is not weld's
+	// to duplicate: the same schema change is probably applied already, and a second
+	// migration that creates the same table would fail when goose runs it.
+	matches, err := filepath.Glob(filepath.Join(p.req.Dir, dir, "*_"+path.Base(file.Path)))
+	if err != nil {
+		return "", fmt.Errorf("inspect %s: %w", dir, err)
+	}
+	if len(matches) > 0 {
+		existing, err := filepath.Rel(p.req.Dir, matches[0])
+		if err != nil {
+			existing = matches[0]
+		}
+		return "", &project.ConflictError{
+			Path:   existing,
+			Reason: fmt.Sprintf("a migration named %s already exists; capability %q would run the same change again, so move or remove it first", path.Base(file.Path), capability),
+		}
+	}
+	if p.migrations == nil {
+		p.migrations = map[string]*migration.Allocator{}
+	}
+	allocator, ok := p.migrations[dir]
+	if !ok {
+		allocator = migration.NewAllocator(filepath.Join(p.req.Dir, dir), p.req.Now)
+		p.migrations[dir] = allocator
+	}
+	version, err := allocator.Next()
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", dir, err)
+	}
+	return file.ProjectPath(migration.Format(version)), nil
 }
 
 // planMarker inserts a snippet into the named marker region of a managed file,
@@ -342,7 +392,11 @@ func (p *planner) installCapability(capability *template.Capability) error {
 		if role == "" {
 			role = project.RolePayload
 		}
-		if err := p.planNewFile(file.Path, capability.Name, role, rendered); err != nil {
+		target, err := p.payloadPath(capability.Name, file)
+		if err != nil {
+			return err
+		}
+		if err := p.planNewFile(target, capability.Name, file.Source, role, rendered); err != nil {
 			return err
 		}
 	}
@@ -638,7 +692,7 @@ func (p *planner) restoreMissingDIFiles() error {
 			if role == "" {
 				role = project.RolePayload
 			}
-			if err := p.planNewFile(file.Path, capability.Name, role, template.Render(content, vars)); err != nil {
+			if err := p.planNewFile(file.Path, capability.Name, "", role, template.Render(content, vars)); err != nil {
 				return err
 			}
 		}

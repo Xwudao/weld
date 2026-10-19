@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Xwudao/weld/internal/project"
@@ -290,32 +292,40 @@ func (p *planner) upgradeCapability(capability *template.Capability, prune bool,
 			// the project's content depend on the order.
 			continue
 		}
+		target, err := p.payloadTarget(capability, file)
+		if err != nil {
+			return nil, nil, err
+		}
+		// The project path a versioned migration was installed under is declared
+		// too, so the retired-file pass below never mistakes it for a file the
+		// payload stopped shipping.
+		declared[target] = true
 		content, err := capability.ReadFile(file)
 		if err != nil {
 			return nil, nil, err
 		}
 		rendered := template.Render(content, vars)
 
-		if current, ok := p.planned[file.Path]; ok {
+		if current, ok := p.planned[target]; ok {
 			if bytes.Equal(current, rendered) {
 				continue
 			}
-			return nil, nil, &project.ConflictError{Path: file.Path, Reason: "planned by another capability"}
+			return nil, nil, &project.ConflictError{Path: target, Reason: "planned by another capability"}
 		}
 
-		onDisk, readErr := os.ReadFile(filepath.Join(root, file.Path))
+		onDisk, readErr := os.ReadFile(filepath.Join(root, target))
 		exists := readErr == nil
 		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return nil, nil, readErr
 		}
-		entry, recorded := p.manifest.FileEntry(file.Path)
+		entry, recorded := p.manifest.FileEntry(target)
 
-		role := capability.RoleOf(file.Path)
-		if role == project.RolePayload && shared[file.Path] {
+		role := capability.RoleOf(target)
+		if role == project.RolePayload && shared[target] {
 			role = project.RolePatched
 		}
 
-		candidate, advisory, err := p.upgradeCandidate(file.Path, capability.Name, role, rendered, onDisk, exists, entry, recorded)
+		candidate, advisory, err := p.upgradeCandidate(target, capability.Name, role, rendered, onDisk, exists, entry, recorded)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -327,13 +337,13 @@ func (p *planner) upgradeCapability(capability *template.Capability, prune bool,
 			continue
 		}
 		if !exists {
-			if err := p.planNewFile(file.Path, capability.Name, role, candidate); err != nil {
+			if err := p.planNewFile(target, capability.Name, file.Source, role, candidate); err != nil {
 				return nil, nil, err
 			}
 		} else {
-			p.planManagedOverwrite(file.Path, capability.Name, role, candidate)
+			p.planManagedOverwrite(target, capability.Name, file.Source, role, candidate)
 		}
-		planned = append(planned, file.Path)
+		planned = append(planned, target)
 	}
 
 	// Files the manifest records under this capability that the newer payload no
@@ -547,12 +557,59 @@ func (p *planner) seamElsewhere(target string) bool {
 	return false
 }
 
+// payloadTarget returns the project path an upgrade writes a payload file to.
+//
+// A migration keeps the path it was installed with: renaming a migration that may
+// already have been applied would corrupt the project. Only a migration that is
+// not in the project yet gets a freshly allocated version.
+func (p *planner) payloadTarget(capability *template.Capability, file template.File) (string, error) {
+	if !file.Versioned {
+		return file.Path, nil
+	}
+	if target, ok, err := p.installedMigration(capability, file); err != nil || ok {
+		return target, err
+	}
+	return p.payloadPath(capability.Name, file)
+}
+
+// installedMigration finds the migration this project already holds for a
+// versioned payload file.
+//
+// The manifest's recorded source is authoritative. A manifest written before
+// sources were recorded is matched by the payload's file name and goose version
+// prefix, which also covers a project that installed the capability when its
+// migration still carried a fixed number. An ambiguous match is a conflict rather
+// than a guess about which of two migrations is the payload's.
+func (p *planner) installedMigration(capability *template.Capability, file template.File) (string, bool, error) {
+	if entry, ok := p.manifest.FileEntryForSource(capability.Name, file.Source); ok {
+		return entry.Path, true, nil
+	}
+	var matches []string
+	for _, entry := range p.manifest.ManagedFiles(capability.Name) {
+		if file.ShipsPath(entry.Path) {
+			matches = append(matches, entry.Path)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		sort.Strings(matches)
+		return "", false, &project.ConflictError{
+			Path:   matches[0],
+			Reason: fmt.Sprintf("capability %q recorded %d migrations named %s; weld cannot tell which one it installed", capability.Name, len(matches), path.Base(file.Path)),
+		}
+	}
+}
+
 // planManagedOverwrite rewrites a file weld owns whose content still matches the
 // manifest, so the write cannot lose a project edit.
-func (p *planner) planManagedOverwrite(path, capability string, role project.Role, content []byte) {
+func (p *planner) planManagedOverwrite(path, capability, source string, role project.Role, content []byte) {
 	p.planned[path] = content
 	p.upsert(project.Operation{Path: path, Content: content, Overwrite: true})
-	p.manifest.SetFile(path, capability, role, content)
+	p.manifest.SetPayloadFile(path, capability, source, role, content)
 }
 
 // planManagedDelete removes a file weld owns and drops its manifest record. The

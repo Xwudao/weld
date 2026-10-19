@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"strings"
 
+	"github.com/Xwudao/weld/internal/migration"
 	"github.com/Xwudao/weld/internal/project"
 	weldtemplate "github.com/Xwudao/weld/internal/weldtemplate"
 )
@@ -71,6 +73,43 @@ type File struct {
 	// vary deterministically with the installed capability set.
 	When       []string `json:"when,omitempty"`
 	WhenAbsent []string `json:"whenAbsent,omitempty"`
+	// Versioned marks a goose migration. Its project path carries a version
+	// chosen when the capability is installed, so the file sorts after every
+	// migration the project already has. Path names the file without a version
+	// ("db/migrations/create_users.sql") and the payload is written as
+	// "<version>_create_users.sql".
+	Versioned bool `json:"versioned,omitempty"`
+}
+
+// ProjectPath returns the project path a file is written to. For a versioned
+// file, version is the goose version chosen at install time; every other file
+// ignores it and keeps its declared path.
+func (f File) ProjectPath(version string) string {
+	if !f.Versioned {
+		return f.Path
+	}
+	return path.Join(path.Dir(f.Path), version+"_"+path.Base(f.Path))
+}
+
+// ShipsPath reports whether target is a project path this file produces.
+//
+// A versioned file matches a sibling whose name is its own with a goose version
+// prefix, because the version was chosen when the file was installed and is not
+// known in advance. That is how upgrade finds the migration it wrote instead of
+// allocating a second version for the same schema change.
+func (f File) ShipsPath(target string) bool {
+	if !f.Versioned {
+		return f.Path == target
+	}
+	if path.Dir(f.Path) != path.Dir(target) {
+		return false
+	}
+	base := path.Base(target)
+	if !strings.HasSuffix(base, "_"+path.Base(f.Path)) {
+		return false
+	}
+	_, ok := migration.Parse(base)
+	return ok
 }
 
 // Patch is a snippet inserted at a named extension point in an existing file.
@@ -197,6 +236,17 @@ func (c *Capability) validate() error {
 		default:
 			return fmt.Errorf("capability %q: file %s: unknown role %q", c.Name, file.Path, file.Role)
 		}
+		if file.Versioned {
+			if c.Kind == KindBase {
+				return fmt.Errorf("capability %q: file %s: a base capability cannot ship a versioned file", c.Name, file.Path)
+			}
+			if path.Dir(file.Path) == "." || !strings.HasSuffix(file.Path, ".sql") {
+				return fmt.Errorf("capability %q: file %s: a versioned file must be a .sql file inside a directory", c.Name, file.Path)
+			}
+			if _, ok := migration.Parse(file.Path); ok {
+				return fmt.Errorf("capability %q: file %s: a versioned file must not carry a version prefix", c.Name, file.Path)
+			}
+		}
 		if err := c.requireSource(file.Source); err != nil {
 			return err
 		}
@@ -254,8 +304,11 @@ func (c *Capability) DIPaths() []string {
 	return paths
 }
 
-// PayloadPaths lists every project path the capability ships: its file entries
-// in payload order, then its generated DI sources.
+// PayloadPaths lists every path the capability declares: its file entries in
+// payload order, then its generated DI sources. A versioned file contributes its
+// declared path, which is the payload's identity; the project path it was written
+// to depends on the version chosen at install time and is recorded in the
+// manifest.
 //
 // It is the one enumeration install, upgrade and prune consult, so a file that
 // ships through the di entry (internal/di/di.go) is never mistaken for one the
@@ -269,10 +322,11 @@ func (c *Capability) PayloadPaths() []string {
 	return append(paths, c.DIPaths()...)
 }
 
-// FileFor returns the file entry that ships path.
-func (c *Capability) FileFor(path string) (File, bool) {
+// FileFor returns the file entry that ships target, matching a versioned file by
+// its name and version prefix rather than by an exact path.
+func (c *Capability) FileFor(target string) (File, bool) {
 	for _, file := range c.Files {
-		if file.Path == path {
+		if file.ShipsPath(target) {
 			return file, true
 		}
 	}

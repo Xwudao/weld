@@ -157,7 +157,7 @@ func (p *planner) planCommandFacet(commandTemplate *template.CommandTemplate, va
 			return err
 		}
 		path := string(template.Render([]byte(file.Path), pathVars(vars)))
-		if err := p.planNewFile(path, capability, project.RoleSeam, content); err != nil {
+		if err := p.planNewFile(path, capability, "", project.RoleSeam, content); err != nil {
 			return err
 		}
 	}

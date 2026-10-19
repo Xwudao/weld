@@ -35,7 +35,7 @@ func newDBCommand() *cobra.Command {
 
 	create := &cobra.Command{
 		Use:   "create <name>",
-		Short: "write a timestamped goose migration skeleton",
+		Short: "write a versioned goose migration skeleton",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("usage: %s db create <name> [--dir dir] [--dry-run]", progName)
@@ -126,7 +126,7 @@ func runDBMigrate(cmd *cobra.Command, action db.Action, destructive bool) error 
 	return nil
 }
 
-// runDBCreate writes a timestamped migration skeleton.
+// runDBCreate writes a versioned migration skeleton.
 func runDBCreate(cmd *cobra.Command, args []string) error {
 	stdout := cmd.OutOrStdout()
 	dir, err := cmd.Flags().GetString("dir")
@@ -158,7 +158,11 @@ func dbHelp() string {
                             apply a migration older than the DB's current version
   weld db migrate status    show which migrations are applied
   weld db migrate down      revert exactly one migration (requires --yes or CONFIRM=1)
-  weld db create <name>     write db/migrations/<timestamp>_<name>.sql
+  weld db create <name>     write db/migrations/<version>_<name>.sql
+
+The version is the later of the current time and one past the highest version
+already in db/migrations, so a new migration never sorts before an existing one;
+goose refuses an older pending migration without --allow-missing.
 
 The project must have the db capability installed. The dsn is read from the
 application's config.yml (database.dsn or the host/port/user/password/name

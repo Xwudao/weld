@@ -172,7 +172,7 @@ func AddEnum(req Request, name string, values []string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := p.planNewFile(humanPath, "enum:"+name, project.RoleSeam, human); err != nil {
+	if err := p.planNewFile(humanPath, "enum:"+name, "", project.RoleSeam, human); err != nil {
 		return nil, err
 	}
 

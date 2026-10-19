@@ -1,6 +1,6 @@
 {
   "name": "user",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "kind": "add",
   "summary": "Opt-in user accounts: a PostgreSQL users migration and sqlc query, a repository under internal/data generated through the project's single sqlc.yaml, bcrypt registration/login under internal/auth, and JWT session issuance. Installing it creates no account, no administrator and no route.",
   "requires": [
@@ -9,8 +9,9 @@
   ],
   "files": [
     {
-      "path": "db/migrations/000002_create_users.sql",
-      "source": "files/migrations/000002_create_users.sql"
+      "path": "db/migrations/create_users.sql",
+      "source": "files/migrations/create_users.sql",
+      "versioned": true
     },
     {
       "path": "db/query/users.sql",

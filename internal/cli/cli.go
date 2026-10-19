@@ -937,7 +937,7 @@ Database:
   version, which is how an installed capability's migration is added to an
   existing database. down reverts exactly one migration and requires --yes or
   CONFIRM=1.
-  db create <name> writes db/migrations/<timestamp>_<name>.sql as a goose
+  db create <name> writes db/migrations/<version>_<name>.sql as a goose
   skeleton. The db capability must be installed, and --config names a different
   application configuration file.
 

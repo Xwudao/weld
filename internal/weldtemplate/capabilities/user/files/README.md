@@ -3,7 +3,9 @@
 Account persistence and authentication for __name__. The code follows the
 project's data/auth split instead of adding a top-level `internal/user` package:
 
-- `db/migrations/000002_create_users.sql` — the `users` table.
+- `db/migrations/<version>_create_users.sql` — the `users` table. weld chooses
+  the version at install time so it sorts after every migration the project
+  already has.
 - `db/query/users.sql` — the named account statements. The existing
   `sqlc.yaml` already reads the whole `db/query` directory, so no config change
   is needed.
@@ -44,7 +46,7 @@ example a UUID `public_id`) instead of exposing the identity as a capability.
 
 `user` 0.2.0 changes `users.id` from a random `text` value to
 `bigint GENERATED ALWAYS AS IDENTITY`. A new project gets the new table from
-`000002_create_users.sql`. If an existing database already applied the 0.1.0
+the generated `create_users.sql`. If an existing database already applied the 0.1.0
 migration, replacing the file does **not** change the live table; `weld upgrade
 user` updates source files, not the database. For local development with no
 account data, drop and recreate the table (or the database) and migrate again.
@@ -113,7 +115,8 @@ The table is a normal goose migration:
 
 ```sh
 weld db migrate up
-# If this database already has migrations newer than 000002:
+# Only for a project scaffolded before migrations were versioned at install time,
+# whose database already has migrations newer than the fixed 000002:
 weld db migrate up --allow-missing
 ```
 

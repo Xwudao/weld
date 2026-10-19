@@ -140,10 +140,14 @@ if it does not, the inputs changed.
 ## Migrations
 
 Migrations are goose migration files under `db/migrations`, one file per
-change, each with a `-- +goose Up` and a `-- +goose Down` section. goose tracks
-applied versions in a `goose_db_version` table, so `migrate-up` is idempotent:
-running it again applies nothing. The goose binary is pinned in `db/tools`, the
-same nested module as sqlc, so no global install is needed.
+change, each with a `-- +goose Up` and a `-- +goose Down` section and a version
+prefix chosen at install or creation time. goose tracks applied versions in a
+`goose_db_version` table and compares that prefix, so a new migration always
+sorts after the existing ones: `weld add db`, `weld add user` and `weld db create`
+all pick the later of the current UTC timestamp and one past the highest version
+already here. That is why applying a capability's migration needs no
+`--allow-missing`. The goose binary is pinned in `db/tools`, the same nested module
+as sqlc, so no global install is needed.
 
 The Makefile targets read the dsn from `DATABASE_URL` and refuse to run without
 it; without the guard goose (and psql) would silently fall back to a local

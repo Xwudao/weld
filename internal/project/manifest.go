@@ -105,6 +105,14 @@ type ManagedFile struct {
 	// file entry that shipped it. A legacy manifest records none, which upgrade
 	// reads as RolePayload.
 	Role Role `json:"role,omitempty"`
+	// Source is the payload file (capability.json's source) that produced Path. It
+	// is recorded only when the project path was chosen at install time rather
+	// than declared, which is a goose migration: the payload ships
+	// db/migrations/create_users.sql and the project gets
+	// db/migrations/<version>_create_users.sql. Upgrade needs the stable source to
+	// find the migration again instead of writing a second one for the same
+	// schema change.
+	Source string `json:"source,omitempty"`
 	// Baseline reports that SHA256 was recorded by weld writing this file, so a
 	// match means the project has not changed it. A manifest written by an older
 	// weld has none: it refreshed hashes it did not write.
@@ -255,14 +263,47 @@ func (m *Manifest) AddCommand(ref CommandRef) {
 // SetFile records or updates a managed file, the capability and role that
 // produced it, and its content hash.
 func (m *Manifest) SetFile(path, capability string, role Role, content []byte) {
-	entry := ManagedFile{Path: path, Capability: capability, Role: role, Baseline: true, SHA256: HashContent(content)}
+	m.setFile(ManagedFile{Path: path, Capability: capability, Role: role, Baseline: true, SHA256: HashContent(content)})
+}
+
+// SetPayloadFile is SetFile for a capability payload, additionally recording the
+// payload source that produced it when the project path was chosen at install
+// time (a versioned goose migration).
+//
+// An empty source keeps whatever the manifest already recorded, so rewriting a
+// file whose path was chosen at install time never forgets where it came from.
+func (m *Manifest) SetPayloadFile(path, capability, source string, role Role, content []byte) {
+	if source == "" {
+		if existing, ok := m.FileEntry(path); ok {
+			source = existing.Source
+		}
+	}
+	m.setFile(ManagedFile{Path: path, Capability: capability, Role: role, Source: source, Baseline: true, SHA256: HashContent(content)})
+}
+
+// setFile upserts a managed file record.
+func (m *Manifest) setFile(entry ManagedFile) {
 	for i := range m.Files {
-		if m.Files[i].Path == path {
+		if m.Files[i].Path == entry.Path {
 			m.Files[i] = entry
 			return
 		}
 	}
 	m.Files = append(m.Files, entry)
+}
+
+// FileEntryForSource returns the file a capability recorded for a payload source,
+// so an upgrade can find a file whose project path was chosen at install time.
+func (m *Manifest) FileEntryForSource(capability, source string) (ManagedFile, bool) {
+	if source == "" {
+		return ManagedFile{}, false
+	}
+	for _, file := range m.Files {
+		if file.Capability == capability && file.Source == source {
+			return file, true
+		}
+	}
+	return ManagedFile{}, false
 }
 
 // SetPatchedFile records the content hash of a shared file after a marker patch
