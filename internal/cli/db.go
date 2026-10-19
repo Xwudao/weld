@@ -166,6 +166,9 @@ fields, with DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME overrides), or from
 DATABASE_URL, which takes precedence. An empty DATABASE_URL is ignored. The dsn
 is passed to goose but never printed: dry runs show $DATABASE_URL instead.
 
+Run weld gen sqlc to regenerate internal/data/sqlc from db/migrations and
+db/query with the sqlc version pinned in db/tools.
+
 --config names a different application configuration file, relative to --dir.
 down reverts one migration and refuses to run without an explicit confirmation.
 

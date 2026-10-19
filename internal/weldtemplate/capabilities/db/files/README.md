@@ -114,8 +114,19 @@ toolchain, and Go's automatic toolchain download fetches the newer one for
 make sqlc
 ```
 
-or run the pinned tool directly (note the working directory: the tool must run
-inside its module, while the `-f` flag points back at `sqlc.yaml`):
+From a weld-managed checkout the same generator is available as `weld gen sqlc`
+(and `weld gen sqlc --check` in CI, which runs `sqlc diff` and fails without
+writing when the committed files are stale). It invokes the pinned tool from
+`db/tools` exactly like the Makefile does:
+
+```sh
+weld gen sqlc
+weld gen sqlc --check
+```
+
+Either path ultimately runs the pinned tool directly (note the working
+directory: the tool must run inside its module, while the `-f` flag points back
+at `sqlc.yaml`):
 
 ```sh
 cd db/tools && go tool sqlc generate -f ../../sqlc.yaml

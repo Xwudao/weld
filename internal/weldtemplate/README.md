@@ -342,7 +342,7 @@ migration file per change, with `-- +goose Up` / `-- +goose Down` sections),
 `db/query` holds the named sqlc queries, and `sqlc.yaml` lists the query files
 and generates `internal/data/sqlc`. A capability that adds another query package
 appends a second entry to the same `sqlc.yaml`, so there is still one config and
-one `make sqlc` command. The
+one `weld gen sqlc` command (`make sqlc` is the no-weld fallback). The
 hand-written `internal/data/data.go` wraps the generated queries behind a small
 `Repository` interface, converts generated rows to a domain `Item`, exposes
 `NewPool` for the connection pool and `WithTx` for a narrow transaction.
@@ -361,7 +361,8 @@ purpose, so neither tool's large dependency graph enters the application
 `go.mod` or its `go test ./...`:
 
 ```sh
-make sqlc
+weld gen sqlc            # or: make sqlc
+weld gen sqlc --check    # CI: fail on stale generated files
 make migrate-up          # idempotent; requires DATABASE_URL
 make migrate-status
 CONFIRM=1 make migrate-down   # reverts exactly one migration

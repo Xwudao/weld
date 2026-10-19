@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Xwudao/weld/internal/db"
 	"github.com/Xwudao/weld/internal/loomgen"
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/scaffold"
@@ -281,8 +282,8 @@ func runAddEnum(cmd *cobra.Command, args []string) error {
 }
 
 // newGenCommand builds `weld gen`, the umbrella for the project's code
-// generators. A bare invocation runs every generator that applies; the `enum`
-// and `loom` subcommands select one.
+// generators. A bare invocation runs every generator that applies; the `enum`,
+// `loom` and `sqlc` subcommands select one.
 func newGenCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "gen",
@@ -290,13 +291,13 @@ func newGenCommand() *cobra.Command {
 		Long:  genHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 0 {
-				return fmt.Errorf("usage: %s gen [enum|loom] [--dir dir] [--dry-run]", progName)
+				return fmt.Errorf("usage: %s gen [enum|loom|sqlc] [--dir dir] [--dry-run]", progName)
 			}
 			return nil
 		},
 		RunE: runGen,
 	}
-	cmd.AddCommand(newGenEnumCommand(), newGenLoomCommand())
+	cmd.AddCommand(newGenEnumCommand(), newGenLoomCommand(), newGenSQLCCommand())
 	return cmd
 }
 
@@ -310,11 +311,17 @@ A bare ` + progName + ` gen runs every generator that applies to the project:
          so editing a value and running ` + progName + ` gen enum refreshes the derived methods
   loom   rebuild internal/di/loom_gen.go with the generator pinned in tools/loom
          (the same generator make generate runs, without the make fallback)
+  sqlc   regenerate internal/data/sqlc from db/migrations and db/query with the
+         generator pinned in db/tools (the same generator make sqlc runs)
 
 The enum generator reads the human-owned internal/enums/*.go files (the type and
 its constants) and writes one <name>_gen.go per enum. It never rewrites the
 definition file. ` + progName + ` gen enum --check reports stale files without writing,
-for CI; --prune deletes a generated file whose enum no longer exists.`
+for CI; --prune deletes a generated file whose enum no longer exists.
+
+The sqlc generator only applies when the db capability is installed.
+` + progName + ` gen sqlc --check compares the committed generated files with the
+pinned generator and fails instead of writing when they are stale.`
 }
 
 // runGen runs every generator that applies to the project.
@@ -343,6 +350,12 @@ func runGen(cmd *cobra.Command, args []string) error {
 	}
 	if manifest.HasCapability("loom") {
 		if err := genLoom(stdout, dir, dryRun); err != nil {
+			return err
+		}
+		ran = true
+	}
+	if manifest.HasCapability("db") {
+		if err := genSQLC(stdout, cmd.ErrOrStderr(), dir, false, dryRun); err != nil {
 			return err
 		}
 		ran = true
@@ -475,6 +488,77 @@ func genLoom(stdout io.Writer, dir string, dryRun bool) error {
 		return err
 	}
 	fmt.Fprintln(stdout, "Regenerated internal/di/loom_gen.go")
+	return nil
+}
+
+// newGenSQLCCommand builds `weld gen sqlc`.
+func newGenSQLCCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "sqlc",
+		Short: "regenerate internal/data/sqlc from db/migrations and db/query",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return fmt.Errorf("usage: %s gen sqlc [--check] [--dir dir] [--dry-run]", progName)
+			}
+			return nil
+		},
+		RunE: runGenSQLC,
+	}
+	cmd.Flags().Bool("check", false, "report stale generated files and fail instead of writing")
+	return cmd
+}
+
+// runGenSQLC plans and applies `weld gen sqlc`.
+func runGenSQLC(cmd *cobra.Command, args []string) error {
+	dir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return err
+	}
+	check, err := cmd.Flags().GetBool("check")
+	if err != nil {
+		return err
+	}
+	return genSQLC(cmd.OutOrStdout(), cmd.ErrOrStderr(), dir, check, dryRun)
+}
+
+// genSQLC regenerates internal/data/sqlc with the pinned generator. It is a
+// no-op note when the db capability is not installed.
+func genSQLC(stdout, stderr io.Writer, dir string, check, dryRun bool) error {
+	manifest, err := project.Load(dir)
+	if err != nil {
+		return err
+	}
+	if !manifest.HasCapability("db") {
+		fmt.Fprintln(stdout, "db is not installed; nothing to generate.")
+		return nil
+	}
+	result, err := db.SQLC(db.SQLCRequest{
+		Dir:    dir,
+		Check:  check,
+		DryRun: dryRun,
+		Stdout: stdout,
+		Stderr: stderr,
+	})
+	if err != nil {
+		return err
+	}
+	if dryRun {
+		label := "generator"
+		if check {
+			label = "check"
+		}
+		fmt.Fprintf(stdout, "Plan (1 %s, dry run):\n  %s\n", label, result.Step)
+		return nil
+	}
+	if check {
+		fmt.Fprintln(stdout, "generated sqlc files are up to date.")
+		return nil
+	}
+	fmt.Fprintf(stdout, "Ran 1 generator (sqlc):\n  %s\n", result.Step)
 	return nil
 }
 
@@ -869,7 +953,10 @@ Generators:
   rewrites only the generated ones; --check reports stale files for CI, and
   --prune deletes a generated file whose enum no longer exists. gen loom
   rebuilds internal/di/loom_gen.go with the pinned tools/loom generator (the
-  same generator make generate runs, without the make fallback).
+  same generator make generate runs, without the make fallback). gen sqlc
+  regenerates internal/data/sqlc from db/migrations and db/query with the
+  generator pinned in db/tools (the same generator make sqlc runs); --check
+  reports stale generated files for CI.
 
 Upgrades:
   upgrade moves installed capabilities to the template versions this weld

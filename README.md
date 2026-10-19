@@ -63,7 +63,7 @@ weld db migrate up|status|down [--config path] [--yes] [--allow-missing] [--dir 
 weld db create <name> [--dir dir] [--dry-run]
 weld doctor [--json] [--dir dir]
 weld upgrade [capability...] [--check] [--prune] [--verify vet|build|none] [--dir dir] [--dry-run]
-weld gen [enum|loom] [--dir dir] [--dry-run]
+weld gen [enum|loom|sqlc] [--dir dir] [--dry-run]
 weld dev [--dir dir]
 weld build [--docker] [--image tag] [--dockerfile path] [--platform os/arch] [--dir dir]
 weld docker init [--dir dir] [--dry-run]
@@ -629,9 +629,10 @@ What lands in the project:
 - `internal/data/README.md`, and the `go.mod` dependency and `Makefile` `db`
   regions patched.
 
-The generator is reproducible: `make sqlc` (or `cd db/tools && go tool sqlc
-generate -f ../../sqlc.yaml`) regenerates `internal/data/sqlc`, and a
-regeneration must reproduce the committed files byte for byte. Migrations run
+The generator is reproducible: `weld gen sqlc` (the same command as `make sqlc`,
+or `cd db/tools && go tool sqlc generate -f ../../sqlc.yaml`) regenerates
+`internal/data/sqlc`, and a regeneration must reproduce the committed files byte
+for byte. `weld gen sqlc --check` runs the diff form for CI. Migrations run
 through the pinned goose tool: `make migrate-up` applies pending changes
 idempotently, `make migrate-status` reports versions, and `make migrate-down`
 reverts exactly one change only with `CONFIRM=1`. Every migration target
@@ -1023,11 +1024,25 @@ weld gen enum --prune  # delete a *_gen.go whose enum no longer exists
 ```
 
 `weld gen` with no subcommand runs every generator that applies to the project:
-the enum generator when `internal/enums` exists, and `weld gen loom` when Loom is
-installed. `weld gen loom` rebuilds `internal/di/loom_gen.go` with the generator
-pinned in `tools/loom` — the same generator `make generate` runs, invoked
-without the make fallback. The `make generate` target is kept as the no-weld
-fallback for the Loom graph.
+the enum generator when `internal/enums` exists, `weld gen loom` when Loom is
+installed, and `weld gen sqlc` when the db capability is installed. `weld gen
+loom` rebuilds `internal/di/loom_gen.go` with the generator pinned in
+`tools/loom` — the same generator `make generate` runs, invoked without the
+make fallback. The `make generate` target is kept as the no-weld fallback for
+the Loom graph.
+
+The sqlc generator is the same one `make sqlc` runs, pinned in the nested
+`db/tools` module and driven from the project root so `sqlc.yaml` resolves its
+paths correctly:
+
+```bash
+weld gen sqlc          # rewrite internal/data/sqlc from db/migrations + db/query
+weld gen sqlc --check  # CI: fail when the committed generated files are stale
+```
+
+`--check` runs `sqlc diff`, prints the unified diff and fails without writing;
+run the command without `--check` to refresh the files. Both forms are also
+available through `make sqlc`.
 
 A `*_gen.go` file is only overwritten when it carries the generated header, so a
 user file that happens to share the name is never clobbered. Use a pointer

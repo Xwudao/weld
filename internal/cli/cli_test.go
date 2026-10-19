@@ -1083,6 +1083,64 @@ func TestGenLoomRequiresLoom(t *testing.T) {
 	}
 }
 
+func TestGenSQLCRequiresDBAndPlansThePinnedCommand(t *testing.T) {
+	out, err := run(t, "gen", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"sqlc", "db/tools", "--check"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("gen help omitted %q:\n%s", want, out)
+		}
+	}
+
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--module", "example.com/demo", "--dir", root); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dir := filepath.Join(root, "demo")
+
+	out, err = run(t, "gen", "sqlc", "--dir", dir)
+	if err != nil {
+		t.Fatalf("gen sqlc without db: %v", err)
+	}
+	if !strings.Contains(out, "db is not installed") {
+		t.Fatalf("gen sqlc output = %q", out)
+	}
+
+	if _, err := run(t, "add", "db", "--with-dependencies", "--dir", dir); err != nil {
+		t.Fatalf("add db: %v", err)
+	}
+
+	out, err = run(t, "gen", "sqlc", "--dry-run", "--dir", dir)
+	if err != nil {
+		t.Fatalf("gen sqlc --dry-run: %v", err)
+	}
+	for _, want := range []string{"Plan (1 generator, dry run):", "go tool sqlc generate -f ../../sqlc.yaml"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("gen sqlc dry-run omitted %q: %q", want, out)
+		}
+	}
+
+	out, err = run(t, "gen", "sqlc", "--check", "--dry-run", "--dir", dir)
+	if err != nil {
+		t.Fatalf("gen sqlc --check --dry-run: %v", err)
+	}
+	for _, want := range []string{"Plan (1 check, dry run):", "go tool sqlc diff -f ../../sqlc.yaml"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("gen sqlc check dry-run omitted %q: %q", want, out)
+		}
+	}
+
+	out, err = run(t, "gen", "--dry-run", "--dir", dir)
+	if err != nil {
+		t.Fatalf("gen --dry-run: %v", err)
+	}
+	if !strings.Contains(out, "go tool sqlc generate") {
+		t.Fatalf("bare gen did not plan sqlc: %q", out)
+	}
+}
+
 func TestDeployHelpAndDryRun(t *testing.T) {
 	out, err := run(t, "deploy", "--help")
 	if err != nil {
