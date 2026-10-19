@@ -155,6 +155,40 @@ func TestLoadReadsDatabaseFromFile(t *testing.T) {
 	}
 }
 
+// TestAutoMigrateLoadsFromFileAndEnvironment proves the startup migration toggle
+// is typed and that DB_AUTO_MIGRATE outranks the file, so a deployment can turn
+// it on without rebuilding the config file. A malformed value is an error rather
+// than a silent false.
+func TestAutoMigrateLoadsFromFileAndEnvironment(t *testing.T) {
+	cfg, err := fakeLoader(map[string]string{
+		DefaultPath: "database:\n  auto_migrate: true\n",
+	}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Database.AutoMigrate {
+		t.Fatal("database.auto_migrate was not loaded from the file")
+	}
+
+	cfg, err = fakeLoader(
+		map[string]string{DefaultPath: "database:\n  auto_migrate: true\n"},
+		map[string]string{EnvDBAutoMigrate: "false"},
+	).Load("")
+	if err != nil {
+		t.Fatalf("Load with environment override: %v", err)
+	}
+	if cfg.Database.AutoMigrate {
+		t.Fatal("DB_AUTO_MIGRATE=false did not override the file")
+	}
+
+	if _, err := fakeLoader(
+		map[string]string{DefaultPath: ""},
+		map[string]string{EnvDBAutoMigrate: "maybe"},
+	).Load(""); err == nil {
+		t.Fatal("expected an error for a malformed DB_AUTO_MIGRATE")
+	}
+}
+
 // TestValidateDatabaseRequiresCredentials proves the loader never invents a
 // credential: an empty database section is invalid only when the database is
 // used.

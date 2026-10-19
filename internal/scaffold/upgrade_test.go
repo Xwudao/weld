@@ -778,3 +778,56 @@ func TestUpgradeDBAddsTheTestDatabaseHelper(t *testing.T) {
 		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 	}
 }
+
+// TestUpgradeDBAddsStartupMigrations proves an older db project gains the
+// embedded migrations and the startup runner in place, without losing the
+// project's config or migration files. The check is not just the planned writes:
+// the upgraded project is built and tested with the new goose dependency, whose
+// library require the toolchain-owned go.mod gains through tidy.
+func TestUpgradeDBAddsStartupMigrations(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "db")
+
+	// Stand in for the older db payload: none of the startup-migration files
+	// shipped yet, so the project a user has on disk does not contain them.
+	for _, path := range []string{
+		"db/embed.go",
+		"internal/migrate/migrate.go",
+		"internal/migrate/migrate_test.go",
+		"internal/di/migrate_provider.go",
+		"internal/di/migrate_provider_test.go",
+	} {
+		if err := os.Remove(filepath.Join(dir, path)); err != nil {
+			t.Fatalf("remove %s: %v", path, err)
+		}
+		forget(t, dir, path)
+	}
+	downgrade(t, dir, "db", "0.2.2")
+
+	result := upgrade(t, dir, []string{"db"}, false)
+	for _, path := range []string{
+		"db/embed.go",
+		"internal/migrate/migrate.go",
+		"internal/migrate/migrate_test.go",
+		"internal/di/migrate_provider.go",
+		"internal/di/migrate_provider_test.go",
+	} {
+		plannedOperation(t, result.Result, path)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	embed := readFile(t, filepath.Join(dir, "db", "embed.go"))
+	if !strings.Contains(embed, "//go:embed migrations/*.sql") {
+		t.Fatalf("upgraded db does not embed its migrations:\n%s", embed)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dir, "go.mod")), "github.com/pressly/goose/v3") {
+		t.Fatal("the upgraded project does not require the goose library")
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}

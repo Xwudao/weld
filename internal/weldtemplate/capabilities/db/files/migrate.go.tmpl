@@ -1,0 +1,99 @@
+// Package migrate applies the project's embedded goose migrations at startup.
+//
+// The files under db/migrations are the single source of schema truth. `make
+// migrate-up` and `weld db migrate up` run the pinned goose tool against that
+// directory, while this package runs the same files and the same
+// goose_db_version table from the binary. Neither path owns a private version
+// ledger, so switching between them is safe and applies each migration once.
+//
+// The runner is opt-in: internal/di calls it only when config.yml's
+// database.auto_migrate is true. It applies pending migrations (never down) and
+// uses a PostgreSQL session-level advisory lock, so two replicas starting at the
+// same moment serialize instead of racing the schema.
+package migrate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/lock"
+
+	"__module__/db"
+	"__module__/internal/logging"
+)
+
+// connectTimeout bounds a single connection attempt when the dsn does not set
+// connect_timeout. It does not bound how long the migrations themselves may run.
+const connectTimeout = 10 * time.Second
+
+// Runner applies the embedded migrations to a PostgreSQL database.
+//
+// Construct it with NewRunner. It holds no connection: Up opens one only when it
+// is called, so a project with auto-migrate off never reaches the database.
+type Runner struct {
+	logger logging.Logger
+}
+
+// NewRunner returns a runner that reports through logger. A nil logger is valid
+// and suppresses the summary records; migration errors are always returned.
+func NewRunner(logger logging.Logger) *Runner {
+	return &Runner{logger: logger}
+}
+
+// Up applies every pending migration in db/migrations to dsn.
+//
+// It validates the dsn before connecting, so a malformed value never echoes its
+// password in an error. The connection is closed before Up returns, and a
+// session-level advisory lock serializes concurrent startup migrators. Up is
+// idempotent: a database already at the newest version reports no work.
+func (r *Runner) Up(ctx context.Context, dsn string) error {
+	connConfig, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		// The parser error can quote the dsn, including its password, so it is
+		// never wrapped into an error the caller may log.
+		return errors.New("migrate: invalid PostgreSQL dsn")
+	}
+	if connConfig.ConnectTimeout == 0 {
+		connConfig.ConnectTimeout = connectTimeout
+	}
+	sqlDB := stdlib.OpenDB(*connConfig)
+	defer sqlDB.Close()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("migrate: connect to the database: %w", err)
+	}
+
+	locker, err := lock.NewPostgresSessionLocker()
+	if err != nil {
+		return fmt.Errorf("migrate: configure the migration lock: %w", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, db.Migrations,
+		goose.WithLogger(goose.NopLogger()),
+		goose.WithSessionLocker(locker),
+	)
+	if err != nil {
+		return fmt.Errorf("migrate: prepare the embedded migrations: %w", err)
+	}
+	results, err := provider.Up(ctx)
+	if err != nil {
+		return fmt.Errorf("migrate: apply migrations: %w", err)
+	}
+	if len(results) == 0 {
+		if r != nil && r.logger != nil {
+			r.logger.Debug("no pending migrations")
+		}
+		return nil
+	}
+	versions := make([]int64, len(results))
+	for i, result := range results {
+		versions[i] = result.Source.Version
+	}
+	if r != nil && r.logger != nil {
+		r.logger.Info("applied pending migrations", "count", len(results), "versions", versions)
+	}
+	return nil
+}

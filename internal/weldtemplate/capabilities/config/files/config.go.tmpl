@@ -73,6 +73,9 @@ const (
 	EnvDBPassword  = "DB_PASSWORD"
 	EnvDBName      = "DB_NAME"
 	EnvDatabaseURL = "DATABASE_URL"
+	// EnvDBAutoMigrate overrides database.auto_migrate, so a deployment can turn
+	// startup migrations on without editing the image's config.yml.
+	EnvDBAutoMigrate = "DB_AUTO_MIGRATE"
 
 	// CORS environment names. They exist so a deployed origin list is not baked
 	// into the image: CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
@@ -256,6 +259,12 @@ type Database struct {
 	Password Secret `yaml:"password"`
 	Name     string `yaml:"name"`
 	DSN      Secret `yaml:"dsn"`
+	// AutoMigrate makes a serving process apply the embedded db/migrations files
+	// before it binds its socket. It is off by default: starting the wrong binary
+	// against the wrong database must never change that database's schema. It is
+	// read only by the db capability's startup runner; a project without db
+	// ignores it. See internal/data/README.md.
+	AutoMigrate bool `yaml:"auto_migrate"`
 }
 
 // ReadFileFunc reads a file. It is a dependency so a test can supply content
@@ -357,6 +366,13 @@ func (l *Loader) applyEnv(cfg *Config) error {
 	}
 	if value, ok := l.lookupEnv(EnvDatabaseURL); ok {
 		cfg.Database.DSN = Secret(strings.TrimSpace(value))
+	}
+	if value, ok := l.lookupEnv(EnvDBAutoMigrate); ok {
+		enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a boolean", EnvDBAutoMigrate)
+		}
+		cfg.Database.AutoMigrate = enabled
 	}
 	if value, ok := l.lookupEnv(EnvCORSEnabled); ok {
 		enabled, err := strconv.ParseBool(strings.TrimSpace(value))

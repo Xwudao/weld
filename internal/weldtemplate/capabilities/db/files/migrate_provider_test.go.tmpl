@@ -1,0 +1,44 @@
+package di
+
+import (
+	"context"
+	"io"
+	"strings"
+	"testing"
+
+	"__module__/internal/config"
+	"__module__/internal/logging"
+)
+
+// TestNewAutoMigrateDisabledNeedsNoDatabase proves the setting is the only thing
+// that turns the feature on: with auto_migrate off, even an unusable dsn and an
+// empty database section are harmless, so installing db does not make serving
+// require a credential.
+func TestNewAutoMigrateDisabledNeedsNoDatabase(t *testing.T) {
+	cfg := &config.Config{Database: config.Database{DSN: "://not-a-dsn"}}
+	runner, err := NewAutoMigrate(context.Background(), cfg, discardMigrateLogger())
+	if err != nil {
+		t.Fatalf("NewAutoMigrate with auto_migrate off: %v", err)
+	}
+	if runner == nil {
+		t.Fatal("NewAutoMigrate returned a nil runner")
+	}
+}
+
+// TestNewAutoMigrateEnabledValidatesTheDatabase proves turning the setting on
+// makes the database section mandatory, with the same readable error NewPool
+// reports.
+func TestNewAutoMigrateEnabledValidatesTheDatabase(t *testing.T) {
+	cfg := &config.Config{Database: config.Database{AutoMigrate: true}}
+	_, err := NewAutoMigrate(context.Background(), cfg, discardMigrateLogger())
+	if err == nil {
+		t.Fatal("expected an error when auto_migrate is on without database settings")
+	}
+	if !strings.Contains(err.Error(), "database.host") {
+		t.Fatalf("error = %v, want it to name the missing database setting", err)
+	}
+}
+
+func discardMigrateLogger() logging.Logger {
+	return logging.New(io.Discard, logging.TextFormat, &logging.Options{NoColor: true})
+}

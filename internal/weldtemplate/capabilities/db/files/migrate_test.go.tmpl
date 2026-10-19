@@ -1,0 +1,52 @@
+package migrate
+
+import (
+	"context"
+	"io/fs"
+	"strings"
+	"testing"
+
+	projectdb "__module__/db"
+)
+
+// TestEmbeddedMigrationsContainTheShippedMigration proves the binary really
+// carries db/migrations: `weld add db` writes a versioned create_items file and
+// the embed pattern must pick it up regardless of the version prefix.
+func TestEmbeddedMigrationsContainTheShippedMigration(t *testing.T) {
+	names, err := fs.Glob(projectdb.Migrations, "*.sql")
+	if err != nil {
+		t.Fatalf("glob embedded migrations: %v", err)
+	}
+	found := false
+	for _, name := range names {
+		if strings.HasSuffix(name, "_create_items.sql") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("embedded migrations = %v, want the create_items migration", names)
+	}
+}
+
+// TestUpRequiresADatabaseDSN proves a blank dsn fails before any connection is
+// attempted.
+func TestUpRequiresADatabaseDSN(t *testing.T) {
+	if err := NewRunner(nil).Up(context.Background(), "  "); err == nil {
+		t.Fatal("expected an error for a blank dsn")
+	}
+}
+
+// TestUpRejectsAnInvalidDSNWithoutEchoingIt guards the credential boundary: pgx's
+// parser error can quote the dsn and its password, so Up must replace it with a
+// fixed message.
+func TestUpRejectsAnInvalidDSNWithoutEchoingIt(t *testing.T) {
+	const sentinel = "sentinel-do-not-log"
+	dsn := "postgres://app:" + sentinel + "@%zz/app"
+	err := NewRunner(nil).Up(context.Background(), dsn)
+	if err == nil {
+		t.Fatal("expected an error for a malformed dsn")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("error echoed the credential: %v", err)
+	}
+}

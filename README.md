@@ -219,7 +219,8 @@ Capabilities:
   `internal/httpserver/README.md` with composition, binding and testing examples.
 - `web` (add) — React + TypeScript + Vite frontend, served by `http`. Requires pnpm and Node.js 20.19+ or 22.12+ (Vite 8).
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
-  code, an injectable connection pool and a repository. Requires `loom` but not
+  code, an injectable connection pool and a repository, and optional startup
+  migration from the migrations embedded in the binary. Requires `loom` but not
   `http`: it adds a pruned binding and no server.
 - `seed` (add) — opt-in database seeding: named, idempotent seeders run by a
   short `seed` command (`make seed`, `weld seed`) over the repositories the Loom
@@ -622,6 +623,11 @@ What lands in the project:
   (`tool github.com/sqlc-dev/sqlc/cmd/sqlc` and
   `tool github.com/pressly/goose/v3/cmd/goose`), so neither tool's large
   dependency graph ever enters the app `go.mod` or `go test ./...`;
+- `db/embed.go`, which embeds `db/migrations/*.sql` into the binary, and
+  `internal/migrate`, which applies them through the goose library. The goose
+  *library* is an application dependency; the goose and sqlc *commands* remain in
+  `db/tools`. `internal/di/migrate_provider.go` makes the runner a no-op unless
+  the setting below is on;
 - `internal/data/sqlc/`, the generated code, shipped so the project compiles and
   tests immediately with no tool installed;
 - `internal/data/data.go`, the `Repository`/`Item` wrapper, `NewPool` and
@@ -648,6 +654,30 @@ requires `DATABASE_URL` explicitly, so none can silently fall back to a local
 database. `pgx/v5` is pinned in the
 `weld:deps` region at the newest release that keeps the project's Go toolchain
 floor; no local path or credential is committed.
+
+### Startup migrations
+
+Set `database.auto_migrate` (or `DB_AUTO_MIGRATE`) to make `serve` apply every
+pending embedded migration before it binds the socket:
+
+```yaml
+database:
+  # ...
+  auto_migrate: true
+```
+
+A failed migration fails graph construction, so the process never serves against
+a half-migrated schema. The runner applies only pending `Up` migrations, uses the
+same `goose_db_version` table as `make migrate-up` and `weld db migrate up`, and
+takes a PostgreSQL session-level advisory lock so concurrent replicas serialize.
+
+It is off by default: starting a binary with the wrong dsn must not silently
+change that database's schema. The setting is read by the server graph only; a
+short command such as `seed` does not migrate. `make migrate-up` remains the
+explicit deploy path, and `migrate-down` still requires `CONFIRM=1`. `weld
+upgrade` moves an existing `config.yml` only as an advisory because the file is
+project-owned, so add the `auto_migrate` line yourself after upgrading a project
+created before this setting existed.
 
 `db` is independent of `http` and `web`. The HTTP DTOs are never derived from
 sqlc rows, and `internal/data` never

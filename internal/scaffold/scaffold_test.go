@@ -792,8 +792,13 @@ func TestAddDBInstallsAlone(t *testing.T) {
 	if !strings.Contains(toolsMod, "github.com/pressly/goose/v3/cmd/goose") {
 		t.Errorf("db/tools/go.mod does not pin the goose migration tool:\n%s", toolsMod)
 	}
-	if strings.Contains(goMod, "sqlc-dev/sqlc") || strings.Contains(goMod, "pressly/goose") {
+	if strings.Contains(goMod, "sqlc-dev/sqlc") || strings.Contains(goMod, "pressly/goose/v3/cmd/goose") {
 		t.Errorf("a db tool leaked into the application go.mod:\n%s", goMod)
+	}
+	// The goose library itself is an application dependency: the server applies
+	// the embedded migrations at startup. The command-line tool stays nested.
+	if !strings.Contains(goMod, "require github.com/pressly/goose/v3 v") {
+		t.Errorf("go.mod does not require the goose startup-migration library:\n%s", goMod)
 	}
 
 	manifest, err := project.Load(dir)

@@ -225,6 +225,7 @@ func TestDBCapabilityRequiresLoomNeverHTTP(t *testing.T) {
 	}
 	for _, want := range []string{
 		"sqlc.yaml",
+		"db/embed.go",
 		"db/migrations/create_items.sql",
 		"db/query/items.sql",
 		"db/tools/go.mod",
@@ -237,6 +238,10 @@ func TestDBCapabilityRequiresLoomNeverHTTP(t *testing.T) {
 		"internal/data/postgres_integration_test.go",
 		"internal/testdb/testdb.go",
 		"internal/testdb/testdb_test.go",
+		"internal/migrate/migrate.go",
+		"internal/migrate/migrate_test.go",
+		"internal/di/migrate_provider.go",
+		"internal/di/migrate_provider_test.go",
 		"internal/data/README.md",
 	} {
 		if !paths[want] {
@@ -331,6 +336,8 @@ func TestConfigCapabilityContract(t *testing.T) {
 		"func (Secret) MarshalJSON()",
 		"func (c *Config) ValidateDatabase() error",
 		"func NewLoader(readFile ReadFileFunc, lookupEnv LookupEnvFunc) *Loader",
+		"AutoMigrate bool `yaml:\"auto_migrate\"`",
+		`EnvDBAutoMigrate = "DB_AUTO_MIGRATE"`,
 		"gopkg.in/yaml.v3",
 	} {
 		if !strings.Contains(loaderText, want) {
@@ -418,6 +425,40 @@ func TestDBCapabilityPayloadsAreSqlcOutputAndPinnedTool(t *testing.T) {
 	}
 	if !strings.Contains(string(snippet), "require github.com/jackc/pgx/v5 v5.7.6") {
 		t.Errorf("db go.mod snippet does not pin pgx/v5:\n%s", snippet)
+	}
+	if !strings.Contains(string(snippet), "require github.com/pressly/goose/v3 v3.26.0") {
+		t.Errorf("db go.mod snippet does not pin the goose library for startup migrations:\n%s", snippet)
+	}
+	if strings.Contains(string(snippet), "goose/v3/cmd/goose") {
+		t.Error("db go.mod snippet pins the goose command, not just the library")
+	}
+
+	// The embedded migration tree and the runner that applies it are the startup
+	// migration feature; the embed pattern must stay limited to SQL files so a
+	// helper or README in db/migrations never reaches goose's scanner.
+	embed, err := fs.ReadFile(FS(), "capabilities/db/files/embed.go")
+	if err != nil {
+		t.Fatalf("read db embed.go: %v", err)
+	}
+	for _, want := range []string{"//go:embed migrations/*.sql", "var Migrations", "func mustSub"} {
+		if !strings.Contains(string(embed), want) {
+			t.Errorf("db embed.go is missing %q", want)
+		}
+	}
+	runner, err := fs.ReadFile(FS(), "capabilities/db/files/migrate.go.tmpl")
+	if err != nil {
+		t.Fatalf("read migrate.go: %v", err)
+	}
+	for _, want := range []string{
+		"github.com/pressly/goose/v3",
+		"goose.NewProvider",
+		"goose.WithSessionLocker",
+		"__module__/db",
+		"invalid PostgreSQL dsn",
+	} {
+		if !strings.Contains(string(runner), want) {
+			t.Errorf("migrate.go is missing %q", want)
+		}
 	}
 }
 
@@ -1062,7 +1103,7 @@ func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read di template: %v", err)
 	}
-	for _, want := range []string{`{{- if .Caps.Has "db"}}`, "NewPool", "loom.Provide(NewPool)"} {
+	for _, want := range []string{`{{- if .Caps.Has "db"}}`, "NewPool", "loom.Provide(NewPool)", "NewAutoMigrate", "loom.Provide(NewAutoMigrate)"} {
 		if !strings.Contains(string(graph), want) {
 			t.Errorf("di template is missing %q", want)
 		}

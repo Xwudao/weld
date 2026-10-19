@@ -106,10 +106,14 @@ capabilities/
                    registered by the Loom server graph
   db/              kind: add    -> PostgreSQL, requires loom
     capability.json
-    files/         db/migrations (goose), db/query, sqlc.yaml, db/tools (nested
+    files/         db/embed.go (migrations embedded into the binary),
+                   db/migrations (goose), db/query, sqlc.yaml, db/tools (nested
                    module pinning sqlc and goose), internal/data (Repository +
-                   pool), generated internal/data/sqlc, internal/testdb
-                   (database_test resolver and per-test-schema pool), snippets
+                   pool), internal/migrate (opt-in startup migration through the
+                   goose library), generated internal/data/sqlc,
+                   internal/testdb (database_test resolver and per-test-schema
+                   pool), internal/di/migrate_provider.go (stable Loom seam),
+                   snippets
   seed/            kind: add    -> database seeding, requires db
     capability.json
     files/         internal/data/seeder (Deps, Registry, Runner, the stable
@@ -376,7 +380,10 @@ when `DATABASE_URL` is unset, and `migrate-down` requires `CONFIRM=1` so it can
 never roll back the whole schema by accident.
 
 `pgx/v5` is pinned in the `weld:deps` region of the generated `go.mod` at the
-newest release that keeps the project's Go toolchain floor. Generated sqlc code
+newest release that keeps the project's Go toolchain floor. The goose *library*
+is pinned there too, because `internal/migrate` applies the embedded migrations
+when `database.auto_migrate` is on; the goose *command* stays in the nested
+`db/tools` module, whose dependency graph is much larger. Generated sqlc code
 imports `pgx`; it carries no placeholder tokens and no local path, so nothing
 machine-specific is committed into a scaffolded project.
 

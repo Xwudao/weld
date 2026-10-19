@@ -41,7 +41,11 @@
 // repository the project registers in internal/di/providers.go, turns
 // the pool on for the roots that consume it. There is deliberately no default
 // data.Repository binding: the generated project never claims a production
-// consumer it does not have. Installing redis, mail or
+// consumer it does not have. The server graph is the one exception: it consumes
+// NewAutoMigrate, which applies the embedded db/migrations files during graph
+// construction when database.auto_migrate is on and is inert otherwise, so
+// serving never requires a database unless the project enables that setting.
+// Installing redis, mail or
 // storage likewise adds a binding and prunes it unless a provider asks for
 // *redis.Client, *mailsender.Sender or *objectstore.Store (see
 // internal/redisclient/README.md, internal/mailsender/README.md and
@@ -84,6 +88,9 @@ import (
 {{- if .Caps.Has "db"}}
 	"github.com/jackc/pgx/v5/pgxpool"
 	"__module__/internal/data"
+{{- end}}
+{{- if and (.Caps.Has "db") (.Caps.Has "http")}}
+	"__module__/internal/migrate"
 {{- end}}
 {{- if .Caps.Has "seed"}}
 	"__module__/internal/data/seeder"
@@ -342,6 +349,14 @@ var appGraph = loom.Graph[*App](
 	loom.Provide(NewCronJobs),
 	loom.Provide(NewScheduler),
 {{- end}}
+{{- if .Caps.Has "db"}}
+	// The startup migration runner is constructed with the graph and consumed by
+	// NewApp, so every pending embedded migration is applied before the server
+	// binds its socket. It is inert unless database.auto_migrate is on, so this
+	// does not make serving require a database credential. The stable wiring is
+	// internal/di/migrate_provider.go.
+	loom.Provide(NewAutoMigrate),
+{{- end}}
 	// Business policy wiring lives in the stable di/http_policies.go seam.
 	// Add service parameters there without importing business modules into
 	// httpserver or editing this generated graph.
@@ -367,8 +382,11 @@ type App struct {
 }
 
 // NewApp is the graph root. The scheduler is taken after the server so the
-// server's lifecycle hook is appended first.
-func NewApp(cfg *config.Config{{if .Caps.Has "events"}}, _ *EventListeners{{end}}, server *httpserver.Server{{if .Caps.Has "cron"}}, scheduler *cron.Scheduler, _ *CronJobs{{end}}) *App {
+// server's lifecycle hook is appended first. The startup migration runner
+// (installed with db) is a side-effect dependency: taking it here constructs it
+// during InitApp, so a pending migration is applied before lifecycle.Start, and
+// it is inert unless database.auto_migrate is on.
+func NewApp(cfg *config.Config{{if .Caps.Has "events"}}, _ *EventListeners{{end}}{{if .Caps.Has "db"}}, _ *migrate.Runner{{end}}, server *httpserver.Server{{if .Caps.Has "cron"}}, scheduler *cron.Scheduler, _ *CronJobs{{end}}) *App {
 	return &App{Config: cfg, Server: server{{if .Caps.Has "cron"}}, Scheduler: scheduler{{end}}}
 }
 

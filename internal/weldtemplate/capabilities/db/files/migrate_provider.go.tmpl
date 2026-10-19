@@ -1,0 +1,34 @@
+package di
+
+import (
+	"context"
+
+	"__module__/internal/config"
+	"__module__/internal/logging"
+	"__module__/internal/migrate"
+)
+
+// NewAutoMigrate is the server graph's startup migration seam.
+//
+// The graph root consumes the runner, so it is constructed during InitApp and
+// the migration completes before lifecycle.Start binds the HTTP socket. A
+// project with database.auto_migrate off gets an inert runner and never touches
+// the database: installing db alone still requires no credential, exactly like
+// NewPool. When the setting is on, the database section is validated and every
+// pending embedded migration is applied with goose before serving starts.
+//
+// A failed migration fails InitApp, so a process never starts serving against a
+// half-migrated schema.
+func NewAutoMigrate(ctx context.Context, cfg *config.Config, logger logging.Logger) (*migrate.Runner, error) {
+	runner := migrate.NewRunner(logger)
+	if !cfg.Database.AutoMigrate {
+		return runner, nil
+	}
+	if err := cfg.ValidateDatabase(); err != nil {
+		return nil, err
+	}
+	if err := runner.Up(ctx, cfg.DSN()); err != nil {
+		return nil, err
+	}
+	return runner, nil
+}

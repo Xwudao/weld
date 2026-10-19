@@ -1,11 +1,12 @@
 {
   "name": "db",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "kind": "add",
-  "summary": "PostgreSQL persistence: SQL migrations and queries, sqlc-generated code, an injectable pool and repository.",
+  "summary": "PostgreSQL persistence: SQL migrations and queries, sqlc-generated code, an injectable pool and repository, plus optional startup migration from the embedded db/migrations files.",
   "requires": ["loom"],
   "files": [
     { "path": "sqlc.yaml", "source": "files/sqlc.yaml" },
+    { "path": "db/embed.go", "source": "files/embed.go" },
     { "path": "db/migrations/create_items.sql", "source": "files/migrations/create_items.sql", "versioned": true },
     { "path": "db/query/items.sql", "source": "files/query/items.sql" },
     { "path": "db/tools/go.mod", "source": "files/tools/go.mod.tmpl" },
@@ -18,6 +19,10 @@
     { "path": "internal/data/sqlc/items.sql.go", "source": "files/sqlc/items.sql.go.tmpl" },
     { "path": "internal/data/data_test.go", "source": "files/data_test.go.tmpl" },
     { "path": "internal/data/postgres_integration_test.go", "source": "files/postgres_integration_test.go.tmpl" },
+    { "path": "internal/migrate/migrate.go", "source": "files/migrate.go.tmpl" },
+    { "path": "internal/migrate/migrate_test.go", "source": "files/migrate_test.go.tmpl" },
+    { "path": "internal/di/migrate_provider.go", "source": "files/migrate_provider.go.tmpl", "when": ["loom"] },
+    { "path": "internal/di/migrate_provider_test.go", "source": "files/migrate_provider_test.go.tmpl", "when": ["loom"] },
     { "path": "internal/data/README.md", "source": "files/README.md" }
   ],
   "patches": [

@@ -9,6 +9,11 @@ database:
   password: ""
   name: ""
   dsn: ""
+  # Apply the embedded db/migrations files when the server starts, instead of
+  # running `make migrate-up` in the deploy pipeline. Off by default: starting
+  # the wrong binary against the wrong database must not change its schema.
+  # DB_AUTO_MIGRATE overrides it. See internal/data/README.md.
+  auto_migrate: false
 
 # The PostgreSQL integration tests use a dedicated database, never the one
 # above. Set database_test.name to run them (for example app_test); the other

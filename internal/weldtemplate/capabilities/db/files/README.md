@@ -8,9 +8,10 @@ not depend on the HTTP layer.
 
 `weld add db` installs this package; it does not connect it. Nothing in the
 generated application constructs a pool or a repository, and serving the HTTP
-capability never requires database credentials. A generated business module's
-default `Service` is an in-memory development demo whose data is lost on
-restart.
+capability never requires database credentials. The one database hook the server
+graph owns is the optional startup migration described below, and it is inert
+unless `database.auto_migrate` is on. A generated business module's default
+`Service` is an in-memory development demo whose data is lost on restart.
 
 To use the database, construct the pool and repository yourself and inject them
 where your business code needs them:
@@ -148,6 +149,32 @@ all pick the later of the current UTC timestamp and one past the highest version
 already here. That is why applying a capability's migration needs no
 `--allow-missing`. The goose binary is pinned in `db/tools`, the same nested module
 as sqlc, so no global install is needed.
+
+### Startup migrations
+
+`db/embed.go` embeds the migration files into the binary, and
+`internal/migrate` applies them with the goose library. It is opt-in through
+`config.yml` (or the `DB_AUTO_MIGRATE` environment override):
+
+```yaml
+database:
+  # ...
+  auto_migrate: true
+```
+
+With it on, the server graph applies every pending migration during `serve`
+before the HTTP socket is bound; a failed migration stops the process instead of
+serving against a half-migrated schema. It reads the same `db/migrations` files
+and the same `goose_db_version` table as `make migrate-up` and `weld db migrate
+up`, so the three paths never disagree about what is applied. It only applies
+`Up` migrations, and a PostgreSQL session-level advisory lock serializes
+concurrent replicas starting at the same moment.
+
+It is off by default on purpose: starting a binary with the wrong database dsn
+must not silently change that database's schema. `make migrate-up` remains the
+explicit, reviewable path for a deploy pipeline, and `migrate-down` still
+requires `CONFIRM=1`. The integration tests do not use the startup runner;
+`testdb.Pool(t)` applies the migrations into its own throwaway schema.
 
 The Makefile targets read the dsn from `DATABASE_URL` and refuse to run without
 it; without the guard goose (and psql) would silently fall back to a local

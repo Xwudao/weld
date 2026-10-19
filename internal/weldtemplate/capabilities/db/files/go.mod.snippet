@@ -3,3 +3,11 @@
 	// implementation the generated repository uses. Pinned to the newest release
 	// that supports the generated project's Go toolchain floor.
 	require github.com/jackc/pgx/v5 v5.7.6
+
+	// The goose library applies the embedded db/migrations files at startup when
+	// database.auto_migrate is on. Only the library is part of the application;
+	// the sqlc and goose command-line tools stay in the nested db/tools module, so
+	// their much larger dependency graphs never enter this go.mod. The version
+	// keeps the pgx release above and the project's Go toolchain floor, so it
+	// trails the tool pin on purpose.
+	require github.com/pressly/goose/v3 v3.26.0
