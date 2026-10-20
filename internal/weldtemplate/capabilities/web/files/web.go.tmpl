@@ -7,10 +7,18 @@
 package web
 
 import (
+	"bytes"
+	"io"
 	"io/fs"
+	"mime"
 	"net/http"
+	"path"
+	"strconv"
 	"strings"
 )
+
+// indexFile is the SPA shell served at "/" and for client-side routes.
+const indexFile = "index.html"
 
 // Handler returns the HTTP handler for the embedded frontend.
 //
@@ -21,12 +29,16 @@ import (
 // navigations (GET/HEAD that accept text/html) fall back, so a fetch to a
 // missing endpoint never receives the HTML shell. Passing the prefix keeps the
 // reservation correct when the surface is versioned or mounted elsewhere.
+//
+// The frontend build writes a precompressed ".gz" sidecar next to every
+// compressible asset, and both files are embedded in the binary. A request for
+// the plain path negotiates: a client that accepts gzip receives the sidecar
+// with Content-Encoding: gzip and no per-request compression happens.
 func Handler(reservedPrefix string) http.Handler {
 	return handler(dist, reservedPrefix)
 }
 
 func handler(assets fs.FS, reservedPrefix string) http.Handler {
-	files := http.FileServer(http.FS(assets))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isAPIPath(r.URL.Path, reservedPrefix) {
 			http.NotFound(w, r)
@@ -34,26 +46,94 @@ func handler(assets fs.FS, reservedPrefix string) http.Handler {
 		}
 		name := strings.TrimPrefix(r.URL.Path, "/")
 		if name == "" {
-			name = "index.html"
+			name = indexFile
 		}
-		if _, err := fs.Stat(assets, name); err == nil {
-			files.ServeHTTP(w, r)
+		// A client never asks for the sidecar: only the plain path negotiates
+		// gzip, so a direct request for the compressed copy is a 404 rather
+		// than a second, misleading URL for the same asset.
+		if strings.HasSuffix(name, ".gz") {
+			http.NotFound(w, r)
+			return
+		}
+		if fs.ValidPath(name) && serveAsset(assets, w, r, name) {
 			return
 		}
 		if !isBrowserNavigation(r) || !hasIndex(assets) {
 			http.NotFound(w, r)
 			return
 		}
-		clone := r.Clone(r.Context())
-		clone.URL.Path = "/"
-		files.ServeHTTP(w, clone)
+		if !serveAsset(assets, w, r, indexFile) {
+			http.NotFound(w, r)
+		}
 	})
 }
 
+// serveAsset writes the embedded file name, preferring its precompressed
+// "<name>.gz" sidecar when the request accepts gzip. It reports whether it wrote
+// a response.
+func serveAsset(assets fs.FS, w http.ResponseWriter, r *http.Request, name string) bool {
+	// The content type comes from the plain name; the sidecar's own extension
+	// would report application/gzip instead of the real media type.
+	contentType := mime.TypeByExtension(path.Ext(name))
+	if contentType != "" {
+		if sidecar, info, ok := openAsset(assets, name+".gz"); ok {
+			// The body depends on Accept-Encoding, so a shared cache must key on
+			// it whether or not this request took the compressed copy.
+			w.Header().Add("Vary", "Accept-Encoding")
+			if allowsGzip(r) {
+				defer sidecar.Close()
+				w.Header().Set("Content-Type", contentType)
+				w.Header().Set("Content-Encoding", "gzip")
+				serveContent(w, r, name, sidecar, info)
+				return true
+			}
+			_ = sidecar.Close()
+		}
+	}
+	f, info, ok := openAsset(assets, name)
+	if !ok {
+		return false
+	}
+	defer f.Close()
+	serveContent(w, r, name, f, info)
+	return true
+}
+
+// serveContent writes f with the standard-library file semantics: ranges,
+// If-Modified-Since and HEAD. The embedded FS is seekable, so the buffering
+// fallback only covers a generic fs.FS (such as a test double) that is not.
+func serveContent(w http.ResponseWriter, r *http.Request, name string, f fs.File, info fs.FileInfo) {
+	base := path.Base(name)
+	if seeker, ok := f.(io.ReadSeeker); ok {
+		http.ServeContent(w, r, base, info.ModTime(), seeker)
+		return
+	}
+	content, err := io.ReadAll(f)
+	if err != nil {
+		http.Error(w, "read embedded asset", http.StatusInternalServerError)
+		return
+	}
+	http.ServeContent(w, r, base, info.ModTime(), bytes.NewReader(content))
+}
+
+// openAsset opens one embedded file, rejecting directories and a missing entry.
+func openAsset(assets fs.FS, name string) (fs.File, fs.FileInfo, bool) {
+	f, err := assets.Open(name)
+	if err != nil {
+		return nil, nil, false
+	}
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		_ = f.Close()
+		return nil, nil, false
+	}
+	return f, info, true
+}
+
 // hasIndex reports whether the SPA shell is present. Without it the fallback
-// must 404 rather than let the file server answer with a directory listing.
+// must 404 rather than serve an unrelated asset.
 func hasIndex(assets fs.FS) bool {
-	_, err := fs.Stat(assets, "index.html")
+	_, err := fs.Stat(assets, indexFile)
 	return err == nil
 }
 
@@ -74,4 +154,43 @@ func isBrowserNavigation(r *http.Request) bool {
 		return false
 	}
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// allowsGzip reports whether the request accepts a gzip transfer-coding,
+// honouring explicit q-values and a wildcard. "gzip;q=0" and "*;q=0" must not
+// receive compressed content, which a plain substring check would get wrong.
+func allowsGzip(r *http.Request) bool {
+	var wildcardQuality *float64
+	for _, value := range r.Header.Values("Accept-Encoding") {
+		for _, encoding := range strings.Split(value, ",") {
+			parts := strings.Split(encoding, ";")
+			name := strings.TrimSpace(parts[0])
+			if name == "" {
+				continue
+			}
+
+			quality := 1.0
+			for _, parameter := range parts[1:] {
+				key, parameterValue, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+				if !ok || !strings.EqualFold(strings.TrimSpace(key), "q") {
+					continue
+				}
+				parsed, err := strconv.ParseFloat(strings.TrimSpace(parameterValue), 64)
+				if err != nil || parsed < 0 || parsed > 1 {
+					quality = 0
+					break
+				}
+				quality = parsed
+			}
+
+			switch {
+			case strings.EqualFold(name, "gzip"):
+				return quality > 0
+			case name == "*":
+				wildcardQuality = &quality
+			}
+		}
+	}
+
+	return wildcardQuality != nil && *wildcardQuality > 0
 }

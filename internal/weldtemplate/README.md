@@ -102,8 +102,10 @@ capabilities/
                    (snippet)
   web/             kind: add    -> frontend, requires http
     capability.json
-    files/         web/ (React + TS + Vite), internal/web (SPA handler),
-                   registered by the Loom server graph
+    files/         web/ (React + TS + Vite; the build writes gzip sidecars with
+                   vite-plugin-compression2), internal/web (SPA handler that
+                   serves a sidecar when the client accepts gzip), registered
+                   by the Loom server graph
   db/              kind: add    -> PostgreSQL, requires loom
     capability.json
     files/         db/embed.go (migrations embedded into the binary),

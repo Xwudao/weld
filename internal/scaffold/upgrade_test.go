@@ -831,3 +831,42 @@ func TestUpgradeDBAddsStartupMigrations(t *testing.T) {
 		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 	}
 }
+
+// TestUpgradeWebAddsPrecompressedAssets proves a project scaffolded by the
+// 0.2.0 web payload gains both halves of precompressed delivery: the handler
+// that negotiates the ".gz" sidecar and the Vite plugin that writes the
+// sidecars, so an upgraded project serves gzip without a hand migration.
+func TestUpgradeWebAddsPrecompressedAssets(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "web")
+
+	// Stand in for the older payload: neither the sidecar lookup nor the
+	// compression plugin existed, and the files carry the older content.
+	for _, path := range []string{"internal/web/web.go", "internal/web/web_test.go", "web/vite.config.ts"} {
+		weldWrote(t, dir, "web", path, "// older payload\n")
+	}
+	downgrade(t, dir, "web", "0.2.0")
+
+	paths := []string{"internal/web/web.go", "internal/web/web_test.go", "web/vite.config.ts"}
+	result := upgrade(t, dir, []string{"web"}, false)
+	for _, path := range paths {
+		plannedOperation(t, result.Result, path)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "internal/web/web.go")); !strings.Contains(got, `"Content-Encoding", "gzip"`) {
+		t.Fatalf("upgraded handler does not serve the gzip sidecar:\n%s", got)
+	}
+	if got := readFile(t, filepath.Join(dir, "web/vite.config.ts")); !strings.Contains(got, "vite-plugin-compression2") {
+		t.Fatalf("upgraded build does not write gzip sidecars:\n%s", got)
+	}
+	if got, want := mustLoad(t, dir).CapabilityVersion("web"), capabilityVersion(t, "web"); got != want {
+		t.Fatalf("web version = %q, want %q", got, want)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}

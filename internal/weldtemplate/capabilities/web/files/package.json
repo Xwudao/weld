@@ -22,6 +22,7 @@
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "@vitejs/plugin-react": "^6.1.2",
     "oxc-transform-react": "^0.152.0",
-    "vite": "^8.3.4"
+    "vite": "^8.3.4",
+    "vite-plugin-compression2": "^2.5.3"
   }
 }
