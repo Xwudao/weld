@@ -69,6 +69,30 @@ func TestRenderDescribesInstalledCapabilities(t *testing.T) {
 	}
 }
 
+// The creation workflow must be taught before the first module exists, not
+// hidden in the list of modules that an agent might otherwise create by hand.
+func TestRenderTeachesScaffoldFirstWithoutInstalledModules(t *testing.T) {
+	body, err := Render(manifest("loom", "http"), template.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"## Scaffold first, then customize",
+		"Always create business modules with `weld add module <name>` first",
+		"Do not hand-edit the manifest",
+		"weld add command <name>",
+		"weld add enum",
+		"weld add seeder",
+		"NewProjectRoutes",
+		"NewAppDependencies",
+		"never change hashes",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("skill missing %q", want)
+		}
+	}
+}
+
 func TestRenderIsDeterministicAndOrderIndependent(t *testing.T) {
 	first, err := Render(manifest("db", "redis"), template.Load())
 	if err != nil {
@@ -127,7 +151,9 @@ func TestRenderLoomSeams(t *testing.T) {
 	}
 	text := string(body)
 	for _, want := range []string{
-		"`internal/di/di.go` and `internal/di/loom_gen.go`",
+		"`internal/di/di.go`, `internal/di/di_test.go` and `internal/di/loom_gen.go`",
+		"`internal/di/http_routes.go`",
+		"`internal/di/app_provider.go`",
 		"`internal/di/redis_provider.go`",
 		"Unused DB, Redis, mail, storage and event providers are pruned",
 		"HTTP server graph exists only",

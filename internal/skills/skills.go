@@ -214,6 +214,7 @@ func Render(manifest *project.Manifest, catalog Catalog) ([]byte, error) {
 	writeHeader(&b, manifest)
 	writeCapabilities(&b, caps, catalog)
 	writeWiring(&b, set)
+	writeScaffoldFirst(&b)
 	writeModules(&b, manifest)
 	writeCommands(&b, manifest)
 	writeEditing(&b, set)
@@ -388,6 +389,31 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 	}
 }
 
+// writeScaffoldFirst applies even to a project with no modules yet: creating a
+// directory alone does not register its wiring in the generated graph.
+func writeScaffoldFirst(b *strings.Builder) {
+	b.WriteString("## Scaffold first, then customize\n\n")
+	b.WriteString("Always create business modules with `weld add module <name>` first, then\n")
+	b.WriteString("edit their service, DTO and handler seams. Use `--with-dependencies` when\n")
+	b.WriteString("requirements are missing. A hand-created `internal/modules/<name>` directory\n")
+	b.WriteString("does not register a module: weld renders routes from the `weld.json` modules\n")
+	b.WriteString("record, not a filesystem scan. Do not hand-edit the manifest to register it.\n")
+	b.WriteString("Likewise use `weld add command <name>` (or `weld add module <name> --command`),\n")
+	b.WriteString("`weld add enum` and `weld add seeder` before customizing their editable files.\n")
+	b.WriteString("For existing handwritten code, back it up and migrate it into a weld-created\n")
+	b.WriteString("skeleton; do not overwrite it or assume add adopts existing files.\n\n")
+	b.WriteString("Never wire business behavior by editing `internal/di/di.go`, `di_test.go`\n")
+	b.WriteString("or `loom_gen.go`. Declare custom providers in `providers.go`; declarations\n")
+	b.WriteString("alone are pruned unless consumed. With HTTP installed, custom route dependencies\n")
+	b.WriteString("belong in `NewProjectRoutes` (`http_routes.go`), startup dependencies in\n")
+	b.WriteString("`NewAppDependencies` (`app_provider.go`), and policies in `NewHTTPPolicies`.\n")
+	b.WriteString("On older projects upgrade weld's loom payload first to obtain the new seams.\n")
+	b.WriteString("Validate business configuration in its consuming provider. Run `make generate`\n")
+	b.WriteString("after signature changes and test routes and startup behavior, not just compilation.\n")
+	b.WriteString("If add/upgrade reports modified generated DI source, migrate your wiring to\n")
+	b.WriteString("seams and restore the source; never change hashes to bypass the conflict.\n\n")
+}
+
 // writeModules describes the business modules installed with `weld add module`.
 // They are intentionally not capabilities: weld writes them once and never
 // regenerates them, so the generated guide must say so rather than imply a later
@@ -443,20 +469,22 @@ func writeCommands(b *strings.Builder, manifest *project.Manifest) {
 
 func writeEditing(b *strings.Builder, set map[string]bool) {
 	b.WriteString("## Generated and editable files\n\n")
-	b.WriteString("weld records every file a capability writes in `weld.json`, with the capability\n")
-	b.WriteString("and version that produced it. Those files are **generated**: re-running\n")
-	b.WriteString("`weld add` can rewrite them, and `weld list` reports an edited one as\n")
-	b.WriteString("`modified`. Everything not recorded in `weld.json` is yours to edit.\n\n")
+	b.WriteString("weld records capability files in `weld.json` with their owner, role and baseline.\n")
+	b.WriteString("A `seam` is written once and belongs to the project; `payload` and `patched`\n")
+	b.WriteString("files follow the upgrade ownership rules. Generated DI sources are re-rendered,\n")
+	b.WriteString("but edited sources block replacement with a conflict. `weld list` reports drift\n")
+	b.WriteString("as `modified`. Respect generated headers even on files outside the manifest;\n")
+	b.WriteString("absence from `weld.json` does not make generator output safe to hand-edit.\n\n")
 	if set["loom"] {
 		b.WriteString("- Regenerated on every capability change, so do not edit:\n")
-		b.WriteString("  `internal/di/di.go` and `internal/di/loom_gen.go`.\n")
+		b.WriteString("  `internal/di/di.go`, `internal/di/di_test.go` and `internal/di/loom_gen.go`.\n")
 	}
 	var seams []string
 	if set["loom"] {
 		seams = append(seams, "`internal/di/providers.go`")
 	}
 	if set["http"] {
-		seams = append(seams, "`internal/httpserver/middleware.go`", "`internal/httpserver/mounts.go`", "`internal/httpserver/policy.go`", "`internal/httpserver/errors.go`", "`internal/di/http_policies.go`")
+		seams = append(seams, "`internal/httpserver/middleware.go`", "`internal/httpserver/mounts.go`", "`internal/httpserver/policy.go`", "`internal/httpserver/errors.go`", "`internal/di/http_policies.go`", "`internal/di/http_routes.go`", "`internal/di/app_provider.go`")
 	}
 	if set["redis"] && set["loom"] {
 		seams = append(seams, "`internal/di/redis_provider.go`")

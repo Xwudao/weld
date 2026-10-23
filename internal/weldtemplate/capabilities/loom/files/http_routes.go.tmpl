@@ -1,0 +1,14 @@
+package di
+
+import "__module__/internal/httpserver"
+
+// ProjectRoutes holds additional project-owned routes. Modules created with
+// weld add module are mounted automatically and must not be mounted again here.
+type ProjectRoutes []httpserver.Route
+
+// NewProjectRoutes is the stable custom route seam. Add service parameters and
+// return callbacks that register their handlers, then run make generate.
+// weld writes this file once; later capability additions preserve it.
+func NewProjectRoutes() (ProjectRoutes, error) {
+	return nil, nil
+}

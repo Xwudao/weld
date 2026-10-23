@@ -947,6 +947,16 @@ func reconcileDI(req Request, manifest *project.Manifest, present map[string]boo
 			if bytes.Equal(current, source.content) {
 				continue
 			}
+			// A generated source is not an editable seam, but silently replacing a
+			// hand-written dependency can compile while dropping business behavior.
+			// Check the original baseline before recording the newly rendered one.
+			if _, alreadyPlanned := planned[source.path]; !alreadyPlanned && current != nil {
+				for _, entry := range manifest.Files {
+					if entry.Path == source.path && (manifest.LegacyBaseline || !entry.Baseline || project.HashContent(current) != entry.SHA256) {
+						return &project.ConflictError{Path: source.path, Reason: "generated DI source was modified or has no trustworthy baseline; move business wiring to stable provider seams, create modules with weld add module <name>, then restore the generated source before retrying; for a legacy source without a trustworthy baseline, review and preserve its wiring before removing only that source to regenerate it\n" + project.UnifiedDiff(source.path, current, source.content)}
+					}
+				}
+			}
 			_, statErr := os.Stat(filepath.Join(req.Dir, source.path))
 			planned[source.path] = source.content
 			upsert(project.Operation{Path: source.path, Content: source.content, Overwrite: statErr == nil})

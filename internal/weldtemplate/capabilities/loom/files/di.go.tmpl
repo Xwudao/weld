@@ -361,6 +361,8 @@ var appGraph = loom.Graph[*App](
 	// Add service parameters there without importing business modules into
 	// httpserver or editing this generated graph.
 	loom.Provide(NewHTTPPolicies),
+	loom.Provide(NewProjectRoutes),
+	loom.Provide(NewAppDependencies),
 	loom.Provide(NewServer),
 	loom.Provide(NewApp),
 )
@@ -396,8 +398,9 @@ func composeHandler(
 	logger logging.Logger,
 	policies []httpserver.NamedPolicy,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
+	projectRoutes ...httpserver.Route,
 ) nethttp.Handler {
-	return httpserver.NewHandler(cfg, logger, policies,
+	routes := []httpserver.Route{
 {{- if .Caps.Has "web"}}
 		func(router *httpx.Router) {
 			router.Handle("/", web.Handler(httpserver.APIPrefix))
@@ -408,7 +411,9 @@ func composeHandler(
 			{{.Name}}.Register(base.Group(httpserver.ModulePrefix({{.Name}}.Name)), {{.Name}}Service)
 		},
 {{- end}}
-	)
+	}
+	routes = append(routes, projectRoutes...)
+	return httpserver.NewHandler(cfg, logger, policies, routes...)
 }
 
 // NewServer supplies the composed handler and attaches framework-neutral
@@ -417,11 +422,14 @@ func NewServer(
 	lc *loom.Lifecycle,
 	cfg *config.Config,
 	logger logging.Logger,
-	policies []httpserver.NamedPolicy,{{range .Modules}}
+	policies []httpserver.NamedPolicy,
+	routes ProjectRoutes,
+	_ *AppDependencies,{{range .Modules}}
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) *httpserver.Server {
 	return newServer(lc, cfg, logger, composeHandler(cfg, logger, policies,{{range .Modules}}
 		{{.Name}}Service,{{end}}
+		routes...,
 	))
 }
 

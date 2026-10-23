@@ -412,12 +412,10 @@ func TestLoomCommandConsumesLateAddedProvider(t *testing.T) {
 	}
 }
 
-// TestAddCapabilityRefreshesGeneratedDITest proves the DI test is a generated
-// file with no user-owned state: after a module's constructor changes and the
-// user appends an assertion to di_test.go, adding a capability regenerates the
-// test instead of preserving the edit. The regenerated test never names a
-// module, so the changed NewService signature cannot break it, and the
-// production graph still gains the new capability.
+// TestAddCapabilityRefreshesGeneratedDITest proves an edited generated test
+// blocks replacement until its assertions are moved to a project-owned test.
+// After restoring it, the changed service signature still compiles and the
+// production graph gains the new capability.
 func TestAddCapabilityRefreshesGeneratedDITest(t *testing.T) {
 	t.Parallel()
 	loomToolAvailable(t)
@@ -446,10 +444,17 @@ func TestAddCapabilityRefreshesGeneratedDITest(t *testing.T) {
 
 	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
 	const userTestMarker = "// user-owned module route assertion"
-	if err := os.WriteFile(diTestPath, []byte(readFile(t, diTestPath)+"\n"+userTestMarker+"\n"), 0o644); err != nil {
+	original := readFile(t, diTestPath)
+	if err := os.WriteFile(diTestPath, []byte(original+"\n"+userTestMarker+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
+	if _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "cron"); err == nil || !strings.Contains(err.Error(), "generated DI source was modified") {
+		t.Fatalf("want edited DI test conflict, got %v", err)
+	}
+	if !strings.Contains(readFile(t, diTestPath), userTestMarker) {
+		t.Fatal("planning discarded the project assertion")
+	}
+	edited(t, dir, "internal/di/di_test.go", original)
 	add(t, dir, "cron")
 	generated := readFile(t, diTestPath)
 	if strings.Contains(generated, userTestMarker) {
@@ -513,12 +518,10 @@ func TestTwoModulesKeepGeneratedDITestValid(t *testing.T) {
 	}
 }
 
-// TestAddOverwritesEditedDITest pins the ownership boundary: di_test.go is a
-// generated file, so an edit to it does not survive a later add. Module-specific
-// assertions belong in the module's own package test, which weld writes once and
-// never regenerates. The regenerated test matches the manifest hash, so weld
-// still owns it.
-func TestAddOverwritesEditedDITest(t *testing.T) {
+// TestAddRejectsEditedDITest pins the ownership boundary: generated tests are
+// not seams, but add must report a conflict rather than discard assertions.
+// Module-specific assertions belong in the module's project-owned package test.
+func TestAddRejectsEditedDITest(t *testing.T) {
 	t.Parallel()
 	loomToolAvailable(t)
 	dir := create(t, t.TempDir())
@@ -526,14 +529,18 @@ func TestAddOverwritesEditedDITest(t *testing.T) {
 
 	diTestPath := filepath.Join(dir, "internal", "di", "di_test.go")
 	const userTestMarker = "// user-owned assertion"
-	if err := os.WriteFile(diTestPath, []byte(readFile(t, diTestPath)+"\n"+userTestMarker+"\n"), 0o644); err != nil {
+	original := readFile(t, diTestPath)
+	if err := os.WriteFile(diTestPath, []byte(original+"\n"+userTestMarker+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	addModule(t, dir, "widget")
-	if got := readFile(t, diTestPath); strings.Contains(got, userTestMarker) {
-		t.Fatal("adding a module kept an edit to the generated DI test")
+	if _, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "widget"); err == nil || !strings.Contains(err.Error(), "generated DI source was modified") {
+		t.Fatalf("want edited DI test conflict, got %v", err)
 	}
+	if !strings.Contains(readFile(t, diTestPath), userTestMarker) {
+		t.Fatal("adding a module discarded an assertion")
+	}
+	edited(t, dir, "internal/di/di_test.go", original)
+	addModule(t, dir, "widget")
 	if drift := mustLoad(t, dir).Drift(dir); len(drift) != 0 {
 		t.Fatalf("drift after add: %+v", drift)
 	}

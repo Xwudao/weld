@@ -346,7 +346,7 @@ func TestUpgradeNeverPrunesAModifiedRetiredFile(t *testing.T) {
 // TestUpgradeRestoresTheGeneratedGraph proves the regenerated Loom graph is
 // reconciled too, so a project whose generated file drifted (or was written by an
 // older weld) is repaired and the Loom initializer is regenerated.
-func TestUpgradeRestoresTheGeneratedGraph(t *testing.T) {
+func TestUpgradeRejectsModifiedGeneratedGraph(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	dir := create(t, root)
@@ -360,19 +360,13 @@ func TestUpgradeRestoresTheGeneratedGraph(t *testing.T) {
 	}
 	edited(t, dir, path, strings.Replace(original, "\t"+provider+"\n", "", 1))
 
-	result := upgrade(t, dir, nil, false)
-	operation := plannedOperation(t, result.Result, path)
-	if !operation.Overwrite {
-		t.Errorf("%s is not planned as an update", path)
+	before := readFile(t, filepath.Join(dir, path))
+	_, err := Upgrade(Request{Dir: dir, Catalog: newCatalog()}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "generated DI source was modified") {
+		t.Fatalf("want generated source conflict, got %v", err)
 	}
-	if !result.GenerateLoom {
-		t.Error("upgrade does not request a Loom regeneration")
-	}
-	if err := result.Apply(); err != nil {
-		t.Fatalf("apply: %v", err)
-	}
-	if got := readFile(t, filepath.Join(dir, path)); !strings.Contains(got, provider) {
-		t.Fatalf("generated graph was not repaired:\n%s", got)
+	if got := readFile(t, filepath.Join(dir, path)); got != before {
+		t.Fatal("planning changed the edited graph")
 	}
 }
 

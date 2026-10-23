@@ -168,6 +168,38 @@ registered in `providers.go` reaches a command this way too. A
 dependency no provider declares needs `loom.Provide(...)` in the command graph.
 The server-only `*cron.Scheduler` is never available to a command.
 
+### Project-owned business wiring
+
+Create modules with `weld add module <name>` first, then customize their
+`NewService`, DTOs and handlers. Only modules recorded by weld are automatically
+mounted; manually creating a directory or editing the generated graph is not a
+persistent registration mechanism. Use `weld add command`, `enum` and `seeder`
+for those skeletons too. Migrate existing handwritten code into a generated
+skeleton rather than editing `weld.json` or overwriting existing work.
+
+With HTTP installed, `http_routes.go` and `app_provider.go` are stable seams:
+
+- `NewProjectRoutes` returns `ProjectRoutes` (callbacks receiving
+  `*httpx.Router`). Inject custom services there. The shared handler mounts them
+  alongside generated module routes and the SPA. Do not mount weld modules twice.
+- `NewAppDependencies` consumes server-only initialization and background-service
+  providers. It is consumed before `NewServer`, never by short commands.
+  Do not depend on the server or scheduler here: that would create a cycle.
+  Validate configuration in consuming providers and return errors to abort graph
+  construction. Register start/stop hooks on an injected `*loom.Lifecycle`;
+  do not start background goroutines during construction.
+
+Declare their custom providers in `providers.go`, then run `make generate`.
+Declaration alone does not keep an unused provider from being pruned.
+
+`weld add` and `weld upgrade` refuse to overwrite modified `di.go` or
+`di_test.go` and show a diff, including when planning a dry run. Move business
+wiring to seams, restore the original generated source, then retry. Never alter
+manifest hashes to accept edits. Missing generated sources can be restored;
+for legacy sources without trustworthy baselines, review and preserve their
+wiring before removing only the generated source to regenerate it. Upgrade the
+loom payload to obtain these seams in an existing HTTP project.
+
 ### `di_test.go` is module-independent
 
 The regenerated `di_test.go` never names a module: it exercises configuration,

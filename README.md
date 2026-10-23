@@ -43,6 +43,36 @@ make build             # the Makefile stays as the no-weld fallback
 make run ARGS=serve    # serves the frontend and /api on http://localhost:8080
 ```
 
+## Scaffold first, then customize
+
+Create business modules with `weld add module <name>` before editing their
+services, DTOs and handlers. Likewise create commands, enums and seeders through
+their `weld add` commands first. A handwritten directory does not register a
+module: the server graph uses the `modules` record in `weld.json`, not a
+filesystem scan. Do not manually edit the manifest to adopt existing code;
+back it up and migrate it into a weld-created skeleton.
+
+Never put business wiring in `internal/di/di.go`, `di_test.go` or `loom_gen.go`.
+Declare custom providers in the stable `providers.go`; with HTTP installed,
+consume custom route services in `NewProjectRoutes` (`http_routes.go`) and
+server-only initialization/background services in `NewAppDependencies`
+(`app_provider.go`). Both files are project-owned seams, written once.
+Modules created by weld are already mounted: do not mount them again.
+Validate business configuration in its consuming provider; return errors to
+abort startup, and attach background work through Loom lifecycle hooks.
+The startup seam runs before `NewServer` and must not depend on the server or
+scheduler. Short commands do not consume it. Run `make generate` after changing
+provider signatures, and test routes and startup behavior as well as compilation.
+
+Adding/upgrading capabilities refuses to replace modified generated DI sources,
+including during `--dry-run`, and displays a diff. Migrate handwritten wiring
+into the stable seams and restore the original generated source before retrying;
+never change baseline hashes to bypass the conflict. Missing sources can still
+be regenerated. For legacy sources without trustworthy baselines, review and
+preserve their wiring, then remove only the generated source to regenerate it. Existing projects gain the new seams with
+`weld upgrade loom` (resolve any generated-source conflict first).
+`weld skills` teaches this workflow even before the first module is installed.
+
 ## Embedded templates
 
 The CLI, catalog, planner and declarative payloads live in this repository.
@@ -476,7 +506,7 @@ upgrade may do with it:
 | `payload` (the default) | `internal/httpx/*.go`, `README.md` | rewritten while you have not changed it; otherwise reported with a diff |
 | `patched` | `internal/config/config.go` | the newer payload supplies the skeleton and your live marker regions are spliced into it |
 | `seam` | `internal/httpserver/middleware.go`, `internal/httpserver/mounts.go`, `internal/httpserver/policy.go`, `internal/httpserver/errors.go`, `internal/di/providers.go`, `internal/di/http_policies.go`, `internal/di/events_listeners.go`, `internal/di/cron_jobs.go`, capability provider seams, `internal/data/seeder/register.go`, the `Makefile`, `.gitignore`, `config.yml` | written once, then yours: **never rewritten**, reported with a diff when the shipped version moves |
-| `generated` | `internal/di/di.go`, `internal/di/di_test.go` | re-rendered from the graph, never merged, never pruned |
+| `generated` | `internal/di/di.go`, `internal/di/di_test.go` | re-rendered while unmodified; edited sources block the plan with a diff; never merged or pruned |
 
 **A versioned migration** is a payload file whose project path weld chose at
 install time: the manifest records both the written path
@@ -505,9 +535,11 @@ seam (for example a different function signature) therefore needs the one manual
 edit, and the check below makes that visible instead of leaving a broken project.
 
 The regenerated Loom graph (`internal/di/di.go`, `internal/di/di_test.go` and
-`internal/di/loom_gen.go`) is reconciled rather than merged: an older or hand
-edited graph is re-rendered from the installed capability set and the pinned
-generator re-runs, with the same snapshot-and-rollback the check uses.
+`internal/di/loom_gen.go`) is reconciled rather than merged: unmodified graph
+sources are re-rendered from the installed capability set and the pinned
+generator re-runs, with the same snapshot-and-rollback the check uses. Hand-edited
+`di.go` or `di_test.go` sources block replacement with a conflict and diff, so
+business wiring cannot silently disappear while compilation still succeeds.
 
 **A retired file** — one the manifest records as a plain payload file that the
 newer payload no longer ships — is reported, and `--prune` deletes it only when it

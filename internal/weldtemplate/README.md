@@ -36,7 +36,7 @@ never arriving:
 | `payload` (default) | weld | rewrites while the project has not changed it, otherwise reports a diff |
 | `patched` | weld, plus the capabilities that patch its marker regions | renders the newer payload and splices the live region bodies into it |
 | `seam` | the project | **never writes it**; reports the diff when the shipped version moves |
-| `generated` (implied by `di`, never declared) | the Loom generator | re-renders it from the installed capability set |
+| `generated` (implied by `di`, never declared) | the Loom generator | re-renders it from the installed capability set; modified DI sources are conflicts, never silently replaced |
 
 Use `seam` for every file whose doc comment promises "weld writes this once and
 never regenerates it": `internal/httpserver/middleware.go`, `mounts.go`,
@@ -141,7 +141,8 @@ capabilities/
     capability.json
     files/         internal/di/di.go.tmpl (capability-aware graph source),
                    tools/loom (nested module pinning the Loom generator),
-                   README; the stable provider seams are contributed by the
+                   stable http_routes.go and app_provider.go business seams
+                   (when http is installed), README; the stable provider seams are contributed by the
                    capabilities that need them (seed, redis, events, mail,
                    storage, cron)
   cron/            kind: add    -> in-process scheduler, requires http

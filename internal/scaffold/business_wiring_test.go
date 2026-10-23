@@ -109,6 +109,43 @@ func NewCronJobs(s *cron.Scheduler, report *Reporter) (*CronJobs, error) {
     return &CronJobs{}, nil
 }
 `)
+	routes := putGo("internal/di/http_routes.go", `package di
+
+import (
+    "net/http"
+    "__module__/internal/httpserver"
+    "__module__/internal/httpx"
+    "__module__/internal/modules/widget"
+)
+
+type ProjectRoutes []httpserver.Route
+
+var routesError error
+
+func NewProjectRoutes(service widget.Service) (ProjectRoutes, error) {
+    if routesError != nil { return nil, routesError }
+    return ProjectRoutes{func(router *httpx.Router) {
+        router.HandleFunc("GET /custom", func(w http.ResponseWriter, r *http.Request) {
+            response, err := service.Greet(r.Context(), widget.Request{Name: "custom"})
+            if err != nil { http.Error(w, err.Error(), 500); return }
+            w.Write([]byte(response.Message))
+        })
+    }}, nil
+}
+`)
+	startup := putGo("internal/di/app_provider.go", `package di
+
+type AppDependencies struct{}
+
+var startupError error
+var startupReady bool
+
+func NewAppDependencies(report *Reporter) (*AppDependencies, error) {
+    if startupError != nil { return nil, startupError }
+    startupReady = report != nil
+    return &AppDependencies{}, nil
+}
+`)
 	// Regenerate after signature changes, and prove stable business wiring stays
 	// intact when unrelated capabilities are added.
 	add(t, dir, "redis")
@@ -116,13 +153,15 @@ func NewCronJobs(s *cron.Scheduler, report *Reporter) (*CronJobs, error) {
 		"internal/di/providers.go":     providers,
 		"internal/di/http_policies.go": policies,
 		"internal/di/cron_jobs.go":     jobs,
+		"internal/di/http_routes.go":   routes,
+		"internal/di/app_provider.go":  startup,
 	} {
 		if got := readFile(t, filepath.Join(dir, path)); got != want {
 			t.Fatalf("later add rewrote %s", path)
 		}
 	}
 	gen := readFile(t, filepath.Join(dir, "internal/di/loom_gen.go"))
-	for _, want := range []string{"NewReporter(", "NewHTTPPolicies(", "NewCronJobs("} {
+	for _, want := range []string{"NewReporter(", "NewHTTPPolicies(", "NewCronJobs(", "NewProjectRoutes(", "NewAppDependencies("} {
 		if !strings.Contains(gen, want) {
 			t.Fatalf("graph pruned %s", want)
 		}
@@ -152,6 +191,38 @@ func TestPolicyUsesInjectedBusinessService(t *testing.T) {
     app.Server.HTTP.Handler.ServeHTTP(w, request)
     if w.Code >= 400 || !strings.Contains(w.Header().Get("X-Policy-Greeting"), "policy") {
         t.Fatalf("business policy was not applied: %d %s", w.Code, w.Body.String())
+    }
+}
+
+func TestCustomRouteAndStartupDependencies(t *testing.T) {
+    startupReady = false
+    app, _, err := InitApp(wiringContext())
+    if err != nil { t.Fatal(err) }
+    if !startupReady { t.Fatal("startup dependency was pruned") }
+    w := httptest.NewRecorder()
+    app.Server.HTTP.Handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/custom", nil))
+    if w.Code != 200 || !strings.Contains(w.Body.String(), "custom") {
+        t.Fatalf("custom route missing: %d %s", w.Code, w.Body.String())
+    }
+}
+
+func TestCustomRoutesErrorFailsConstruction(t *testing.T) {
+    want := errors.New("custom route configuration invalid")
+    routesError = want
+    defer func() { routesError = nil }()
+    app, _, err := InitApp(wiringContext())
+    if !errors.Is(err, want) || app != nil {
+        t.Fatalf("InitApp = %v, %v; want route error", app, err)
+    }
+}
+
+func TestStartupErrorFailsConstruction(t *testing.T) {
+    want := errors.New("startup configuration invalid")
+    startupError = want
+    defer func() { startupError = nil }()
+    app, _, err := InitApp(wiringContext())
+    if !errors.Is(err, want) || app != nil {
+        t.Fatalf("InitApp = %v, %v; want startup error", app, err)
     }
 }
 

@@ -1,0 +1,16 @@
+package di
+
+// AppDependencies marks project-owned server startup wiring as consumed.
+// Merely declaring a provider in providers.go does not prevent Loom pruning it.
+type AppDependencies struct{}
+
+// NewAppDependencies is the stable server-only dependency root. Add parameters
+// for initialization tasks and background services here, and run make generate.
+// Validate business configuration in its consuming provider; return an error to
+// fail graph construction. Providers can inject *loom.Lifecycle for start/stop
+// hooks. Do not open listeners or start goroutines during graph construction.
+// This runs before NewServer; never depend on the server or scheduler here.
+// Short command graphs do not consume this root. weld writes this file once.
+func NewAppDependencies() (*AppDependencies, error) {
+	return &AppDependencies{}, nil
+}

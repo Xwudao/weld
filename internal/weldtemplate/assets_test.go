@@ -1583,7 +1583,8 @@ func TestStorageProviderSeamIsOwnedByStorage(t *testing.T) {
 func TestLoomDeclaresAuxiliaryBindings(t *testing.T) {
 	d := readDescriptor(t, "loom")
 	for _, file := range d.Files {
-		if strings.HasPrefix(file.Path, "internal/di/") && strings.HasSuffix(file.Path, "_provider.go") {
+		// The application root is Loom-owned, not a mirrored capability provider.
+		if strings.HasPrefix(file.Path, "internal/di/") && strings.HasSuffix(file.Path, "_provider.go") && file.Path != "internal/di/app_provider.go" {
 			t.Errorf("loom ships the provider mirror %q; the owning capability ships it", file.Path)
 		}
 	}
