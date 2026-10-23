@@ -104,8 +104,9 @@ capabilities/
     capability.json
     files/         web/ (React + TS + Vite; the build writes brotli and gzip
                    sidecars with vite-plugin-compression2), internal/web (SPA
-                   handler that serves the best sidecar the client accepts),
-                   registered by the Loom server graph
+                   handler that serves the best sidecar the client accepts and
+                   sets immutable/no-cache Cache-Control), registered by the
+                   Loom server graph
   db/              kind: add    -> PostgreSQL, requires loom
     capability.json
     files/         db/embed.go (migrations embedded into the binary),

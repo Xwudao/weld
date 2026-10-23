@@ -269,3 +269,48 @@ func TestHandlerDoesNotFallBackWithoutIndex(t *testing.T) {
 		t.Fatalf("status = %d, want 404", recorder.Code)
 	}
 }
+
+func TestHandlerCachesFingerprintedAssets(t *testing.T) {
+	h := handler(testAssetsWithSidecars(), testAPIPrefix)
+	for _, acceptEncoding := range []string{"", "br, gzip"} {
+		request := httptest.NewRequest(http.MethodGet, "/assets/a.js", nil)
+		if acceptEncoding != "" {
+			request.Header.Set("Accept-Encoding", acceptEncoding)
+		}
+		recorder := httptest.NewRecorder()
+		h.ServeHTTP(recorder, request)
+		if got := recorder.Header().Get("Cache-Control"); got != immutableCache {
+			t.Fatalf("Cache-Control = %q, want %q", got, immutableCache)
+		}
+	}
+}
+
+func TestHandlerRevalidatesTheShell(t *testing.T) {
+	h := handler(testAssetsWithSidecars(), testAPIPrefix)
+	for _, name := range []string{"/", "/some/client/route"} {
+		request := httptest.NewRequest(http.MethodGet, name, nil)
+		request.Header.Set("Accept", "text/html")
+		recorder := httptest.NewRecorder()
+		h.ServeHTTP(recorder, request)
+		if got := recorder.Header().Get("Cache-Control"); got != revalidateCache {
+			t.Fatalf("%s: Cache-Control = %q, want %q", name, got, revalidateCache)
+		}
+	}
+}
+
+func TestCacheControlFor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{name: "assets/index-DIiwZDOx.js", want: immutableCache},
+		{name: "assets/nested/thing.css", want: immutableCache},
+		{name: indexFile, want: revalidateCache},
+		{name: "favicon.ico", want: revalidateCache},
+		{name: "assets", want: revalidateCache},
+	} {
+		if got := cacheControlFor(tc.name); got != tc.want {
+			t.Errorf("cacheControlFor(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

@@ -20,6 +20,19 @@ import (
 // indexFile is the SPA shell served at "/" and for client-side routes.
 const indexFile = "index.html"
 
+// assetsDir is the Vite build's asset directory. Every file below it carries a
+// content hash in its name, so its bytes never change under a given URL.
+const assetsDir = "assets"
+
+// immutableCache is the Cache-Control for a fingerprinted asset: a year, and no
+// revalidation, because a new build publishes a new URL rather than new bytes.
+const immutableCache = "public, max-age=31536000, immutable"
+
+// revalidateCache is the Cache-Control for an un-fingerprinted file, above all
+// the index.html shell: it must be revalidated so a deploy is picked up and the
+// shell points at the new fingerprinted assets.
+const revalidateCache = "no-cache"
+
 // encodingSidecar is one precompressed copy the build may write next to an
 // asset. ext is the filename suffix, encoding the Content-Encoding it carries.
 type encodingSidecar struct {
@@ -50,6 +63,10 @@ var sidecars = []encodingSidecar{
 // for the plain path negotiates: a client that accepts brotli or gzip receives
 // the matching sidecar with the right Content-Encoding and no per-request
 // compression happens.
+//
+// Fingerprinted assets under assets/ are served with an immutable, one-year
+// Cache-Control, while the index.html shell is served with no-cache so a deploy
+// is picked up on the next navigation.
 func Handler(reservedPrefix string) http.Handler {
 	return handler(dist, reservedPrefix)
 }
@@ -133,10 +150,23 @@ func serveAsset(assets fs.FS, w http.ResponseWriter, r *http.Request, name strin
 	return true
 }
 
+// cacheControlFor reports the Cache-Control value for an embedded asset. Files
+// under the Vite asset directory are content-hashed and can be cached
+// immutably; everything else (the shell in particular) is revalidated.
+func cacheControlFor(name string) string {
+	if strings.HasPrefix(name, assetsDir+"/") {
+		return immutableCache
+	}
+	return revalidateCache
+}
+
 // serveContent writes f with the standard-library file semantics: ranges,
 // If-Modified-Since and HEAD. The embedded FS is seekable, so the buffering
 // fallback only covers a generic fs.FS (such as a test double) that is not.
 func serveContent(w http.ResponseWriter, r *http.Request, name string, f fs.File, info fs.FileInfo) {
+	// Set the caching policy before ServeContent so it is present on 200, 206
+	// and 304 responses alike.
+	w.Header().Set("Cache-Control", cacheControlFor(name))
 	base := path.Base(name)
 	if seeker, ok := f.(io.ReadSeeker); ok {
 		http.ServeContent(w, r, base, info.ModTime(), seeker)

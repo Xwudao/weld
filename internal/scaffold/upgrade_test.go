@@ -903,3 +903,39 @@ func TestUpgradeWebAddsBrotliAssets(t *testing.T) {
 		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 	}
 }
+
+// TestUpgradeWebAddsAssetCacheHeaders proves a project scaffolded by the 0.4.0
+// web payload gains the static-asset caching policy on upgrade: the handler
+// marks fingerprinted assets under assets/ immutable and revalidates the shell,
+// so an upgraded project caches its bundle without a hand migration.
+func TestUpgradeWebAddsAssetCacheHeaders(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "web")
+
+	// Stand in for the older payload: no Cache-Control policy existed, and the
+	// files carry the older content.
+	for _, path := range []string{"internal/web/web.go", "internal/web/web_test.go"} {
+		weldWrote(t, dir, "web", path, "// older payload\n")
+	}
+	downgrade(t, dir, "web", "0.4.0")
+
+	paths := []string{"internal/web/web.go", "internal/web/web_test.go"}
+	result := upgrade(t, dir, []string{"web"}, false)
+	for _, path := range paths {
+		plannedOperation(t, result.Result, path)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "internal/web/web.go")); !strings.Contains(got, "Cache-Control") {
+		t.Fatalf("upgraded handler does not set Cache-Control:\n%s", got)
+	}
+	if got, want := mustLoad(t, dir).CapabilityVersion("web"), capabilityVersion(t, "web"); got != want {
+		t.Fatalf("web version = %q, want %q", got, want)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
