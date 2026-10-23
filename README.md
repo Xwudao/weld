@@ -248,8 +248,8 @@ Capabilities:
   authentication and authorization are wired. Generated projects include
   `internal/httpserver/README.md` with composition, binding and testing examples.
 - `web` (add) — React + TypeScript + Vite frontend served by `http`, with the
-  build's precompressed `.gz` sidecars embedded and negotiated per request.
-  Requires pnpm and Node.js 20.19+ or 22.12+ (Vite 8).
+  build's precompressed `.br` and `.gz` sidecars embedded and negotiated per
+  request. Requires pnpm and Node.js 20.19+ or 22.12+ (Vite 8).
 - `db` (add) — PostgreSQL persistence: SQL migrations and queries, sqlc-generated
   code, an injectable connection pool and a repository, and optional startup
   migration from the migrations embedded in the binary. Requires `loom` but not
@@ -428,11 +428,12 @@ return 404 instead of the HTML shell, and only browser navigations fall back to
 `index.html`. It keeps that exclusion rather than relying on mux precedence, so
 the frontend never masquerades as an API that is not installed. The frontend
 build's Vite compression plugin (`vite-plugin-compression2`) writes a
-precompressed `.gz` sidecar next to every compressible asset and embeds both
-copies, so the handler serves the sidecar with `Content-Encoding: gzip` when the
-client accepts it (honouring `Accept-Encoding` q-values) instead of compressing
-on every request. A request for a `.gz` path itself returns 404: the sidecar is
-an encoding of the plain path, not a second asset.
+precompressed `.br` and `.gz` sidecar next to every compressible asset and
+embeds them, so the handler serves the best sidecar the client accepts
+(`Content-Encoding: br`, else `gzip`) when the client accepts one (honouring
+`Accept-Encoding` q-values) instead of compressing on every request. A request
+for a `.br` or `.gz` path itself returns 404: a sidecar is an encoding of the
+plain path, not a second asset.
 
 ## Safety model
 

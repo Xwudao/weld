@@ -851,11 +851,50 @@ func TestUpgradeWebAddsPrecompressedAssets(t *testing.T) {
 	if err := result.Apply(); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if got := readFile(t, filepath.Join(dir, "internal/web/web.go")); !strings.Contains(got, `"Content-Encoding", "gzip"`) {
+	if got := readFile(t, filepath.Join(dir, "internal/web/web.go")); !strings.Contains(got, `"gzip"`) {
 		t.Fatalf("upgraded handler does not serve the gzip sidecar:\n%s", got)
 	}
 	if got := readFile(t, filepath.Join(dir, "web/vite.config.ts")); !strings.Contains(got, "vite-plugin-compression2") {
 		t.Fatalf("upgraded build does not write gzip sidecars:\n%s", got)
+	}
+	if got, want := mustLoad(t, dir).CapabilityVersion("web"), capabilityVersion(t, "web"); got != want {
+		t.Fatalf("web version = %q, want %q", got, want)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+}
+
+// TestUpgradeWebAddsBrotliAssets proves a project scaffolded by the 0.3.0 web
+// payload gains brotli delivery on upgrade: the handler negotiates the ".br"
+// sidecar (preferring it over gzip) and the Vite plugin writes it, so an
+// upgraded project serves brotli without a hand migration.
+func TestUpgradeWebAddsBrotliAssets(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "web")
+
+	// Stand in for the older payload: only the gzip sidecar existed, and the
+	// files carry the older content.
+	for _, path := range []string{"internal/web/web.go", "internal/web/web_test.go", "web/vite.config.ts"} {
+		weldWrote(t, dir, "web", path, "// older payload\n")
+	}
+	downgrade(t, dir, "web", "0.3.0")
+
+	paths := []string{"internal/web/web.go", "internal/web/web_test.go", "web/vite.config.ts"}
+	result := upgrade(t, dir, []string{"web"}, false)
+	for _, path := range paths {
+		plannedOperation(t, result.Result, path)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "internal/web/web.go")); !strings.Contains(got, `".br"`) {
+		t.Fatalf("upgraded handler does not serve the brotli sidecar:\n%s", got)
+	}
+	if got := readFile(t, filepath.Join(dir, "web/vite.config.ts")); !strings.Contains(got, "brotliCompress") {
+		t.Fatalf("upgraded build does not write brotli sidecars:\n%s", got)
 	}
 	if got, want := mustLoad(t, dir).CapabilityVersion("web"), capabilityVersion(t, "web"); got != want {
 		t.Fatalf("web version = %q, want %q", got, want)

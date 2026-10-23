@@ -5,10 +5,10 @@ import (
 	"io/fs"
 )
 
-// webDist embeds the Vite build output, including the ".gz" sidecars the build
-// writes next to compressible assets. The `all:` prefix keeps the embed valid
-// even when dist only holds the tracked .gitkeep placeholder, so the project
-// compiles before the frontend has ever been built.
+// webDist embeds the Vite build output, including the ".br" and ".gz" sidecars
+// the build writes next to compressible assets. The `all:` prefix keeps the
+// embed valid even when dist only holds the tracked .gitkeep placeholder, so
+// the project compiles before the frontend has ever been built.
 //
 //go:embed all:dist
 var webDist embed.FS

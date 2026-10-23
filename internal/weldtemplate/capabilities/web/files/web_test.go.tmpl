@@ -15,8 +15,22 @@ func testAssets() fstest.MapFS {
 	}
 }
 
-// testAssetsWithGzip stands in for a built frontend: every compressible asset
-// also has a ".gz" sidecar, exactly as the Vite compression plugin leaves it.
+// testAssetsWithSidecars stands in for a built frontend: every compressible
+// asset also has a ".br" and ".gz" sidecar, exactly as the Vite compression
+// plugin leaves them.
+func testAssetsWithSidecars() fstest.MapFS {
+	return fstest.MapFS{
+		"index.html":     {Data: []byte("<html>app</html>")},
+		"index.html.br":  {Data: []byte("brotli shell")},
+		"index.html.gz":  {Data: []byte("gzipped shell")},
+		"assets/a.js":    {Data: []byte("console.log(1)")},
+		"assets/a.js.br": {Data: []byte("brotli asset")},
+		"assets/a.js.gz": {Data: []byte("gzipped asset")},
+	}
+}
+
+// testAssetsWithGzip is a build that only emitted gzip sidecars, so the handler
+// must still fall back to them for a brotli-capable client.
 func testAssetsWithGzip() fstest.MapFS {
 	return fstest.MapFS{
 		"index.html":     {Data: []byte("<html>app</html>")},
@@ -65,6 +79,54 @@ func TestHandlerPrefersThePrecompressedAsset(t *testing.T) {
 	}
 }
 
+func TestHandlerPrefersBrotliOverGzip(t *testing.T) {
+	h := handler(testAssetsWithSidecars(), testAPIPrefix)
+	request := httptest.NewRequest(http.MethodGet, "/assets/a.js", nil)
+	request.Header.Set("Accept-Encoding", "gzip, br")
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Encoding"); got != "br" {
+		t.Fatalf("Content-Encoding = %q, want br", got)
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "javascript") {
+		t.Fatalf("Content-Type = %q, want the plain asset's media type", got)
+	}
+	if got := recorder.Header().Get("Vary"); got != "Accept-Encoding" {
+		t.Fatalf("Vary = %q, want Accept-Encoding", got)
+	}
+	if got := recorder.Body.String(); got != "brotli asset" {
+		t.Fatalf("body = %q, want the precompressed sidecar", got)
+	}
+}
+
+func TestHandlerHonoursQualityWhenChoosingAnEncoding(t *testing.T) {
+	h := handler(testAssetsWithSidecars(), testAPIPrefix)
+	request := httptest.NewRequest(http.MethodGet, "/assets/a.js", nil)
+	request.Header.Set("Accept-Encoding", "br;q=0.5, gzip")
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if got := recorder.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip (higher q)", got)
+	}
+}
+
+func TestHandlerFallsBackToGzipWhenBrotliIsDeclined(t *testing.T) {
+	h := handler(testAssetsWithSidecars(), testAPIPrefix)
+	request := httptest.NewRequest(http.MethodGet, "/assets/a.js", nil)
+	request.Header.Set("Accept-Encoding", "br;q=0, gzip")
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	if got := recorder.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	if got := recorder.Body.String(); got != "gzipped asset" {
+		t.Fatalf("body = %q, want the gzip sidecar", got)
+	}
+}
+
 func TestHandlerServesPlainAssetWhenGzipIsDeclined(t *testing.T) {
 	h := handler(testAssetsWithGzip(), testAPIPrefix)
 	for _, acceptEncoding := range []string{"gzip;q=0", "br", "*;q=0", ""} {
@@ -86,42 +148,46 @@ func TestHandlerServesPlainAssetWhenGzipIsDeclined(t *testing.T) {
 	}
 }
 
-func TestAllowsGzip(t *testing.T) {
+func TestEncodingQuality(t *testing.T) {
 	for _, tc := range []struct {
-		header string
-		want   bool
+		header   string
+		encoding string
+		want     float64
 	}{
-		{header: "", want: false},
-		{header: "gzip", want: true},
-		{header: "br, gzip", want: true},
-		{header: "gzip;q=0", want: false},
-		{header: "gzip;q=0.5", want: true},
-		{header: "*;q=0.5", want: true},
-		{header: "*;q=0", want: false},
-		{header: "br", want: false},
+		{header: "", encoding: "gzip", want: 0},
+		{header: "gzip", encoding: "gzip", want: 1},
+		{header: "br, gzip", encoding: "gzip", want: 1},
+		{header: "br, gzip", encoding: "br", want: 1},
+		{header: "gzip;q=0", encoding: "gzip", want: 0},
+		{header: "gzip;q=0.5", encoding: "gzip", want: 0.5},
+		{header: "GZIP", encoding: "gzip", want: 1},
+		{header: "*;q=0.5", encoding: "gzip", want: 0.5},
+		{header: "*;q=0", encoding: "br", want: 0},
+		{header: "br", encoding: "gzip", want: 0},
+		{header: "br;q=0, *;q=1", encoding: "br", want: 0},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "/", nil)
 		if tc.header != "" {
 			request.Header.Set("Accept-Encoding", tc.header)
 		}
-		if got := allowsGzip(request); got != tc.want {
-			t.Errorf("allowsGzip(%q) = %v, want %v", tc.header, got, tc.want)
+		explicit, wildcard := acceptedEncodings(request)
+		if got := encodingQuality(explicit, wildcard, tc.encoding); got != tc.want {
+			t.Errorf("encodingQuality(%q, %q) = %v, want %v", tc.header, tc.encoding, got, tc.want)
 		}
 	}
 }
 
-func TestHandlerDoesNotServeTheGzipSidecarDirectly(t *testing.T) {
-	h := handler(testAssetsWithGzip(), testAPIPrefix)
-	request := httptest.NewRequest(http.MethodGet, "/assets/a.js.gz", nil)
-	request.Header.Set("Accept-Encoding", "gzip")
-	request.Header.Set("Accept", "text/html")
-	recorder := httptest.NewRecorder()
-	h.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", recorder.Code)
-	}
-	if strings.Contains(recorder.Body.String(), "gzipped asset") {
-		t.Fatalf("direct sidecar request was served: %q", recorder.Body.String())
+func TestHandlerDoesNotServeASidecarDirectly(t *testing.T) {
+	h := handler(testAssetsWithSidecars(), testAPIPrefix)
+	for _, name := range []string{"/assets/a.js.gz", "/assets/a.js.br"} {
+		request := httptest.NewRequest(http.MethodGet, name, nil)
+		request.Header.Set("Accept-Encoding", "gzip, br")
+		request.Header.Set("Accept", "text/html")
+		recorder := httptest.NewRecorder()
+		h.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s: status = %d, want 404", name, recorder.Code)
+		}
 	}
 }
 
@@ -140,19 +206,19 @@ func TestHandlerFallsBackToIndexForBrowserNavigation(t *testing.T) {
 }
 
 func TestHandlerCompressesTheSpaShell(t *testing.T) {
-	h := handler(testAssetsWithGzip(), testAPIPrefix)
+	h := handler(testAssetsWithSidecars(), testAPIPrefix)
 	request := httptest.NewRequest(http.MethodGet, "/some/client/route", nil)
 	request.Header.Set("Accept", "text/html")
-	request.Header.Set("Accept-Encoding", "gzip")
+	request.Header.Set("Accept-Encoding", "gzip, br")
 	recorder := httptest.NewRecorder()
 	h.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
-	if got := recorder.Header().Get("Content-Encoding"); got != "gzip" {
-		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	if got := recorder.Header().Get("Content-Encoding"); got != "br" {
+		t.Fatalf("Content-Encoding = %q, want br", got)
 	}
-	if got := recorder.Body.String(); got != "gzipped shell" {
+	if got := recorder.Body.String(); got != "brotli shell" {
 		t.Fatalf("body = %q, want the precompressed shell", got)
 	}
 }

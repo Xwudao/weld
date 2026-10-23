@@ -20,6 +20,21 @@ import (
 // indexFile is the SPA shell served at "/" and for client-side routes.
 const indexFile = "index.html"
 
+// encodingSidecar is one precompressed copy the build may write next to an
+// asset. ext is the filename suffix, encoding the Content-Encoding it carries.
+type encodingSidecar struct {
+	ext      string
+	encoding string
+}
+
+// sidecars lists the precompressed sidecars the build can emit, in preference
+// order: when a client accepts several, the earlier entry wins a quality tie
+// because brotli compresses better than gzip for the same level of effort.
+var sidecars = []encodingSidecar{
+	{ext: ".br", encoding: "br"},
+	{ext: ".gz", encoding: "gzip"},
+}
+
 // Handler returns the HTTP handler for the embedded frontend.
 //
 // The handler serves the build output and falls back to index.html so that
@@ -30,10 +45,11 @@ const indexFile = "index.html"
 // missing endpoint never receives the HTML shell. Passing the prefix keeps the
 // reservation correct when the surface is versioned or mounted elsewhere.
 //
-// The frontend build writes a precompressed ".gz" sidecar next to every
-// compressible asset, and both files are embedded in the binary. A request for
-// the plain path negotiates: a client that accepts gzip receives the sidecar
-// with Content-Encoding: gzip and no per-request compression happens.
+// The frontend build writes a precompressed ".br" and ".gz" sidecar next to
+// every compressible asset, and all files are embedded in the binary. A request
+// for the plain path negotiates: a client that accepts brotli or gzip receives
+// the matching sidecar with the right Content-Encoding and no per-request
+// compression happens.
 func Handler(reservedPrefix string) http.Handler {
 	return handler(dist, reservedPrefix)
 }
@@ -48,10 +64,10 @@ func handler(assets fs.FS, reservedPrefix string) http.Handler {
 		if name == "" {
 			name = indexFile
 		}
-		// A client never asks for the sidecar: only the plain path negotiates
-		// gzip, so a direct request for the compressed copy is a 404 rather
+		// A client never asks for a sidecar: only the plain path negotiates an
+		// encoding, so a direct request for a compressed copy is a 404 rather
 		// than a second, misleading URL for the same asset.
-		if strings.HasSuffix(name, ".gz") {
+		if hasSidecarSuffix(name) {
 			http.NotFound(w, r)
 			return
 		}
@@ -68,26 +84,44 @@ func handler(assets fs.FS, reservedPrefix string) http.Handler {
 	})
 }
 
-// serveAsset writes the embedded file name, preferring its precompressed
-// "<name>.gz" sidecar when the request accepts gzip. It reports whether it wrote
-// a response.
+// serveAsset writes the embedded file name, preferring the best precompressed
+// sidecar the client accepts. It reports whether it wrote a response.
 func serveAsset(assets fs.FS, w http.ResponseWriter, r *http.Request, name string) bool {
-	// The content type comes from the plain name; the sidecar's own extension
-	// would report application/gzip instead of the real media type.
+	// The content type comes from the plain name; a sidecar's own extension
+	// would report application/gzip or application/octet-stream instead of the
+	// real media type.
 	contentType := mime.TypeByExtension(path.Ext(name))
 	if contentType != "" {
-		if sidecar, info, ok := openAsset(assets, name+".gz"); ok {
-			// The body depends on Accept-Encoding, so a shared cache must key on
-			// it whether or not this request took the compressed copy.
-			w.Header().Add("Vary", "Accept-Encoding")
-			if allowsGzip(r) {
-				defer sidecar.Close()
-				w.Header().Set("Content-Type", contentType)
-				w.Header().Set("Content-Encoding", "gzip")
-				serveContent(w, r, name, sidecar, info)
-				return true
+		explicit, wildcard := acceptedEncodings(r)
+		var chosen fs.File
+		var chosenInfo fs.FileInfo
+		var chosenEncoding string
+		best := 0.0
+		for _, sidecar := range sidecars {
+			f, info, ok := openAsset(assets, name+sidecar.ext)
+			if !ok {
+				continue
 			}
-			_ = sidecar.Close()
+			// A precompressed copy exists, so the body depends on Accept-Encoding
+			// and a shared cache must key on it whether or not this request takes
+			// the compressed copy.
+			w.Header().Set("Vary", "Accept-Encoding")
+			quality := encodingQuality(explicit, wildcard, sidecar.encoding)
+			if quality <= 0 || quality <= best {
+				_ = f.Close()
+				continue
+			}
+			if chosen != nil {
+				_ = chosen.Close()
+			}
+			best, chosen, chosenInfo, chosenEncoding = quality, f, info, sidecar.encoding
+		}
+		if chosen != nil {
+			defer chosen.Close()
+			w.Header().Set("Content-Type", contentType)
+			w.Header().Set("Content-Encoding", chosenEncoding)
+			serveContent(w, r, name, chosen, chosenInfo)
+			return true
 		}
 	}
 	f, info, ok := openAsset(assets, name)
@@ -156,14 +190,26 @@ func isBrowserNavigation(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// allowsGzip reports whether the request accepts a gzip transfer-coding,
-// honouring explicit q-values and a wildcard. "gzip;q=0" and "*;q=0" must not
-// receive compressed content, which a plain substring check would get wrong.
-func allowsGzip(r *http.Request) bool {
-	var wildcardQuality *float64
+// hasSidecarSuffix reports whether name is a precompressed sidecar rather than
+// an asset the SPA build is meant to reference.
+func hasSidecarSuffix(name string) bool {
+	for _, sidecar := range sidecars {
+		if strings.HasSuffix(name, sidecar.ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// acceptedEncodings parses the request's Accept-Encoding header into the
+// explicit quality of each named coding plus the wildcard quality. A coding that
+// is neither named nor covered by the wildcard is not acceptable.
+func acceptedEncodings(r *http.Request) (map[string]float64, *float64) {
+	explicit := make(map[string]float64)
+	var wildcard *float64
 	for _, value := range r.Header.Values("Accept-Encoding") {
-		for _, encoding := range strings.Split(value, ",") {
-			parts := strings.Split(encoding, ";")
+		for _, item := range strings.Split(value, ",") {
+			parts := strings.Split(item, ";")
 			name := strings.TrimSpace(parts[0])
 			if name == "" {
 				continue
@@ -183,14 +229,25 @@ func allowsGzip(r *http.Request) bool {
 				quality = parsed
 			}
 
-			switch {
-			case strings.EqualFold(name, "gzip"):
-				return quality > 0
-			case name == "*":
-				wildcardQuality = &quality
+			if name == "*" {
+				wildcard = &quality
+				continue
 			}
+			explicit[strings.ToLower(name)] = quality
 		}
 	}
+	return explicit, wildcard
+}
 
-	return wildcardQuality != nil && *wildcardQuality > 0
+// encodingQuality reports how much the request wants one coding: its explicit
+// quality, else the wildcard's, else zero. "gzip;q=0" and "*;q=0" must not
+// receive compressed content, which a plain substring check would get wrong.
+func encodingQuality(explicit map[string]float64, wildcard *float64, encoding string) float64 {
+	if quality, ok := explicit[encoding]; ok {
+		return quality
+	}
+	if wildcard != nil {
+		return *wildcard
+	}
+	return 0
 }
