@@ -16,7 +16,7 @@ Install the latest patch release with Go 1.23 or newer (the tool itself builds o
 Go directive to `go 1.25.0`):
 
 ```bash
-go install github.com/Xwudao/weld/cmd/weld@v0.2.1
+go install github.com/Xwudao/weld/cmd/weld@v0.3.0
 ```
 
 ```bash

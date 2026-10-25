@@ -28,7 +28,7 @@ import (
 
 const (
 	progName = "weld"
-	version  = "0.2.1"
+	version  = "0.3.0"
 )
 
 // Run executes a weld invocation and returns a non-nil error on failure. It
