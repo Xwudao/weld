@@ -126,14 +126,14 @@ func newAddCommand() *cobra.Command {
 		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 1 {
-				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add listener <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName, progName, progName)
+				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add listener <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add job <name> [--schedule spec] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName, progName, progName, progName)
 			}
 			return nil
 		},
 		RunE: runAdd,
 	}
 	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
-	cmd.AddCommand(newAddModuleCommand(), newAddCrudSubcommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddMiddlewareSubcommand(), newAddListenerSubcommand(), newAddEnumCommand())
+	cmd.AddCommand(newAddModuleCommand(), newAddCrudSubcommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddMiddlewareSubcommand(), newAddListenerSubcommand(), newAddJobSubcommand(), newAddEnumCommand())
 	return cmd
 }
 
@@ -169,6 +169,9 @@ func addHelp() string {
 	b.WriteString("\n\n`weld add listener <name>` writes internal/listeners/<name>.go (an event type and")
 	b.WriteString("\nits Handle<Event> listener) and its test; register it yourself in")
 	b.WriteString("\ninternal/di/events_listeners.go (requires events).")
+	b.WriteString("\n\n`weld add job <name> [--schedule spec]` writes internal/jobs/<name>.go (the job,")
+	b.WriteString("\nits registry name and schedule) and its test; register it yourself in")
+	b.WriteString("\ninternal/di/cron_jobs.go (requires cron).")
 	b.WriteString("\n\n`weld add enum <name> <value>...` writes internal/enums/<name>.go (the type and")
 	b.WriteString("\nits string constants, written once) and generates internal/enums/<name>_gen.go")
 	b.WriteString("\n(the derived methods). <name> is lower_snake_case and the exported type is its")
@@ -944,6 +947,17 @@ Listeners:
   Registration is not automatic: add events.On(d, listeners.Handle<Event>) to
   NewEventListeners in internal/di/events_listeners.go. It requires events;
   --with-dependencies installs the config/loom/events chain first.
+
+Jobs:
+  add job <name> writes internal/jobs/<name>.go, the job function with its
+  registry name and schedule constants, and a test that registers it on a real
+  scheduler (which parses the schedule) and runs it once. <name> is
+  lower_snake_case and the job is its CamelCase form (daily_report ->
+  DailyReport). --schedule takes a five-field cron expression (default hourly,
+  "0 * * * *"). Both files are written once and are yours. Registration is not
+  automatic: call s.Register(jobs.<Job>Name, jobs.<Job>Schedule, jobs.<Job>) in
+  NewCronJobs in internal/di/cron_jobs.go. It requires cron;
+  --with-dependencies installs the config/loom/http/cron chain first.
 
 Enums:
   add enum <name> <value>... writes internal/enums/<name>.go, a typed string

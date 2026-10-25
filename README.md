@@ -91,6 +91,7 @@ weld add crud <name> [field:type...] [--with-dependencies] [--dir dir] [--dry-ru
 weld add command <name> [--dir dir] [--dry-run]
 weld add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]
 weld add listener <name> [--with-dependencies] [--dir dir] [--dry-run]
+weld add job <name> [--schedule spec] [--with-dependencies] [--dir dir] [--dry-run]
 weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
 weld db migrate up|status|down [--config path] [--yes] [--allow-missing] [--dir dir] [--dry-run]
 weld db create <name> [--dir dir] [--dry-run]
@@ -1173,6 +1174,37 @@ for the `events` capability:
   installs the `config`/`loom`/`events` chain. A name whose last segment the go
   command reads as a file suffix (`_test`, a GOOS or GOARCH such as `_linux`) is
   rejected, because the file would drop out of the normal build.
+
+## `weld add job`
+
+`weld add job <name> [--schedule spec]` writes a scheduled job for the `cron`
+capability:
+
+- **Files.** `internal/jobs/<name>.go` declares the job function
+  `<Job>(ctx) error` with two constants beside it, `<Job>Name` (the registry
+  name, `<name>`) and `<Job>Schedule`. `internal/jobs/<name>_test.go` registers
+  the job on a real `cron.Scheduler`, which parses the schedule, then runs it
+  once directly. `<name>` is lower_snake_case and the job is its CamelCase form
+  (`daily_report` → `DailyReport`).
+- **Schedule.** `--schedule` takes a five-field cron expression
+  (`"minute hour day-of-month month day-of-week"`, in `cron.timezone`) or
+  `"@every <duration>"` of at least one second, and defaults to hourly,
+  `"0 * * * *"`. weld checks the shape before planning, and the scheduler
+  parses it for real in the generated test. After the add, the schedule is the
+  project's to change in `<name>.go`; a repeat add with another schedule is a
+  no-op.
+- **Ownership.** Both files are seams recorded under `job:<name>`: written once,
+  never rewritten. An unmanaged file at either path, or another job whose name
+  has the same CamelCase form, is a conflict.
+- **Registration is yours.** `internal/di/cron_jobs.go` is a project-owned seam
+  with no marker region, so weld does not edit it. The plan prints the call to
+  add to `NewCronJobs`:
+  `if err := s.Register(jobs.<Job>Name, jobs.<Job>Schedule, jobs.<Job>); err != nil { return nil, err }`,
+  with `<module>/internal/jobs` imported. A job that needs a service is better
+  written as a method on that service, passed to `NewCronJobs`.
+- **Requirements and names.** It requires `cron`; `--with-dependencies` installs
+  the `config`/`loom`/`http`/`cron` chain. Names with a `_test` or GOOS/GOARCH
+  suffix are rejected, as for listeners.
 
 ## `weld add enum` and `weld gen`
 
