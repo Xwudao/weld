@@ -91,9 +91,18 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	_, err = buildHost(cmd, dir, name, cfg, webInstalled)
+	return err
+}
+
+// buildHost runs the host build with its build.pre and build.post hooks and
+// reports what it built. It is `weld build` without --docker, shared with
+// `weld release` so a release builds exactly what a build does.
+func buildHost(cmd *cobra.Command, dir, name string, cfg *projectcfg.Config, webInstalled bool) (*build.Result, error) {
+	stdout := cmd.OutOrStdout()
 	buildEnv := []string{"WELD_BUILD_OUTPUT=" + cfg.Output()}
 	if err := runHooks(cmd, cfg, hook.EventBuildPre, false, buildEnv...); err != nil {
-		return err
+		return nil, err
 	}
 	result, err := build.Run(build.Request{
 		Dir:          dir,
@@ -104,10 +113,10 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		Stderr:       cmd.ErrOrStderr(),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := runHooks(cmd, cfg, hook.EventBuildPost, false, buildEnv...); err != nil {
-		return err
+		return nil, err
 	}
 	if result.WebBuilt {
 		fmt.Fprintln(stdout, "built frontend")
@@ -115,5 +124,5 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	for _, binary := range result.Binaries {
 		fmt.Fprintf(stdout, "built %s\n", binary)
 	}
-	return nil
+	return result, nil
 }

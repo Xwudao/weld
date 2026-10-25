@@ -105,6 +105,7 @@ weld docker init [--dir dir] [--dry-run]
 weld seed [name] [--tag tag] [--dir dir]
 weld test [--db auto|off|require] [--db-url dsn] [--config path] [--] [go test args]
 weld deploy [--no-build] [--artifact file] [--dir dir]
+weld release <version> [--no-build] [--dir dir] [--dry-run]
 weld config example
 weld config init [--force]
 weld config check [--config path] [--strict] [--json] [--dir dir]
@@ -223,6 +224,22 @@ explicitly (which also skips the build). The artifact is `scp`'d to
 `host:remote_upload_dir` and the remote script is run as `sh <remote_script>
 <uploaded-path>`, so the script decides how to swap the running service over.
 `--dry-run` prints the `scp`/`ssh` steps without building or running anything.
+
+`weld release <version>` cuts a local release. It refuses a project that is not
+a git repository, has an uncommitted change to a tracked file (untracked files
+such as the local `config.yml` are fine), already has the tag, or has no commit
+since the previous version tag, and a version (`MAJOR.MINOR.PATCH`, `v`
+optional) that is not newer than that tag. It then creates an annotated tag at
+`HEAD` whose message is release notes built from the commit subjects since the
+previous tag (Conventional Commits grouped into breaking changes, features,
+fixes and other changes), builds exactly as `weld build` does — `weld.yml`
+targets, ldflags and the `build.pre`/`build.post` hooks — and writes a
+`sha256sum -c` compatible `SHA256SUMS` next to the binaries in the build output
+directory. The tag comes first, so a `${git_tag}` ldflag stamps the new version
+into the binaries; if the build fails the tag is deleted again. `--no-build`
+only tags, and `--dry-run` prints the notes and the plan without touching the
+repository. It never pushes: the tag stays local until you run the printed
+`git push origin <tag>`.
 
 Both commands read the optional, user-owned `weld.yml` (print a commented
 starter with `weld config example`, or write one into a project that has none

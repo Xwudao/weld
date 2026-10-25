@@ -89,6 +89,7 @@ func newRootCommand() *cobra.Command {
 		newSeedCommand(),
 		newTestCommand(),
 		newDeployCommand(),
+		newReleaseCommand(),
 		newDBCommand(),
 		newDoctorCommand(),
 		newConfigCommand(),
@@ -993,6 +994,13 @@ Diagnostics:
   drift, go.mod, installed tools, generated Loom and enum files and the db
   migration layout. Warnings are advisory; failures exit non-zero. --json prints
   the report for CI. It never writes, builds or connects to a service.
+
+Releases:
+  release <version> tags HEAD locally with an annotated tag whose message is
+  release notes grouped from the Conventional Commit subjects since the previous
+  version tag, builds the binaries as weld build does and writes SHA256SUMS next
+  to them. It refuses a dirty tree, an existing or older version and an empty
+  range, deletes the tag when the build fails, and never pushes.
 
 Routes:
   routes lists the HTTP routes the installed business modules register, read
