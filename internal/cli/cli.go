@@ -126,14 +126,14 @@ func newAddCommand() *cobra.Command {
 		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 1 {
-				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName, progName)
+				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add listener <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName, progName, progName)
 			}
 			return nil
 		},
 		RunE: runAdd,
 	}
 	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
-	cmd.AddCommand(newAddModuleCommand(), newAddCrudSubcommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddMiddlewareSubcommand(), newAddEnumCommand())
+	cmd.AddCommand(newAddModuleCommand(), newAddCrudSubcommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddMiddlewareSubcommand(), newAddListenerSubcommand(), newAddEnumCommand())
 	return cmd
 }
 
@@ -166,6 +166,9 @@ func addHelp() string {
 	b.WriteString("\nregisters it in the seed capability's register.go index.")
 	b.WriteString("\n\n`weld add middleware <name>` writes internal/middleware/<name>.go and its test;")
 	b.WriteString("\nwire it yourself in internal/httpserver/middleware.go (requires http).")
+	b.WriteString("\n\n`weld add listener <name>` writes internal/listeners/<name>.go (an event type and")
+	b.WriteString("\nits Handle<Event> listener) and its test; register it yourself in")
+	b.WriteString("\ninternal/di/events_listeners.go (requires events).")
 	b.WriteString("\n\n`weld add enum <name> <value>...` writes internal/enums/<name>.go (the type and")
 	b.WriteString("\nits string constants, written once) and generates internal/enums/<name>_gen.go")
 	b.WriteString("\n(the derived methods). <name> is lower_snake_case and the exported type is its")
@@ -932,6 +935,15 @@ Middleware:
   stack is declared in the project-owned internal/httpserver/middleware.go, so
   add middleware.<Name>() to the list middlewareChain returns. It requires http;
   --with-dependencies installs the config/loom/http chain first.
+
+Listeners:
+  add listener <name> writes internal/listeners/<name>.go, an event type and its
+  Handle<Event> listener, and a test that registers it on a real dispatcher and
+  publishes the event. <name> is lower_snake_case and the event is its CamelCase
+  form (item_created -> ItemCreated). Both files are written once and are yours.
+  Registration is not automatic: add events.On(d, listeners.Handle<Event>) to
+  NewEventListeners in internal/di/events_listeners.go. It requires events;
+  --with-dependencies installs the config/loom/events chain first.
 
 Enums:
   add enum <name> <value>... writes internal/enums/<name>.go, a typed string

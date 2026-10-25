@@ -90,6 +90,7 @@ weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add crud <name> [field:type...] [--with-dependencies] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]
+weld add listener <name> [--with-dependencies] [--dir dir] [--dry-run]
 weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
 weld db migrate up|status|down [--config path] [--yes] [--allow-missing] [--dir dir] [--dry-run]
 weld db create <name> [--dir dir] [--dry-run]
@@ -1145,6 +1146,33 @@ in:
   `--with-dependencies` installs the `config`/`loom`/`http` chain in the same
   plan. `<name>` is lower-case letters and digits starting with a letter, and not
   a Go keyword.
+
+## `weld add listener`
+
+`weld add listener <name>` writes an event and the listener that handles it,
+for the `events` capability:
+
+- **Files.** `internal/listeners/<name>.go` declares the event type and its
+  `Handle<Event>(ctx, event) error` listener, and
+  `internal/listeners/<name>_test.go` registers the listener on a real
+  `events.Dispatcher` and publishes the event. `<name>` is lower_snake_case and
+  the event is its CamelCase form (`item_created` → `ItemCreated`). When another
+  package publishes the event, move the type to a domain package both sides
+  import, as `internal/events/README.md` describes.
+- **Ownership.** Both files are seams recorded under `listener:<name>`: written
+  once, never rewritten. A repeat add is a no-op; an unmanaged file at either
+  path, or another listener whose name has the same CamelCase form (`a_b1` and
+  `a_b_1`), is a conflict.
+- **Registration is yours.** `internal/di/events_listeners.go` is a
+  project-owned seam with no marker region, so weld does not edit it. The plan
+  prints the line to add: import `<module>/internal/listeners` and call
+  `events.On(d, listeners.Handle<Event>)` in `NewEventListeners`. A listener
+  that needs a service is better written as a method on that service, passed to
+  `NewEventListeners` as a parameter.
+- **Requirements and names.** It requires `events`; `--with-dependencies`
+  installs the `config`/`loom`/`events` chain. A name whose last segment the go
+  command reads as a file suffix (`_test`, a GOOS or GOARCH such as `_linux`) is
+  rejected, because the file would drop out of the normal build.
 
 ## `weld add enum` and `weld gen`
 
