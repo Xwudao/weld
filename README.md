@@ -84,7 +84,7 @@ runtime. Template changes and the CLI are tested and released together.
 ## Commands
 
 ```
-weld new <name> [--module path] [--dir dir] [--dry-run]
+weld new <name> [--module path] [--with capability,...] [--dir dir] [--dry-run]
 weld add <capability> [capability...] [--dir dir] [--dry-run]
 weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
@@ -119,6 +119,14 @@ both; control commands on stdin restart or open either side
 then cross-compiles the Go binary for every configured target. It is the
 release path; `make build` stays available as the self-contained, no-weld
 fallback.
+
+`weld new <name> --with http,db` creates the project with those capabilities
+(and their requirements) already installed. It is exactly `weld new` followed
+by `weld add http db` — the same files, bytes and manifest — but built as one
+plan: `--dry-run` lists every file of the finished project, and a failure (for
+example a Loom generation that cannot resolve modules) removes the new
+directory instead of leaving a half-made project. `--with` takes a
+comma-separated list or may be repeated.
 
 `weld explain <capability>` prints what a capability is before you install it:
 its summary, direct requirements, the capabilities that require it, every file

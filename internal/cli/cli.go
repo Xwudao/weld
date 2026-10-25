@@ -106,13 +106,14 @@ func newNewCommand() *cobra.Command {
 		Short: "create a minimal Go CLI project",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("usage: %s new <name> [--module path] [--dir dir] [--dry-run]", progName)
+				return fmt.Errorf("usage: %s new <name> [--module path] [--with capability,...] [--dir dir] [--dry-run]", progName)
 			}
 			return nil
 		},
 		RunE: runNew,
 	}
 	cmd.Flags().String("module", "", "Go module path (default example.com/<name>)")
+	cmd.Flags().StringSlice("with", nil, "also install these capabilities and their requirements (comma-separated or repeated)")
 	return cmd
 }
 
@@ -1032,13 +1033,18 @@ func runNew(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := scaffold.Create(scaffold.Request{
+	with, err := cmd.Flags().GetStringSlice("with")
+	if err != nil {
+		return err
+	}
+
+	result, err := scaffold.CreateWith(scaffold.Request{
 		Dir:     dir,
 		Name:    args[0],
 		Module:  module,
 		Version: version,
 		Catalog: template.Load(),
-	})
+	}, with...)
 	if err != nil {
 		return err
 	}
@@ -1050,7 +1056,11 @@ func runNew(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	printResult(stdout, result, false)
-	fmt.Fprintf(stdout, "\nNext:\n  cd %s\n  go run . help\n", result.Dir)
+	next := "go run . help"
+	if len(with) > 0 {
+		next = "make build"
+	}
+	fmt.Fprintf(stdout, "\nNext:\n  cd %s\n  %s\n", result.Dir, next)
 	return nil
 }
 

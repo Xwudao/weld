@@ -79,6 +79,10 @@ type Result struct {
 	// check is written with a note (the check cannot attribute a failure to this
 	// plan), and a project that fails it afterwards is rolled back.
 	Verify []string
+	// NewDir marks a plan that creates Dir itself (`weld new`). Apply refuses it
+	// when Dir has appeared since planning, and removes Dir again when the plan
+	// fails, because nothing in it predates the plan.
+	NewDir bool
 }
 
 // Apply writes the planned result. When the plan changes the dependency graph it
@@ -86,9 +90,27 @@ type Result struct {
 // the post-apply check fails, the whole plan is rolled back, so a project is
 // never left with a graph that does not match its generated code, a manifest
 // that does not match the files, or code that does not build.
-func (r *Result) Apply() error {
+func (r *Result) Apply() (err error) {
 	if len(r.Operations) == 0 && !r.GenerateLoom {
 		return nil
+	}
+	if r.NewDir {
+		// The directory was absent when the plan was built. If it exists now it is
+		// someone else's, so nothing is written and nothing is removed.
+		if _, statErr := os.Stat(r.Dir); statErr == nil {
+			return &project.ConflictError{Path: r.Dir, Reason: "already exists"}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		// A snapshot rollback restores files but leaves the directories they
+		// created; a directory this plan created is removed whole instead.
+		defer func() {
+			if err != nil {
+				if removeErr := os.RemoveAll(r.Dir); removeErr != nil {
+					err = fmt.Errorf("%w (removing %s also failed: %v)", err, r.Dir, removeErr)
+				}
+			}
+		}()
 	}
 	// The check decides whether a failure is this plan's fault, so the diagnostics
 	// that already exist before the plan is written are collected first: a project
@@ -246,7 +268,84 @@ func Create(req Request) (*Result, error) {
 	}
 	operations = append(operations, project.Operation{Path: project.ManifestName, Content: encoded})
 
-	return &Result{Dir: target, Operations: operations, Capability: base}, nil
+	return &Result{Dir: target, Operations: operations, Capability: base, NewDir: true}, nil
+}
+
+// CreateWith plans a new project with additive capabilities installed on top of
+// the base, as one plan: `weld new <name> --with http,db` is `weld new` followed
+// by `weld add http db`, except that nothing is written until the whole plan is
+// built and a failure leaves no directory behind.
+//
+// The add half is planned by the same code as `weld add`, which reads the
+// project it extends. The base project is therefore materialized in a private
+// temporary directory — never the target — the add is planned against it, and
+// the two operation lists are merged so each path is written once with its final
+// content. Naming capabilities is an explicit request for the set, so their
+// requirements are installed as with `weld add a b`.
+func CreateWith(req Request, names ...string) (*Result, error) {
+	base, err := Create(req)
+	if err != nil || len(names) == 0 {
+		return base, err
+	}
+	// Resolve the names before materializing anything, so a typo fails fast.
+	if _, err := requestedCapabilities(req.Catalog, names); err != nil {
+		return nil, err
+	}
+
+	scratch, err := os.MkdirTemp("", "weld-new-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(scratch)
+	staged := filepath.Join(scratch, req.Name)
+	if err := project.Apply(staged, base.Operations); err != nil {
+		return nil, fmt.Errorf("stage base project: %w", err)
+	}
+	addReq := req
+	addReq.Dir = staged
+	addReq.WithDependencies = true
+	added, err := Add(addReq, names...)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &Result{
+		Dir:          base.Dir,
+		Operations:   mergeOperations(base.Operations, added.Operations),
+		Capability:   base.Capability,
+		Installed:    added.Installed,
+		Notes:        added.Notes,
+		GenerateLoom: added.GenerateLoom,
+		DIPackage:    added.DIPackage,
+		Verify:       req.Verify,
+		NewDir:       true,
+	}
+	return result, nil
+}
+
+// mergeOperations folds a later plan over an earlier one for a directory that
+// does not exist yet: a path the later plan rewrites keeps its final content, a
+// path it deletes is never written, and every write is a create, since nothing
+// is on disk to overwrite. Paths keep the order they were first planned in.
+func mergeOperations(earlier, later []project.Operation) []project.Operation {
+	index := make(map[string]int, len(earlier)+len(later))
+	var merged []project.Operation
+	for _, operation := range append(append([]project.Operation{}, earlier...), later...) {
+		operation.Overwrite = false
+		if i, ok := index[operation.Path]; ok {
+			merged[i] = operation
+			continue
+		}
+		index[operation.Path] = len(merged)
+		merged = append(merged, operation)
+	}
+	kept := merged[:0]
+	for _, operation := range merged {
+		if !operation.Delete {
+			kept = append(kept, operation)
+		}
+	}
+	return kept
 }
 
 // planner accumulates one `weld add` plan. It renders capability payloads and,

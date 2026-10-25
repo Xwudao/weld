@@ -358,6 +358,51 @@ func TestNewDryRunWritesNothing(t *testing.T) {
 	}
 }
 
+// TestNewWithDryRunPlansTheCapabilities proves `weld new --with` prints the
+// composed plan, including the required capabilities it installs, and writes
+// nothing; both the comma-separated and the repeated flag forms are accepted.
+func TestNewWithDryRunPlansTheCapabilities(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{
+		{"new", "demo", "--dir", root, "--dry-run", "--with", "redis,jwt"},
+		{"new", "demo", "--dir", root, "--dry-run", "--with", "redis", "--with", "jwt"},
+	} {
+		out, err := run(t, args...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		for _, want := range []string{
+			`installing required capability "http"`,
+			"add main.go",
+			"add internal/redisclient/",
+			"add internal/jwtauth/",
+			"dry run",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%v output is missing %q:\n%s", args, want, out)
+			}
+		}
+		if strings.Contains(out, "update ") {
+			t.Errorf("a new project plan updates a file:\n%s", out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "demo")); !os.IsNotExist(err) {
+		t.Fatal("dry run created the project")
+	}
+}
+
+// TestNewWithRejectsUnknownCapability proves a typo fails before anything is
+// written.
+func TestNewWithRejectsUnknownCapability(t *testing.T) {
+	root := t.TempDir()
+	if _, err := run(t, "new", "demo", "--dir", root, "--with", "http,nope"); err == nil || !strings.Contains(err.Error(), `"nope"`) {
+		t.Fatalf("new --with nope = %v, want an unknown-capability error", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "demo")); !os.IsNotExist(err) {
+		t.Fatal("a rejected new created the project")
+	}
+}
+
 func TestHelpMentionsLoomCapability(t *testing.T) {
 	out, err := run(t, "help")
 	if err != nil {
