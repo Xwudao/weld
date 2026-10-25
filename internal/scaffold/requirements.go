@@ -72,6 +72,32 @@ func capabilityNamesExcept(order []*template.Capability, excluded ...*template.C
 	return names
 }
 
+// InstallOrder returns the names of the capabilities `weld add <names...>` would
+// install into the project manifest describes, dependencies first. A requested
+// capability that is already installed contributes nothing, so an empty result
+// means the add would install nothing. It is the read-only view of the order Add
+// plans, for commands that explain a capability without planning any writes.
+func InstallOrder(catalog *template.Catalog, manifest *project.Manifest, names ...string) ([]string, error) {
+	requested, err := requestedCapabilities(catalog, names)
+	if err != nil {
+		return nil, err
+	}
+	var pending []*template.Capability
+	for _, capability := range requested {
+		if !manifest.HasCapability(capability.Name) {
+			pending = append(pending, capability)
+		}
+	}
+	if len(pending) == 0 {
+		return nil, nil
+	}
+	order, err := requiredCapabilities(catalog, manifest, pending...)
+	if err != nil {
+		return nil, err
+	}
+	return capabilityNames(order), nil
+}
+
 // requiredCapabilities returns the capabilities an Add plan installs for the
 // requested capabilities: their transitive requirements first, then each
 // requested capability itself, plus Loom (and the config Loom requires) when

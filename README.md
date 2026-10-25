@@ -103,6 +103,7 @@ weld deploy [--no-build] [--artifact file] [--dir dir]
 weld config example
 weld config init [--force]
 weld list [--dir dir]
+weld explain <capability> [--json] [--dir dir]
 weld skills [--dir dir] [--dry-run]
 weld version
 weld help
@@ -118,6 +119,14 @@ both; control commands on stdin restart or open either side
 then cross-compiles the Go binary for every configured target. It is the
 release path; `make build` stays available as the self-contained, no-weld
 fallback.
+
+`weld explain <capability>` prints what a capability is before you install it:
+its summary, direct requirements, the capabilities that require it, every file
+it writes with the role `weld upgrade` gives it (and any `when` condition), the
+marker regions it patches and its post-install steps. Inside a project it also
+says whether the capability is installed and, if not, exactly which
+capabilities adding it would install. It works outside a project too, and
+`--json` prints a stable shape for scripts and agents. It never writes.
 
 ### Docker images for generated projects
 
