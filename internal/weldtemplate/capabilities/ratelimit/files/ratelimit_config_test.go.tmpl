@@ -1,0 +1,91 @@
+package config
+
+import (
+	"io/fs"
+	"strings"
+	"testing"
+)
+
+// rateLimitLoader builds a loader over in-memory files and environment, so the
+// tests exercise the real loader without touching the filesystem or the process
+// environment.
+func rateLimitLoader(files, env map[string]string) *Loader {
+	readFile := func(name string) ([]byte, error) {
+		content, ok := files[name]
+		if !ok {
+			return nil, fs.ErrNotExist
+		}
+		return []byte(content), nil
+	}
+	lookupEnv := func(key string) (string, bool) {
+		value, ok := env[key]
+		return value, ok
+	}
+	return NewLoader(readFile, lookupEnv)
+}
+
+// TestRateLimitLoadsFileEnvironmentAndDefaults pins the precedence: the file
+// supplies the section, the environment overrides it, and an omitted setting
+// gets the explicit default.
+func TestRateLimitLoadsFileEnvironmentAndDefaults(t *testing.T) {
+	file := "rate_limit:\n  enabled: true\n  requests_per_second: 2.5\n  trusted_proxies: [\"10.0.0.0/8\"]\n"
+
+	cfg, err := rateLimitLoader(map[string]string{DefaultPath: file}, nil).Load("")
+	if err != nil {
+		t.Fatalf("Load file: %v", err)
+	}
+	got := cfg.RateLimit
+	if !got.Enabled || got.RequestsPerSecond != 2.5 || got.Burst != DefaultRateLimitBurst ||
+		got.MaxClients != DefaultRateLimitMaxClients || strings.Join(got.TrustedProxies, ",") != "10.0.0.0/8" {
+		t.Fatalf("RateLimit from file = %+v", got)
+	}
+	if err := cfg.ValidateRateLimit(); err != nil {
+		t.Fatalf("ValidateRateLimit: %v", err)
+	}
+
+	cfg, err = rateLimitLoader(map[string]string{DefaultPath: file}, map[string]string{
+		EnvRateLimitEnabled:           "false",
+		EnvRateLimitRequestsPerSecond: "7",
+		EnvRateLimitBurst:             "9",
+		EnvRateLimitMaxClients:        "50",
+		EnvRateLimitTrustedProxies:    "",
+	}).Load("")
+	if err != nil {
+		t.Fatalf("Load with environment: %v", err)
+	}
+	got = cfg.RateLimit
+	if got.Enabled || got.RequestsPerSecond != 7 || got.Burst != 9 || got.MaxClients != 50 || len(got.TrustedProxies) != 0 {
+		t.Fatalf("RateLimit with environment = %+v", got)
+	}
+}
+
+func TestRateLimitEnvironmentMustParse(t *testing.T) {
+	for _, key := range []string{EnvRateLimitEnabled, EnvRateLimitRequestsPerSecond, EnvRateLimitBurst, EnvRateLimitMaxClients} {
+		_, err := rateLimitLoader(map[string]string{DefaultPath: "{}\n"}, map[string]string{key: "lots"}).Load("")
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("Load with %s=lots = %v, want an error naming it", key, err)
+		}
+	}
+}
+
+func TestValidateRateLimit(t *testing.T) {
+	valid := RateLimit{Enabled: true, RequestsPerSecond: 1, Burst: 1, MaxClients: 1}
+	if err := (&Config{RateLimit: valid}).ValidateRateLimit(); err != nil {
+		t.Fatalf("valid section: %v", err)
+	}
+	for name, mutate := range map[string]func(*RateLimit){
+		"negative rate": func(r *RateLimit) { r.RequestsPerSecond = -1 },
+		"zero burst":    func(r *RateLimit) { r.Burst = 0 },
+		"zero clients":  func(r *RateLimit) { r.MaxClients = 0 },
+	} {
+		section := valid
+		mutate(&section)
+		if err := (&Config{RateLimit: section}).ValidateRateLimit(); err == nil {
+			t.Errorf("%s: ValidateRateLimit = nil, want an error", name)
+		}
+		section.Enabled = false
+		if err := (&Config{RateLimit: section}).ValidateRateLimit(); err != nil {
+			t.Errorf("%s while disabled: ValidateRateLimit = %v, want nil", name, err)
+		}
+	}
+}

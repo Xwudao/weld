@@ -1,0 +1,26 @@
+{
+  "name": "ratelimit",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "Opt-in per-client HTTP rate limit: an in-memory token bucket per client address with a bounded client set, X-Forwarded-For read only from configured trusted proxies, 429 responses with Retry-After, and typed rate_limit configuration. Installing it limits nothing until you add httpserver.RateLimitMiddleware to the chain in internal/httpserver/middleware.go.",
+  "requires": ["http"],
+  "files": [
+    { "path": "internal/ratelimit/ratelimit.go", "source": "files/ratelimit.go.tmpl" },
+    { "path": "internal/ratelimit/ratelimit_test.go", "source": "files/ratelimit_test.go.tmpl" },
+    { "path": "internal/ratelimit/README.md", "source": "files/README.md" },
+    { "path": "internal/config/ratelimit.go", "source": "files/ratelimit_config.go.tmpl" },
+    { "path": "internal/config/ratelimit_test.go", "source": "files/ratelimit_config_test.go.tmpl" },
+    { "path": "internal/httpserver/ratelimit.go", "source": "files/httpserver_ratelimit.go.tmpl" },
+    { "path": "internal/httpserver/ratelimit_test.go", "source": "files/httpserver_ratelimit_test.go.tmpl" }
+  ],
+  "patches": [
+    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
+    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" },
+    { "path": "internal/config/config.go", "marker": "configfields", "source": "files/config_fields.snippet" },
+    { "path": "internal/config/config.go", "marker": "configenv", "source": "files/config_env.snippet" },
+    { "path": "internal/config/config.go", "marker": "configdefaults", "source": "files/config_defaults.snippet" }
+  ],
+  "postInstall": [
+    "ratelimit limits nothing yet: add httpserver.RateLimitMiddleware(cfg) to the list middlewareChain returns in internal/httpserver/middleware.go (see internal/ratelimit/README.md), and set rate_limit.trusted_proxies in config.yml when the service runs behind a reverse proxy."
+  ]
+}

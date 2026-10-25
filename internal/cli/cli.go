@@ -875,6 +875,11 @@ Capabilities:
                     a secret-redacted config section and net/http middleware that
                     stores validated claims on the request context; installing it
                     issues no token and guards no route (requires http)
+  ratelimit (add)   Opt-in per-client HTTP rate limit: an in-memory token bucket
+                    per client address, trusted-proxy-aware, answering 429 with
+                    Retry-After; installing it limits nothing until you add
+                    httpserver.RateLimitMiddleware to the chain in
+                    internal/httpserver/middleware.go (requires http)
   user   (add)      Opt-in user accounts: PostgreSQL users migration, sqlc
                     queries in the single sqlc.yaml, a repository under
                     internal/data, bcrypt registration/login under internal/auth

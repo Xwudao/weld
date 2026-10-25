@@ -2238,7 +2238,7 @@ func TestPayloadRolesAreDeclared(t *testing.T) {
 
 	// A generated file is implied by the di entry, so no capability may claim the
 	// role itself.
-	for _, name := range []string{"loom", "http", "jwt", "user", "config", "db", "cron", "mail", "redis", "seed", "storage", "web", "events", "base"} {
+	for _, name := range []string{"loom", "http", "jwt", "user", "config", "db", "cron", "mail", "redis", "seed", "storage", "web", "events", "ratelimit", "base"} {
 		d := readDescriptor(t, name)
 		for _, file := range d.Files {
 			if file.Role == "generated" {

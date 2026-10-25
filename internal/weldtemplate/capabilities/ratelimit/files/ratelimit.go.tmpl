@@ -1,0 +1,295 @@
+// Package ratelimit limits how often one client may call the HTTP surface.
+//
+// A Limiter keeps one token bucket per key in memory: a key may spend up to
+// burst requests at once and earns tokens back at rate per second. It is
+// in-process, so every instance of a horizontally scaled service limits
+// independently; a limit shared across instances needs a shared store, which is
+// a different component.
+//
+// Memory is bounded twice: a bucket that has been idle long enough to refill is
+// forgotten on the next sweep, and the number of tracked keys is capped. A new
+// key arriving at the cap is refused rather than admitted unlimited, so a flood
+// of distinct keys cannot grow the map or bypass the limit; ClientIP groups an
+// IPv6 client by its /64 for the same reason.
+package ratelimit
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"net"
+	"net/http"
+	"net/netip"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"__module__/internal/httpx"
+)
+
+// DefaultMaxKeys is the number of keys a Limiter tracks when New is not given
+// WithMaxKeys.
+const DefaultMaxKeys = 100_000
+
+// Limiter is a set of per-key token buckets. It is safe for concurrent use.
+type Limiter struct {
+	rate    float64
+	burst   float64
+	maxKeys int
+	now     func() time.Time
+	// idle is how long a bucket takes to refill completely. A bucket untouched
+	// for that long is indistinguishable from a new one, so the sweep drops it.
+	idle time.Duration
+
+	mu        sync.Mutex
+	buckets   map[string]*bucket
+	lastSweep time.Time
+}
+
+// bucket is one key's token balance at the time it was last updated.
+type bucket struct {
+	tokens float64
+	last   time.Time
+}
+
+// Option configures a Limiter.
+type Option func(*Limiter)
+
+// WithMaxKeys caps the number of keys tracked at once. A non-positive value
+// keeps the default.
+func WithMaxKeys(n int) Option {
+	return func(l *Limiter) {
+		if n > 0 {
+			l.maxKeys = n
+		}
+	}
+}
+
+// WithClock replaces the clock, so a test can move time without sleeping.
+func WithClock(now func() time.Time) Option {
+	return func(l *Limiter) {
+		if now != nil {
+			l.now = now
+		}
+	}
+}
+
+// New builds a Limiter that admits burst requests at once per key and refills at
+// rate requests per second. A non-positive or non-finite rate and a burst below
+// one are errors: there is no setting that means "unlimited", because the way to
+// disable limiting is not to install the middleware.
+func New(rate float64, burst int, options ...Option) (*Limiter, error) {
+	if rate <= 0 || math.IsInf(rate, 0) || math.IsNaN(rate) {
+		return nil, fmt.Errorf("ratelimit: rate must be a positive number of requests per second, got %v", rate)
+	}
+	if burst < 1 {
+		return nil, fmt.Errorf("ratelimit: burst must be at least 1, got %d", burst)
+	}
+	l := &Limiter{
+		rate:    rate,
+		burst:   float64(burst),
+		maxKeys: DefaultMaxKeys,
+		now:     time.Now,
+		buckets: map[string]*bucket{},
+	}
+	for _, option := range options {
+		option(l)
+	}
+	l.idle = time.Duration(l.burst / l.rate * float64(time.Second))
+	if l.idle < time.Second {
+		l.idle = time.Second
+	}
+	l.lastSweep = l.now()
+	return l, nil
+}
+
+// ErrTooManyKeys reports that a new key arrived while the Limiter already tracks
+// its maximum number of keys. The request is refused, not admitted unlimited.
+var ErrTooManyKeys = errors.New("ratelimit: too many distinct clients")
+
+// Allow spends one token for key. It reports whether the request may proceed
+// and, when it may not, how long until a token is available. It never blocks.
+func (l *Limiter) Allow(key string) (bool, time.Duration, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	if now.Sub(l.lastSweep) >= l.idle {
+		l.sweep(now)
+	}
+	b, ok := l.buckets[key]
+	if !ok {
+		if len(l.buckets) >= l.maxKeys {
+			l.sweep(now)
+			if len(l.buckets) >= l.maxKeys {
+				return false, l.idle, ErrTooManyKeys
+			}
+		}
+		b = &bucket{tokens: l.burst, last: now}
+		l.buckets[key] = b
+	}
+	if elapsed := now.Sub(b.last); elapsed > 0 {
+		b.tokens = math.Min(l.burst, b.tokens+elapsed.Seconds()*l.rate)
+	}
+	b.last = now
+	if b.tokens >= 1 {
+		b.tokens--
+		return true, 0, nil
+	}
+	wait := time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
+	return false, wait, nil
+}
+
+// Len reports how many keys are tracked, for tests and diagnostics.
+func (l *Limiter) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
+}
+
+// sweep forgets every bucket that has been idle long enough to be full again.
+// The caller holds l.mu.
+func (l *Limiter) sweep(now time.Time) {
+	for key, b := range l.buckets {
+		if now.Sub(b.last) >= l.idle {
+			delete(l.buckets, key)
+		}
+	}
+	l.lastSweep = now
+}
+
+// KeyFunc names the client a request is counted against. An empty key exempts
+// the request from limiting, which is how a KeyFunc skips a health check.
+type KeyFunc func(r *http.Request) string
+
+// Middleware limits every request through l, keyed by key. A refused request is
+// answered 429 with the shared error envelope and a Retry-After header in whole
+// seconds; the handler is not called.
+func Middleware(l *Limiter, key KeyFunc) httpx.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id := key(r)
+			if id == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			allowed, wait, _ := l.Allow(id)
+			if !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+				httpx.Error(w, http.StatusTooManyRequests, "too many requests")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// ClientIP returns a KeyFunc that keys a request by its client address.
+//
+// It uses the connection's peer address. Only when that peer is one of trusted
+// (a reverse proxy or load balancer you run) does it read X-Forwarded-For, and
+// then it takes the right-most address that is not itself trusted: everything to
+// the left of it was written by the client and could be forged. With no trusted
+// proxies the header is ignored entirely. An IPv6 address is grouped by its /64,
+// the block one subscriber is usually given, so rotating addresses inside it does
+// not mint new keys.
+func ClientIP(trusted []netip.Prefix) KeyFunc {
+	return func(r *http.Request) string {
+		peer, ok := parseAddr(r.RemoteAddr)
+		if !ok {
+			return r.RemoteAddr
+		}
+		client := peer
+		if isTrusted(peer, trusted) {
+			hops := forwardedHops(r.Header.Values("X-Forwarded-For"))
+			for i := len(hops) - 1; i >= 0; i-- {
+				hop, ok := parseAddr(hops[i])
+				if !ok {
+					break
+				}
+				client = hop
+				if !isTrusted(hop, trusted) {
+					break
+				}
+			}
+		}
+		return keyFor(client)
+	}
+}
+
+// ParsePrefixes parses trusted proxy entries: CIDR prefixes ("10.0.0.0/8") or
+// single addresses ("192.0.2.10"), which are treated as a /32 or /128.
+func ParsePrefixes(entries []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			prefix, err := netip.ParsePrefix(entry)
+			if err != nil {
+				return nil, fmt.Errorf("ratelimit: trusted proxy %q is not a CIDR prefix", entry)
+			}
+			prefixes = append(prefixes, prefix.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(entry)
+		if err != nil {
+			return nil, fmt.Errorf("ratelimit: trusted proxy %q is not an IP address", entry)
+		}
+		addr = addr.Unmap()
+		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return prefixes, nil
+}
+
+// forwardedHops splits X-Forwarded-For values into their comma-separated hops,
+// in order, left (client) to right (nearest proxy).
+func forwardedHops(values []string) []string {
+	var hops []string
+	for _, value := range values {
+		for _, hop := range strings.Split(value, ",") {
+			if hop = strings.TrimSpace(hop); hop != "" {
+				hops = append(hops, hop)
+			}
+		}
+	}
+	return hops
+}
+
+// parseAddr reads an address with or without a port.
+func parseAddr(raw string) (netip.Addr, bool) {
+	raw = strings.TrimSpace(raw)
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap().WithZone(""), true
+}
+
+// isTrusted reports whether addr is inside one of trusted.
+func isTrusted(addr netip.Addr, trusted []netip.Prefix) bool {
+	for _, prefix := range trusted {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// keyFor is the bucket key for a client address: the address itself for IPv4,
+// its /64 for IPv6.
+func keyFor(addr netip.Addr) string {
+	if addr.Is4() {
+		return addr.String()
+	}
+	prefix, err := addr.Prefix(64)
+	if err != nil {
+		return addr.String()
+	}
+	return prefix.String()
+}

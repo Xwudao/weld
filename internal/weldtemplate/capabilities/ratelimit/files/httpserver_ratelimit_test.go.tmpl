@@ -1,0 +1,44 @@
+package httpserver
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"__module__/internal/config"
+)
+
+func TestRateLimitMiddlewareFollowsConfiguration(t *testing.T) {
+	if limit, err := RateLimitMiddleware(&config.Config{}); limit != nil || err != nil {
+		t.Fatalf("disabled section = %v, %v; want no middleware and no error", limit, err)
+	}
+
+	invalid := &config.Config{RateLimit: config.RateLimit{Enabled: true, RequestsPerSecond: 1, Burst: 0, MaxClients: 1}}
+	if _, err := RateLimitMiddleware(invalid); err == nil {
+		t.Fatal("an enabled section with burst 0 built a middleware")
+	}
+	badProxy := &config.Config{RateLimit: config.RateLimit{Enabled: true, RequestsPerSecond: 1, Burst: 1, MaxClients: 1, TrustedProxies: []string{"proxy"}}}
+	if _, err := RateLimitMiddleware(badProxy); err == nil {
+		t.Fatal("an unparseable trusted proxy built a middleware")
+	}
+
+	cfg := &config.Config{RateLimit: config.RateLimit{Enabled: true, RequestsPerSecond: 1, Burst: 2, MaxClients: 10}}
+	limit, err := RateLimitMiddleware(cfg)
+	if err != nil || limit == nil {
+		t.Fatalf("enabled section = %v, %v; want a middleware", limit, err)
+	}
+	handler := limit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	codes := make([]int, 0, 3)
+	for i := 0; i < 3; i++ {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.RemoteAddr = "203.0.113.7:4000"
+		handler.ServeHTTP(recorder, request)
+		codes = append(codes, recorder.Code)
+	}
+	if codes[0] != http.StatusNoContent || codes[1] != http.StatusNoContent || codes[2] != http.StatusTooManyRequests {
+		t.Fatalf("status codes = %v, want [204 204 429]", codes)
+	}
+}

@@ -1,0 +1,15 @@
+# weld:ratelimit:installed __version__
+# Per-client request rate limit, applied by the middleware internal/httpserver
+# builds from this section once you add it to the chain in
+# internal/httpserver/middleware.go. Each client may send burst requests at once
+# and earns requests_per_second back. The limit is held in memory per process.
+# max_clients caps the clients tracked at once; a new client arriving at the cap
+# is refused. trusted_proxies lists the reverse proxies (CIDR or single address)
+# whose X-Forwarded-For header is believed; leave it empty when clients connect
+# directly, or every client could choose its own key.
+rate_limit:
+  enabled: true
+  requests_per_second: 10
+  burst: 20
+  max_clients: 100000
+  trusted_proxies: []

@@ -319,6 +319,12 @@ Capabilities:
   to generate `users.sql.go` and the `User` model. The account service is a
   pruned Loom binding in `internal/di/user_provider.go` until a handler or policy
   consumes it.
+- `ratelimit` (add) — an opt-in per-client HTTP rate limit: an in-memory token
+  bucket per client address with a bounded client set, `X-Forwarded-For` read
+  only from configured trusted proxies, and `429` responses with `Retry-After`.
+  Requires `http`; installing it limits nothing until you add
+  `httpserver.RateLimitMiddleware` to the chain in
+  `internal/httpserver/middleware.go` (see [Rate limiting](#rate-limiting)).
 - `cron` (add) — an opt-in in-process scheduler that starts and stops with the
   `serve` command and never with a short command. Requires `http` (and therefore
   `loom`); installing it schedules nothing until you register jobs in
@@ -1499,6 +1505,53 @@ the commented `cors:` block that lives in a patch snippet — a snippet already
 present in a region is never re-inserted, so add the block by hand or set the
 `CORS_*` environment variables. The policy is off by default either way. See
 [`weld upgrade`](#weld-upgrade).
+
+## Rate limiting
+
+`weld add ratelimit` installs a per-client request limit. It requires `http`,
+and like `jwt` it changes nothing on its own: the global middleware stack is
+the project-owned `internal/httpserver/middleware.go`, which weld never edits,
+so you add the limit there. The installed `internal/ratelimit/README.md` has the
+complete `middlewareChain`; the shape is
+
+```go
+limit, err := RateLimitMiddleware(cfg)
+if err != nil {
+	panic(err) // an enabled but invalid rate_limit section fails at startup
+}
+if limit != nil {
+	chain = append(chain, limit)
+}
+```
+
+after the default `RequestID`/`AccessLog`/`Recover` entries, so a refused
+request is still logged with its request ID and carries the CORS headers.
+
+- **Algorithm.** One token bucket per client: `burst` requests at once,
+  refilled at `requests_per_second`. A refused request gets `429`, the shared
+  error envelope and `Retry-After` in whole seconds.
+- **Client identity.** The connection's peer address; an IPv6 client is grouped
+  by its `/64`. `X-Forwarded-For` is read only when the peer is listed in
+  `rate_limit.trusted_proxies`, and then the client is the right-most hop that
+  is not a trusted proxy, so a client cannot forge its own key. Behind a reverse
+  proxy you must list it, or every request shares the proxy's bucket.
+- **Bounded memory.** Idle buckets are forgotten once full again, and at most
+  `max_clients` clients are tracked; a new client at the cap is refused, not
+  admitted unlimited.
+- **Scope.** The limit is per process. Scaled-out instances each keep their own
+  buckets; a shared limit needs a shared store, which this capability does not
+  provide. For another key (a user ID, an API key) or a per-route limit, use
+  `ratelimit.New` and `ratelimit.Middleware` with your own `KeyFunc`, for example
+  as a named policy in `internal/di/http_policies.go`.
+
+```yaml
+rate_limit:
+  enabled: true            # RATE_LIMIT_ENABLED
+  requests_per_second: 10  # RATE_LIMIT_REQUESTS_PER_SECOND
+  burst: 20                # RATE_LIMIT_BURST
+  max_clients: 100000      # RATE_LIMIT_MAX_CLIENTS
+  trusted_proxies: []      # RATE_LIMIT_TRUSTED_PROXIES (comma-separated)
+```
 
 ## JWT bearer tokens
 

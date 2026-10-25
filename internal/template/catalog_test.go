@@ -11,7 +11,7 @@ func TestCatalogListsBaseAndWeb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Names: %v", err)
 	}
-	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "db": false, "loom": false, "redis": false, "mail": false, "storage": false, "cron": false, "seed": false, "events": false, "jwt": false, "user": false}
+	want := map[string]bool{"base": false, "config": false, "http": false, "web": false, "db": false, "loom": false, "redis": false, "mail": false, "storage": false, "cron": false, "seed": false, "events": false, "jwt": false, "user": false, "ratelimit": false}
 	for _, name := range names {
 		if _, ok := want[name]; ok {
 			want[name] = true

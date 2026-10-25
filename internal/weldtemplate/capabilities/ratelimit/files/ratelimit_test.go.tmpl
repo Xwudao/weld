@@ -1,0 +1,171 @@
+package ratelimit
+
+import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"testing"
+	"time"
+)
+
+// clock is a manual time source, so the tests move time instead of sleeping.
+type clock struct{ now time.Time }
+
+func (c *clock) Now() time.Time          { return c.now }
+func (c *clock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+
+func newLimiter(t *testing.T, rate float64, burst int, options ...Option) (*Limiter, *clock) {
+	t.Helper()
+	c := &clock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	l, err := New(rate, burst, append([]Option{WithClock(c.Now)}, options...)...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return l, c
+}
+
+func TestNewRejectsUnusableSettings(t *testing.T) {
+	for _, tc := range []struct {
+		rate  float64
+		burst int
+	}{{0, 1}, {-1, 1}, {1, 0}} {
+		if _, err := New(tc.rate, tc.burst); err == nil {
+			t.Errorf("New(%v, %d) = nil error, want one", tc.rate, tc.burst)
+		}
+	}
+}
+
+func TestAllowSpendsBurstThenRefills(t *testing.T) {
+	l, c := newLimiter(t, 2, 3)
+	for i := 0; i < 3; i++ {
+		if ok, _, _ := l.Allow("a"); !ok {
+			t.Fatalf("request %d refused inside the burst", i+1)
+		}
+	}
+	ok, wait, err := l.Allow("a")
+	if ok || err != nil {
+		t.Fatalf("fourth request = %v, %v; want refused without error", ok, err)
+	}
+	if wait != 500*time.Millisecond {
+		t.Fatalf("wait = %v, want 500ms at 2 requests per second", wait)
+	}
+	// Another key has its own bucket.
+	if ok, _, _ := l.Allow("b"); !ok {
+		t.Fatal("a second key was limited by the first")
+	}
+	c.Advance(500 * time.Millisecond)
+	if ok, _, _ := l.Allow("a"); !ok {
+		t.Fatal("the bucket did not refill one token after 500ms")
+	}
+	if ok, _, _ := l.Allow("a"); ok {
+		t.Fatal("the bucket refilled more than one token after 500ms")
+	}
+}
+
+func TestIdleBucketsAreForgotten(t *testing.T) {
+	l, c := newLimiter(t, 1, 2)
+	l.Allow("a")
+	l.Allow("b")
+	if l.Len() != 2 {
+		t.Fatalf("Len = %d, want 2", l.Len())
+	}
+	c.Advance(3 * time.Second)
+	l.Allow("c")
+	if l.Len() != 1 {
+		t.Fatalf("Len after the idle sweep = %d, want 1", l.Len())
+	}
+}
+
+func TestMaxKeysRefusesNewKeysInsteadOfGrowing(t *testing.T) {
+	l, _ := newLimiter(t, 1, 1, WithMaxKeys(2))
+	l.Allow("a")
+	l.Allow("b")
+	ok, _, err := l.Allow("c")
+	if ok || !errors.Is(err, ErrTooManyKeys) {
+		t.Fatalf("third key = %v, %v; want refused with ErrTooManyKeys", ok, err)
+	}
+	if l.Len() != 2 {
+		t.Fatalf("Len = %d, want the cap of 2", l.Len())
+	}
+}
+
+func TestMiddlewareAnswers429WithRetryAfter(t *testing.T) {
+	l, _ := newLimiter(t, 1, 1)
+	calls := 0
+	handler := Middleware(l, func(*http.Request) string { return "client" })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/", nil))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if first.Code != http.StatusNoContent || calls != 1 {
+		t.Fatalf("first request = %d after %d calls, want 204 after 1", first.Code, calls)
+	}
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request = %d, want 429", second.Code)
+	}
+	if got := second.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+}
+
+func TestMiddlewareExemptsAnEmptyKey(t *testing.T) {
+	l, _ := newLimiter(t, 1, 1)
+	handler := Middleware(l, func(*http.Request) string { return "" })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for i := 0; i < 3; i++ {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+		if recorder.Code != http.StatusNoContent {
+			t.Fatalf("exempt request %d = %d, want 204", i+1, recorder.Code)
+		}
+	}
+}
+
+func TestClientIP(t *testing.T) {
+	trusted, err := ParsePrefixes([]string{"10.0.0.0/8", "192.0.2.10"})
+	if err != nil {
+		t.Fatalf("ParsePrefixes: %v", err)
+	}
+	for _, tc := range []struct {
+		name      string
+		remote    string
+		forwarded []string
+		trusted   []netip.Prefix
+		want      string
+	}{
+		{name: "peer", remote: "203.0.113.7:4000", want: "203.0.113.7"},
+		{name: "header ignored without trusted proxies", remote: "203.0.113.7:4000", forwarded: []string{"198.51.100.1"}, want: "203.0.113.7"},
+		{name: "header ignored from an untrusted peer", remote: "203.0.113.7:4000", forwarded: []string{"198.51.100.1"}, trusted: trusted, want: "203.0.113.7"},
+		{name: "trusted proxy", remote: "10.1.2.3:4000", forwarded: []string{"198.51.100.1"}, trusted: trusted, want: "198.51.100.1"},
+		{name: "forged left-most hop", remote: "10.1.2.3:4000", forwarded: []string{"1.1.1.1, 198.51.100.1"}, trusted: trusted, want: "198.51.100.1"},
+		{name: "proxy chain", remote: "10.1.2.3:4000", forwarded: []string{"198.51.100.1", "192.0.2.10"}, trusted: trusted, want: "198.51.100.1"},
+		{name: "ipv6 grouped by /64", remote: "[2001:db8:1:2:aaaa::1]:4000", want: "2001:db8:1:2::/64"},
+		{name: "ipv4-mapped ipv6", remote: "[::ffff:203.0.113.7]:4000", want: "203.0.113.7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.RemoteAddr = tc.remote
+			for _, value := range tc.forwarded {
+				r.Header.Add("X-Forwarded-For", value)
+			}
+			if got := ClientIP(tc.trusted)(r); got != tc.want {
+				t.Fatalf("ClientIP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParsePrefixesRejectsGarbage(t *testing.T) {
+	for _, entry := range []string{"not-an-ip", "10.0.0.0/33"} {
+		if _, err := ParsePrefixes([]string{entry}); err == nil {
+			t.Errorf("ParsePrefixes(%q) = nil error, want one", entry)
+		}
+	}
+}

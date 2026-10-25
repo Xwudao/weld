@@ -1,0 +1,52 @@
+package httpserver
+
+import (
+	"fmt"
+
+	"__module__/internal/config"
+	"__module__/internal/httpx"
+	"__module__/internal/ratelimit"
+)
+
+// RateLimitMiddleware builds the per-client rate limit from the rate_limit
+// section of config.yml. Installing the ratelimit capability does not put it in
+// the stack: add it to the list middlewareChain returns in middleware.go, after
+// the default entries, so a refused request still carries the CORS headers, a
+// request ID and an access-log line, but never reaches a handler:
+//
+//	chain = append(chain, httpx.RequestID(), httpx.AccessLog(logger), httpx.Recover(logger))
+//	limit, err := RateLimitMiddleware(cfg)
+//	if err != nil {
+//		panic(err) // middlewareChain has no error result; fail at startup
+//	}
+//	if limit != nil {
+//		chain = append(chain, limit)
+//	}
+//	return chain
+//
+// It returns nil when the section is disabled, so a disabled limit installs no
+// middleware. An enabled section that is invalid is an error; the composition
+// fails at startup instead of serving without the limit it was asked for.
+//
+// Every request is keyed by its client address (ratelimit.ClientIP over the
+// configured trusted proxies). For a different key — a user ID from a validated
+// token, an API key — or for a limit on some routes only, build a
+// ratelimit.Limiter and ratelimit.Middleware yourself, for example as a named
+// policy in internal/di/http_policies.go.
+func RateLimitMiddleware(cfg *config.Config) (httpx.Middleware, error) {
+	if cfg == nil || !cfg.RateLimit.Enabled {
+		return nil, nil
+	}
+	if err := cfg.ValidateRateLimit(); err != nil {
+		return nil, err
+	}
+	trusted, err := ratelimit.ParsePrefixes(cfg.RateLimit.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("config: rate_limit.trusted_proxies: %w", err)
+	}
+	limiter, err := ratelimit.New(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst, ratelimit.WithMaxKeys(cfg.RateLimit.MaxClients))
+	if err != nil {
+		return nil, err
+	}
+	return ratelimit.Middleware(limiter, ratelimit.ClientIP(trusted)), nil
+}

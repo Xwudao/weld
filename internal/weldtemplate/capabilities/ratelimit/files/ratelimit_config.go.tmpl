@@ -1,0 +1,122 @@
+package config
+
+// Rate-limit configuration: the typed per-client limit and the environment,
+// defaults and validation that back it.
+//
+// This file is written once by `weld add ratelimit` and belongs to the config
+// package, so it can define methods on Config. The Config struct field and the
+// loader calls into this file are added by marker patches to
+// internal/config/config.go; the regions that hold them are weld-managed and
+// never rewritten outside the marker.
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+)
+
+// DefaultRateLimit values, applied when the file and the environment leave a
+// setting at zero.
+const (
+	DefaultRateLimitRequestsPerSecond = 10
+	DefaultRateLimitBurst             = 20
+	DefaultRateLimitMaxClients        = 100_000
+)
+
+// Rate-limit environment variable names. The environment overrides the YAML
+// file.
+const (
+	EnvRateLimitEnabled           = "RATE_LIMIT_ENABLED"
+	EnvRateLimitRequestsPerSecond = "RATE_LIMIT_REQUESTS_PER_SECOND"
+	EnvRateLimitBurst             = "RATE_LIMIT_BURST"
+	EnvRateLimitMaxClients        = "RATE_LIMIT_MAX_CLIENTS"
+	EnvRateLimitTrustedProxies    = "RATE_LIMIT_TRUSTED_PROXIES"
+)
+
+// RateLimit holds the per-client request limit.
+//
+// Enabled switches the middleware internal/httpserver builds from this section;
+// the middleware still has to be in the chain. TrustedProxies are CIDR prefixes
+// or single addresses whose X-Forwarded-For header is believed; they are parsed
+// by internal/ratelimit, which owns that format.
+type RateLimit struct {
+	Enabled           bool     `yaml:"enabled"`
+	RequestsPerSecond float64  `yaml:"requests_per_second"`
+	Burst             int      `yaml:"burst"`
+	MaxClients        int      `yaml:"max_clients"`
+	TrustedProxies    []string `yaml:"trusted_proxies"`
+}
+
+// applyRateLimitEnv overrides the rate_limit section with the environment. A
+// variable that cannot be parsed is an error rather than a silent fallback, and
+// an explicitly empty RATE_LIMIT_TRUSTED_PROXIES clears the file's list.
+func (c *Config) applyRateLimitEnv(lookupEnv LookupEnvFunc) error {
+	if value, ok := lookupEnv(EnvRateLimitEnabled); ok {
+		enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a boolean", EnvRateLimitEnabled)
+		}
+		c.RateLimit.Enabled = enabled
+	}
+	if value, ok := lookupEnv(EnvRateLimitRequestsPerSecond); ok {
+		rate, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return fmt.Errorf("config: %s is not a number", EnvRateLimitRequestsPerSecond)
+		}
+		c.RateLimit.RequestsPerSecond = rate
+	}
+	if value, ok := lookupEnv(EnvRateLimitBurst); ok {
+		burst, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a whole number", EnvRateLimitBurst)
+		}
+		c.RateLimit.Burst = burst
+	}
+	if value, ok := lookupEnv(EnvRateLimitMaxClients); ok {
+		clients, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a whole number", EnvRateLimitMaxClients)
+		}
+		c.RateLimit.MaxClients = clients
+	}
+	if value, ok := lookupEnv(EnvRateLimitTrustedProxies); ok {
+		c.RateLimit.TrustedProxies = splitEnvList(value)
+	}
+	return nil
+}
+
+// applyRateLimitDefaults fills a zero rate, burst or client cap. A negative value
+// is left for ValidateRateLimit to refuse rather than silently replaced.
+func (c *Config) applyRateLimitDefaults() {
+	if c.RateLimit.RequestsPerSecond == 0 {
+		c.RateLimit.RequestsPerSecond = DefaultRateLimitRequestsPerSecond
+	}
+	if c.RateLimit.Burst == 0 {
+		c.RateLimit.Burst = DefaultRateLimitBurst
+	}
+	if c.RateLimit.MaxClients == 0 {
+		c.RateLimit.MaxClients = DefaultRateLimitMaxClients
+	}
+}
+
+// ValidateRateLimit reports whether an enabled rate limit is usable. A disabled
+// section is always valid, so a project can switch the limit off without
+// keeping the rest of the section correct.
+func (c *Config) ValidateRateLimit() error {
+	if !c.RateLimit.Enabled {
+		return nil
+	}
+	rate := c.RateLimit.RequestsPerSecond
+	if rate <= 0 || math.IsInf(rate, 0) || math.IsNaN(rate) {
+		return errors.New("config: rate_limit.requests_per_second must be a positive number")
+	}
+	if c.RateLimit.Burst < 1 {
+		return errors.New("config: rate_limit.burst must be at least 1")
+	}
+	if c.RateLimit.MaxClients < 1 {
+		return errors.New("config: rate_limit.max_clients must be at least 1")
+	}
+	return nil
+}
