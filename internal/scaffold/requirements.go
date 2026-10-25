@@ -131,3 +131,32 @@ func requiredCapabilities(catalog *template.Catalog, manifest *project.Manifest,
 	}
 	return order, nil
 }
+
+// requireCapability makes sure the named capability is installed before a
+// per-name addition (a middleware, a job, a listener) is planned on top of it.
+// When it is missing, its requirement chain is an error naming subject, unless
+// the request opted into --with-dependencies, in which case the chain is
+// planned here, dependencies first.
+func (p *planner) requireCapability(name, subject string) error {
+	if p.present[name] {
+		return nil
+	}
+	capability, err := p.req.Catalog.Get(name)
+	if err != nil {
+		return err
+	}
+	order, err := requiredCapabilities(p.req.Catalog, p.manifest, capability)
+	if err != nil {
+		return err
+	}
+	if !p.req.WithDependencies {
+		return &MissingRequirementsError{Subject: subject, Missing: capabilityNames(order)}
+	}
+	for _, required := range order {
+		p.result.Notes = append(p.result.Notes, fmt.Sprintf("installing required capability %q", required.Name))
+		if err := p.installCapability(required); err != nil {
+			return err
+		}
+	}
+	return nil
+}

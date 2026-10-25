@@ -89,6 +89,7 @@ weld add <capability> [capability...] [--dir dir] [--dry-run]
 weld add module <name> [--command] [--dir dir] [--dry-run]
 weld add crud <name> [field:type...] [--with-dependencies] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
+weld add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]
 weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
 weld db migrate up|status|down [--config path] [--yes] [--allow-missing] [--dir dir] [--dry-run]
 weld db create <name> [--dir dir] [--dry-run]
@@ -1119,6 +1120,31 @@ non-business or multi-business commands:
   reserved root commands `serve`, `help` and `version` are rejected, and a name
   is either a command or a module, never both: adding a command for an installed
   module's name is a conflict (and the reverse too).
+
+## `weld add middleware`
+
+`weld add middleware <name>` writes an HTTP middleware for the project to fill
+in:
+
+- **Files.** `internal/middleware/<name>.go` holds an exported
+  `<Name>() httpx.Middleware` constructor that passes every request on, and
+  `internal/middleware/<name>_test.go` is a hermetic `httptest` test of it. The
+  package is separate from `internal/httpserver`, so a generated constructor
+  never collides with an identifier a capability ships there.
+- **Ownership.** Both files are recorded in `weld.json` under
+  `middleware:<name>` as seams: written once, never rewritten. A repeat add is a
+  no-op, and an unmanaged file at either path is a conflict.
+- **Wiring is yours.** The stack is declared in the project-owned
+  `internal/httpserver/middleware.go`, which has no marker region, so weld does
+  not edit it. The plan prints the line to add: import
+  `<module>/internal/middleware` and add `middleware.<Name>()` to the list
+  `middlewareChain` returns. The list is outer-to-inner, so where you put it
+  decides what it sees. A check that applies to some routes only belongs in a
+  named policy (`internal/di/http_policies.go`) instead.
+- **Requirements.** It requires `http`; a missing requirement is an error unless
+  `--with-dependencies` installs the `config`/`loom`/`http` chain in the same
+  plan. `<name>` is lower-case letters and digits starting with a letter, and not
+  a Go keyword.
 
 ## `weld add enum` and `weld gen`
 

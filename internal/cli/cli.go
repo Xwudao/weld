@@ -126,14 +126,14 @@ func newAddCommand() *cobra.Command {
 		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 1 {
-				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName)
+				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName, progName)
 			}
 			return nil
 		},
 		RunE: runAdd,
 	}
 	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
-	cmd.AddCommand(newAddModuleCommand(), newAddCrudSubcommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddEnumCommand())
+	cmd.AddCommand(newAddModuleCommand(), newAddCrudSubcommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddMiddlewareSubcommand(), newAddEnumCommand())
 	return cmd
 }
 
@@ -164,6 +164,8 @@ func addHelp() string {
 	b.WriteString("\nmodule, then runs sqlc, Loom and go build, rolling back if any step fails.")
 	b.WriteString("\n\n`weld add seeder <name>` writes internal/data/seeder/seed_<name>.go and")
 	b.WriteString("\nregisters it in the seed capability's register.go index.")
+	b.WriteString("\n\n`weld add middleware <name>` writes internal/middleware/<name>.go and its test;")
+	b.WriteString("\nwire it yourself in internal/httpserver/middleware.go (requires http).")
 	b.WriteString("\n\n`weld add enum <name> <value>...` writes internal/enums/<name>.go (the type and")
 	b.WriteString("\nits string constants, written once) and generates internal/enums/<name>_gen.go")
 	b.WriteString("\n(the derived methods). <name> is lower_snake_case and the exported type is its")
@@ -922,6 +924,14 @@ Seeders:
   in the seed capability's stable register.go index, so one seeder is one file
   and the run order stays in one place. --with-dependencies installs the
   db/loom/config/seed chain first when seed is not installed.
+
+Middleware:
+  add middleware <name> writes internal/middleware/<name>.go, an exported
+  <Name>() httpx.Middleware constructor, and a hermetic test beside it. Both are
+  written once and are yours. The middleware is not wired automatically: the
+  stack is declared in the project-owned internal/httpserver/middleware.go, so
+  add middleware.<Name>() to the list middlewareChain returns. It requires http;
+  --with-dependencies installs the config/loom/http chain first.
 
 Enums:
   add enum <name> <value>... writes internal/enums/<name>.go, a typed string
