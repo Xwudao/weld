@@ -1,0 +1,168 @@
+package data
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+{{- if .HasTime}}
+	"github.com/jackc/pgx/v5/pgtype"
+{{- end}}
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	sqlc "__module__/internal/data/sqlc"
+)
+
+// This file is the persistence half of the {{.Resource}} resource. weld wrote it
+// once, with `weld add crud {{.Resource}}`, and never rewrites it: it is yours to
+// edit. db/query/{{.Table}}.sql holds the statements and `weld gen sqlc`
+// regenerates the sqlc code this file wraps.
+
+// Err{{.Title}}NotFound is returned when the requested {{.Resource}} does not exist.
+var Err{{.Title}}NotFound = errors.New("data: {{.Resource}} not found")
+
+// {{.Title}} is the persistence model of one {{.Resource}}.
+//
+// It deliberately has no JSON tags: the HTTP module owns its own DTOs, so the
+// storage shape and the wire shape stay independent.
+type {{.Title}} struct {
+	ID int64
+{{- range .Fields}}
+	{{.GoName}} {{.GoType}}
+{{- end}}
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// {{.Title}}Input carries the writable fields of a {{.Resource}}, for both create and
+// update; the id and timestamps are owned by the database.
+type {{.Title}}Input struct {
+{{- range .Fields}}
+	{{.GoName}} {{.GoType}}
+{{- end}}
+}
+
+// {{.Title}}Repository is the {{.Resource}} persistence contract. A consumer that
+// needs less can declare a narrower interface against the same methods.
+type {{.Title}}Repository interface {
+	Create{{.Title}}(ctx context.Context, input {{.Title}}Input) ({{.Title}}, error)
+	Get{{.Title}}(ctx context.Context, id int64) ({{.Title}}, error)
+	List{{.Plural}}(ctx context.Context, limit, offset int) ([]{{.Title}}, error)
+	Count{{.Plural}}(ctx context.Context) (int64, error)
+	Update{{.Title}}(ctx context.Context, id int64, input {{.Title}}Input) ({{.Title}}, error)
+	Delete{{.Title}}(ctx context.Context, id int64) error
+}
+
+// Postgres{{.Title}}Repository is the pgx-backed {{.Title}}Repository.
+type Postgres{{.Title}}Repository struct {
+	queries *sqlc.Queries
+}
+
+// New{{.Title}}Repository returns the PostgreSQL {{.Resource}} repository backed by
+// pool. The pool is injected, so the application owns its lifecycle;
+// construction does not connect.
+func New{{.Title}}Repository(pool *pgxpool.Pool) *Postgres{{.Title}}Repository {
+	return &Postgres{{.Title}}Repository{queries: sqlc.New(pool)}
+}
+
+// Create{{.Title}} inserts a {{.Resource}} and returns it as stored.
+func (r *Postgres{{.Title}}Repository) Create{{.Title}}(ctx context.Context, input {{.Title}}Input) ({{.Title}}, error) {
+{{- if .SingleField}}
+{{- with index .Fields 0}}
+	row, err := r.queries.Create{{$.Title}}(ctx, {{if .IsTime}}pgtype.Timestamptz{Time: input.{{.GoName}}, Valid: true}{{else}}input.{{.GoName}}{{end}})
+{{- end}}
+{{- else}}
+	row, err := r.queries.Create{{.Title}}(ctx, sqlc.Create{{.Title}}Params{
+{{- range .Fields}}
+		{{.GoName}}: {{if .IsTime}}pgtype.Timestamptz{Time: input.{{.GoName}}, Valid: true}{{else}}input.{{.GoName}}{{end}},
+{{- end}}
+	})
+{{- end}}
+	if err != nil {
+		return {{.Title}}{}, {{.Resource}}StoreError(err, "create {{.Resource}}")
+	}
+	return {{.Resource}}FromSQLC(row), nil
+}
+
+// Get{{.Title}} returns the {{.Resource}} with id, or Err{{.Title}}NotFound.
+func (r *Postgres{{.Title}}Repository) Get{{.Title}}(ctx context.Context, id int64) ({{.Title}}, error) {
+	row, err := r.queries.Get{{.Title}}(ctx, id)
+	if err != nil {
+		return {{.Title}}{}, {{.Resource}}StoreError(err, "get {{.Resource}}")
+	}
+	return {{.Resource}}FromSQLC(row), nil
+}
+
+// List{{.Plural}} returns up to limit {{.Table}} after offset, in id order.
+func (r *Postgres{{.Title}}Repository) List{{.Plural}}(ctx context.Context, limit, offset int) ([]{{.Title}}, error) {
+	rows, err := r.queries.List{{.Plural}}(ctx, sqlc.List{{.Plural}}Params{Limit: int32(limit), Offset: int32(offset)})
+	if err != nil {
+		return nil, {{.Resource}}StoreError(err, "list {{.Table}}")
+	}
+	items := make([]{{.Title}}, len(rows))
+	for i, row := range rows {
+		items[i] = {{.Resource}}FromSQLC(row)
+	}
+	return items, nil
+}
+
+// Count{{.Plural}} returns the total number of {{.Table}}.
+func (r *Postgres{{.Title}}Repository) Count{{.Plural}}(ctx context.Context) (int64, error) {
+	count, err := r.queries.Count{{.Plural}}(ctx)
+	if err != nil {
+		return 0, {{.Resource}}StoreError(err, "count {{.Table}}")
+	}
+	return count, nil
+}
+
+// Update{{.Title}} replaces the writable fields of the {{.Resource}} with id and
+// returns it as stored, or Err{{.Title}}NotFound.
+func (r *Postgres{{.Title}}Repository) Update{{.Title}}(ctx context.Context, id int64, input {{.Title}}Input) ({{.Title}}, error) {
+	row, err := r.queries.Update{{.Title}}(ctx, sqlc.Update{{.Title}}Params{
+		ID: id,
+{{- range .Fields}}
+		{{.GoName}}: {{if .IsTime}}pgtype.Timestamptz{Time: input.{{.GoName}}, Valid: true}{{else}}input.{{.GoName}}{{end}},
+{{- end}}
+	})
+	if err != nil {
+		return {{.Title}}{}, {{.Resource}}StoreError(err, "update {{.Resource}}")
+	}
+	return {{.Resource}}FromSQLC(row), nil
+}
+
+// Delete{{.Title}} removes the {{.Resource}} with id, or reports Err{{.Title}}NotFound.
+func (r *Postgres{{.Title}}Repository) Delete{{.Title}}(ctx context.Context, id int64) error {
+	deleted, err := r.queries.Delete{{.Title}}(ctx, id)
+	if err != nil {
+		return {{.Resource}}StoreError(err, "delete {{.Resource}}")
+	}
+	if deleted == 0 {
+		return Err{{.Title}}NotFound
+	}
+	return nil
+}
+
+// {{.Resource}}FromSQLC converts a generated row into the domain model. It is the
+// only place that knows the generated row shape, so sqlc detail does not leak
+// past this package.
+func {{.Resource}}FromSQLC(row sqlc.{{.Title}}) {{.Title}} {
+	return {{.Title}}{
+		ID: row.ID,
+{{- range .Fields}}
+		{{.GoName}}: row.{{.GoName}}{{if .IsTime}}.Time.UTC(){{end}},
+{{- end}}
+		CreatedAt: row.CreatedAt.Time.UTC(),
+		UpdatedAt: row.UpdatedAt.Time.UTC(),
+	}
+}
+
+// {{.Resource}}StoreError maps an absent row to Err{{.Title}}NotFound and wraps
+// everything else with the operation. It never includes the SQL or an argument.
+func {{.Resource}}StoreError(err error, operation string) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Err{{.Title}}NotFound
+	}
+	return fmt.Errorf("data: %s: %w", operation, err)
+}

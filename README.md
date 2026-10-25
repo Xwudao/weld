@@ -76,7 +76,7 @@ preserve their wiring, then remove only the generated source to regenerate it. E
 ## Embedded templates
 
 The CLI, catalog, planner and declarative payloads live in this repository.
-`internal/weldtemplate` embeds `capabilities/`, `modules/` and `commands/`
+`internal/weldtemplate` embeds `capabilities/`, `modules/`, `commands/` and `crud/`
 through `weldtemplate.FS()`. A built `weld` carries the whole scaffold; no
 separate template checkout, module replacement or network access is needed at
 runtime. Template changes and the CLI are tested and released together.
@@ -87,6 +87,7 @@ runtime. Template changes and the CLI are tested and released together.
 weld new <name> [--module path] [--with capability,...] [--dir dir] [--dry-run]
 weld add <capability> [capability...] [--dir dir] [--dry-run]
 weld add module <name> [--command] [--dir dir] [--dry-run]
+weld add crud <name> [field:type...] [--with-dependencies] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
 weld db migrate up|status|down [--config path] [--yes] [--allow-missing] [--dir dir] [--dry-run]
@@ -1019,6 +1020,54 @@ manifest facet, never rewriting your module service or handler. The group also
 gets a stable command graph in `internal/di/<name>_graph.go` and resolves the
 module's `Service` lazily through it (see
 [`weld add command`](#weld-add-command-stage-2b)).
+
+## `weld add crud`
+
+`weld add crud <name> [field:type...]` adds a complete database-backed resource
+in one step:
+
+```sh
+weld add crud product title:string price:float stock:int active:bool released_at:time
+```
+
+| Written | Holds |
+|---|---|
+| `db/migrations/<version>_create_products.sql` | the table: a bigint identity `id`, the fields, `created_at`, `updated_at` |
+| `db/query/products.sql` | the sqlc statements (create, get, list, count, update, delete) |
+| `internal/data/product_repo.go` | `data.ProductRepository` and its PostgreSQL implementation |
+| `internal/data/product_repo_integration_test.go` | runs only against a configured test database |
+| `internal/modules/product/` | DTOs, service, an in-memory repository, routes, handlers, tests and a README |
+
+Field types are `string`, `int`, `bool`, `float` and `time` (`text`, `int64`,
+`float64` and `timestamp` are accepted aliases); every column is `NOT NULL`, and
+no field means `name:string`. Field names are lower_snake_case; `id`,
+`created_at`, `updated_at` and PostgreSQL reserved words are refused. The table
+is the plural of the name (`category` → `categories`), and `item` and `user` are
+reserved because the `db` and `user` capabilities own those tables.
+
+The routes are relative to the module prefix (`/api/<name>` by default):
+`GET ?limit=&offset=` and `GET /{id}` are public; `POST`, `PUT /{id}` and
+`DELETE /{id}` carry the project's admin policy, which denies everything until
+you configure authentication in `internal/di/http_policies.go`. Edit
+`module.go` to change a route's policy.
+
+The repository calls code that sqlc generates, so after writing the files weld
+runs the pinned sqlc generator, regenerates the Loom graph and runs
+`go build ./...`; if any step fails, every write and every sqlc output is rolled
+back. The first run needs network access (or a module cache) to build the
+pinned tools. `--dry-run` prints the planned files and runs nothing.
+
+The resource is an ordinary business module afterwards: it is recorded in
+`weld.json`'s `modules`, mounted by the generated graph, exported by
+`weld http export`, and `weld add module <name> --command` can add its command
+group. Its `NewService` takes the database pool, so serving it needs the
+database settings in `config.yml`; apply the migration with
+`weld db migrate up` or enable `database.auto_migrate`. The module tests use
+`NewDemoService`, an in-memory repository, so `go test ./...` needs no database.
+Every file is written once and belongs to the project; `weld upgrade` never
+touches it. Because sqlc regenerates `internal/data/sqlc`, `weld list` reports
+that directory's `models.go` as changed afterwards; that is the generator's
+output, not an edit.
 
 ## `weld add command` (stage 2b)
 

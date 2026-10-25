@@ -1,0 +1,16 @@
+{
+  "version": "0.1.0",
+  "files": [
+    { "path": "db/migrations/create_{{.Table}}.sql", "source": "files/migration.sql.tmpl", "versioned": true },
+    { "path": "db/query/{{.Table}}.sql", "source": "files/query.sql.tmpl" },
+    { "path": "internal/data/{{.Resource}}_repo.go", "source": "files/repo.go.tmpl" },
+    { "path": "internal/data/{{.Resource}}_repo_integration_test.go", "source": "files/repo_integration_test.go.tmpl" },
+    { "path": "internal/modules/{{.Resource}}/dto.go", "source": "files/dto.go.tmpl" },
+    { "path": "internal/modules/{{.Resource}}/service.go", "source": "files/service.go.tmpl" },
+    { "path": "internal/modules/{{.Resource}}/memory.go", "source": "files/memory.go.tmpl" },
+    { "path": "internal/modules/{{.Resource}}/module.go", "source": "files/module.go.tmpl" },
+    { "path": "internal/modules/{{.Resource}}/handler.go", "source": "files/handler.go.tmpl" },
+    { "path": "internal/modules/{{.Resource}}/module_test.go", "source": "files/module_test.go.tmpl" },
+    { "path": "internal/modules/{{.Resource}}/README.md", "source": "files/README.md.tmpl" }
+  ]
+}

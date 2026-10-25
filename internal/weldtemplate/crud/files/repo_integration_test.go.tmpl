@@ -1,0 +1,68 @@
+package data
+
+import (
+	"context"
+	"errors"
+	"testing"
+{{- if .HasTime}}
+	"time"
+{{- end}}
+
+	"__module__/internal/testdb"
+)
+
+// Test{{.Title}}RepositoryIntegration exercises the {{.Resource}} SQL against a real
+// PostgreSQL server. Like the other database tests it runs only when a test
+// database is configured (database_test in config.yml, or PG_TEST_DSN), in a
+// throwaway schema that testdb.Pool creates and drops.
+func Test{{.Title}}RepositoryIntegration(t *testing.T) {
+	pool := testdb.Pool(t)
+	ctx := context.Background()
+	repository := New{{.Title}}Repository(pool)
+
+	created, err := repository.Create{{.Title}}(ctx, sample{{.Title}}Input())
+	if err != nil {
+		t.Fatalf("Create{{.Title}}: %v", err)
+	}
+	if created.ID == 0 || created.CreatedAt.IsZero() {
+		t.Fatalf("Create{{.Title}} returned %+v", created)
+	}
+
+	got, err := repository.Get{{.Title}}(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get{{.Title}}: %v", err)
+	}
+	if got != created {
+		t.Fatalf("Get{{.Title}} = %+v, want %+v", got, created)
+	}
+
+	items, err := repository.List{{.Plural}}(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("List{{.Plural}}: %v", err)
+	}
+	if count, err := repository.Count{{.Plural}}(ctx); err != nil || count != 1 || len(items) != 1 {
+		t.Fatalf("List{{.Plural}} = %d items, Count{{.Plural}} = %d (%v), want 1", len(items), count, err)
+	}
+
+	if _, err := repository.Update{{.Title}}(ctx, created.ID, sample{{.Title}}Input()); err != nil {
+		t.Fatalf("Update{{.Title}}: %v", err)
+	}
+	if err := repository.Delete{{.Title}}(ctx, created.ID); err != nil {
+		t.Fatalf("Delete{{.Title}}: %v", err)
+	}
+	if _, err := repository.Get{{.Title}}(ctx, created.ID); !errors.Is(err, Err{{.Title}}NotFound) {
+		t.Fatalf("Get{{.Title}} after delete = %v, want Err{{.Title}}NotFound", err)
+	}
+	if err := repository.Delete{{.Title}}(ctx, created.ID); !errors.Is(err, Err{{.Title}}NotFound) {
+		t.Fatalf("Delete{{.Title}} twice = %v, want Err{{.Title}}NotFound", err)
+	}
+}
+
+// sample{{.Title}}Input is a valid {{.Resource}} for the integration test.
+func sample{{.Title}}Input() {{.Title}}Input {
+	return {{.Title}}Input{
+{{- range .Fields}}
+		{{.GoName}}: {{if eq .Kind "string"}}"sample"{{else if eq .Kind "int"}}1{{else if eq .Kind "bool"}}true{{else if eq .Kind "float"}}1.5{{else}}time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC){{end}},
+{{- end}}
+	}
+}

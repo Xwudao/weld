@@ -1,0 +1,58 @@
+// The handlers for the routes Register declares in module.go. Each is a small
+// constructor over the Service, so the route table names a handler instead of
+// inlining a closure.
+package __modname__
+
+import (
+	"context"
+	"errors"
+
+	"__module__/internal/data"
+	"__module__/internal/httpx"
+)
+
+// handleList answers GET {prefix}?limit=&offset=.
+func handleList(service Service) httpx.Handler[ListRequest, ListResponse] {
+	return func(ctx context.Context, request ListRequest) (ListResponse, error) {
+		return service.List(ctx, request)
+	}
+}
+
+// handleGet answers GET {prefix}/{id}.
+func handleGet(service Service) httpx.Handler[GetRequest, {{.Title}}] {
+	return func(ctx context.Context, request GetRequest) ({{.Title}}, error) {
+		item, err := service.Get(ctx, request)
+		return item, httpError(err)
+	}
+}
+
+// handleCreate answers POST {prefix}; the body is bound and validated first.
+func handleCreate(service Service) httpx.Handler[CreateRequest, {{.Title}}] {
+	return func(ctx context.Context, request CreateRequest) ({{.Title}}, error) {
+		return service.Create(ctx, request)
+	}
+}
+
+// handleUpdate answers PUT {prefix}/{id}.
+func handleUpdate(service Service) httpx.Handler[UpdateRequest, {{.Title}}] {
+	return func(ctx context.Context, request UpdateRequest) ({{.Title}}, error) {
+		item, err := service.Update(ctx, request)
+		return item, httpError(err)
+	}
+}
+
+// handleDelete answers DELETE {prefix}/{id} with 204 and no body.
+func handleDelete(service Service) httpx.Handler[DeleteRequest, struct{}] {
+	return func(ctx context.Context, request DeleteRequest) (struct{}, error) {
+		return struct{}{}, httpError(service.Delete(ctx, request))
+	}
+}
+
+// httpError maps the repository's not-found error to a 404 envelope. Any other
+// error passes through, and httpx answers it with a 500 that does not leak it.
+func httpError(err error) error {
+	if errors.Is(err, data.Err{{.Title}}NotFound) {
+		return httpx.NotFound("{{.Resource}} not found")
+	}
+	return err
+}

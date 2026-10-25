@@ -1,0 +1,99 @@
+package __modname__
+
+import (
+	"context"
+	"sort"
+	"sync"
+	"time"
+
+	"__module__/internal/data"
+)
+
+// memoryRepository is an in-memory data.{{.Title}}Repository for the demo service
+// and this package's tests. It keeps nothing across restarts and is not meant
+// for production.
+type memoryRepository struct {
+	mu      sync.Mutex
+	nextID  int64
+	records map[int64]data.{{.Title}}
+}
+
+// The compile-time check keeps the fake in step with the real contract.
+var _ data.{{.Title}}Repository = (*memoryRepository)(nil)
+
+func newMemoryRepository() *memoryRepository {
+	return &memoryRepository{records: map[int64]data.{{.Title}}{}}
+}
+
+func (m *memoryRepository) Create{{.Title}}(_ context.Context, input data.{{.Title}}Input) (data.{{.Title}}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextID++
+	now := time.Now().UTC()
+	record := data.{{.Title}}{
+		ID: m.nextID,
+{{- range .Fields}}
+		{{.GoName}}: input.{{.GoName}},
+{{- end}}
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	m.records[record.ID] = record
+	return record, nil
+}
+
+func (m *memoryRepository) Get{{.Title}}(_ context.Context, id int64) (data.{{.Title}}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.records[id]
+	if !ok {
+		return data.{{.Title}}{}, data.Err{{.Title}}NotFound
+	}
+	return record, nil
+}
+
+func (m *memoryRepository) List{{.Plural}}(_ context.Context, limit, offset int) ([]data.{{.Title}}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]int64, 0, len(m.records))
+	for id := range m.records {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	records := []data.{{.Title}}{}
+	for i := offset; i < len(ids) && len(records) < limit; i++ {
+		records = append(records, m.records[ids[i]])
+	}
+	return records, nil
+}
+
+func (m *memoryRepository) Count{{.Plural}}(context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return int64(len(m.records)), nil
+}
+
+func (m *memoryRepository) Update{{.Title}}(_ context.Context, id int64, input data.{{.Title}}Input) (data.{{.Title}}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.records[id]
+	if !ok {
+		return data.{{.Title}}{}, data.Err{{.Title}}NotFound
+	}
+{{- range .Fields}}
+	record.{{.GoName}} = input.{{.GoName}}
+{{- end}}
+	record.UpdatedAt = time.Now().UTC()
+	m.records[id] = record
+	return record, nil
+}
+
+func (m *memoryRepository) Delete{{.Title}}(_ context.Context, id int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.records[id]; !ok {
+		return data.Err{{.Title}}NotFound
+	}
+	delete(m.records, id)
+	return nil
+}

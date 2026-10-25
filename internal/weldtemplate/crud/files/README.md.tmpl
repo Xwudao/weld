@@ -1,0 +1,48 @@
+# `{{.Resource}}` CRUD module
+
+`weld add crud {{.Resource}}` generated this resource once. weld records every
+file in `weld.json` and never regenerates it, so edit freely.
+
+## Files
+
+| File | Holds |
+|---|---|
+| `db/migrations/<version>_create_{{.Table}}.sql` | The `{{.Table}}` table. |
+| `db/query/{{.Table}}.sql` | The sqlc statements. Run `weld gen sqlc` after editing. |
+| `internal/data/{{.Resource}}_repo.go` | `data.{{.Title}}Repository` and its PostgreSQL implementation. |
+| `internal/data/{{.Resource}}_repo_integration_test.go` | Runs against a configured test database only. |
+| `dto.go` | Wire types and the shared field rules (`validateInput`). |
+| `service.go` | `Service`, `NewService` (bound by the Loom graph), `NewServiceWith`, `NewDemoService`. |
+| `memory.go` | The in-memory repository the demo service and the tests use. |
+| `module.go` / `handler.go` | The route table and the handlers. |
+
+## Routes
+
+Paths are relative to the module prefix, `httpserver.ModulePrefix("{{.Resource}}")`
+(`/api/{{.Resource}}` by default).
+
+| Route | Policy | Answer |
+|---|---|---|
+| `GET {prefix}?limit=&offset=` | public | one page and the total (`limit` defaults to 50, at most 200) |
+| `GET {prefix}/{id}` | public | the {{.Resource}}, or 404 |
+| `POST {prefix}` | admin | 201 and the stored {{.Resource}} |
+| `PUT {prefix}/{id}` | admin | the updated {{.Resource}}, or 404 |
+| `DELETE {prefix}/{id}` | admin | 204, or 404 |
+
+The admin policy is a name: `internal/di/http_policies.go` decides what it
+means, and the default guard denies everything until you wire authentication.
+
+## Fields
+
+{{range .Fields}}- `{{.Column}}` — `{{.SQLType}}` / `{{.GoType}}`
+{{end}}
+To add a column: write a new migration (`weld db create add_<column>_to_{{.Table}}`),
+add it to the statements in `db/query/{{.Table}}.sql`, run `weld gen sqlc`, then
+extend `data.{{.Title}}`, `data.{{.Title}}Input`, the DTOs and `memory.go`.
+The compiler points at every place that needs the new field.
+
+## Running it
+
+`NewService` takes the database pool, so serving this module needs the database
+settings in `config.yml`. Apply the migration with `weld db migrate up`, or turn
+on `database.auto_migrate`.

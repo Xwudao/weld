@@ -1,0 +1,43 @@
+// Package __modname__ is the {{.Resource}} CRUD module of __name__.
+//
+// weld generated this package once, with `weld add crud {{.Resource}}`, and
+// recorded every file in weld.json. It is yours to edit: weld never regenerates
+// it. The routes are declared in Register below, the handler bodies live in
+// handler.go, the wire types in dto.go and the business logic in service.go,
+// over the data.{{.Title}}Repository in internal/data/{{.Resource}}_repo.go.
+//
+// Reads are public and writes carry the project's admin policy
+// (httpserver.PolicyAdmin). The default admin guard denies every request until
+// you configure authentication in internal/di/http_policies.go, so the write
+// routes answer 401 until then; change a route's policy here when the default
+// does not fit.
+package __modname__
+
+import (
+	nethttp "net/http"
+
+	"__module__/internal/httpserver"
+	"__module__/internal/httpx"
+)
+
+// Name is the module's package name and URL segment. The composition root mounts
+// the module under httpserver.ModulePrefix(Name), so paths here are relative.
+const Name = "{{.Resource}}"
+
+// Register installs the {{.Resource}} routes on router, one statement per route.
+func Register(router *httpx.Router, service Service) {
+	// GET {prefix}?limit=&offset= — public, one page of {{.Table}}.
+	httpx.Get(router, "", handleList(service), httpx.Operation("{{.Resource}}_list"))
+
+	// GET {prefix}/{id} — public.
+	httpx.Get(router, "/{id}", handleGet(service), httpx.Operation("{{.Resource}}_get"))
+
+	// POST {prefix} — administrator; answers 201 with the stored {{.Resource}}.
+	httpx.Post(router, "", handleCreate(service), httpx.Operation("{{.Resource}}_create"), httpx.Policy(httpserver.PolicyAdmin), httpx.WithStatus(nethttp.StatusCreated))
+
+	// PUT {prefix}/{id} — administrator; replaces every writable field.
+	httpx.Put(router, "/{id}", handleUpdate(service), httpx.Operation("{{.Resource}}_update"), httpx.Policy(httpserver.PolicyAdmin))
+
+	// DELETE {prefix}/{id} — administrator; answers 204.
+	httpx.Delete(router, "/{id}", handleDelete(service), httpx.Operation("{{.Resource}}_delete"), httpx.Policy(httpserver.PolicyAdmin), httpx.WithNoContent())
+}

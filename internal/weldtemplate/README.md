@@ -569,6 +569,36 @@ stable command graph.
 
 The module is recorded in `weld.json`'s `modules` list, not the capability list.
 
+## CRUD resources (`crud/`)
+
+`crud/` is the per-resource template behind `weld add crud <name> [field:type...]`.
+Like `modules/` it is rendered once per name, but every payload — including the
+paths in `crud/crud.json` — is a `text/template` over `template.CrudVars`,
+because the field list drives loops in the SQL, the sqlc calls and the DTOs.
+Go payloads are gofmt'ed after rendering; the weld tokens (`__module__`,
+`__modname__`, ...) are still substituted afterwards. Keep `{{` out of the Go
+code itself.
+
+It writes a versioned goose migration, `db/query/<table>.sql`, a repository in
+`internal/data/<name>_repo.go` and a business module that keeps the module
+contract (`Name`, `Register`, `Service`, `NewService`, zero-argument
+`NewDemoService`), so the Loom graph, `weld http export` and
+`weld add module <name> --command` all treat it as an ordinary module. Every
+file is recorded under `module:<name>` with the `seam` role: written once,
+owned by the project, never upgraded.
+
+The repository calls sqlc code that only exists after generation, so the plan
+sets `Result.GenerateSQLC` and a `go build ./...` check: Apply runs the pinned
+sqlc generator before Loom, and rolls back every write — and every sqlc output —
+when generation or the build fails. The sqlc output itself is not recorded in
+the manifest, exactly as with `weld gen sqlc`.
+
+Field names are spelled the way sqlc spells columns (`owner_id` → `OwnerID`) and
+the table is the resource pluralized with the rules sqlc's inflector reverses,
+so the hand-written repository names the generated model correctly. Bump
+`crud.json`'s `version` when the payload changes; it is the version recorded for
+resources added afterwards.
+
 ## Command groups (`commands/`)
 
 `commands/` is not a capability either. `commands/command.json` declares two

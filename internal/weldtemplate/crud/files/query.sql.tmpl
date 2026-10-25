@@ -1,0 +1,25 @@
+-- Queries for the {{.Resource}} resource, generated once by `weld add crud {{.Resource}}`.
+-- Edit them freely and run `weld gen sqlc` to regenerate internal/data/sqlc.
+
+-- name: Create{{.Title}} :one
+INSERT INTO {{.Table}} ({{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.Column}}{{end}})
+VALUES ({{range $i, $f := .Fields}}{{if $i}}, {{end}}${{$f.CreateParam}}{{end}})
+RETURNING *;
+
+-- name: Get{{.Title}} :one
+SELECT * FROM {{.Table}} WHERE id = $1;
+
+-- name: List{{.Plural}} :many
+SELECT * FROM {{.Table}} ORDER BY id LIMIT $1 OFFSET $2;
+
+-- name: Count{{.Plural}} :one
+SELECT count(*) FROM {{.Table}};
+
+-- name: Update{{.Title}} :one
+UPDATE {{.Table}}
+SET {{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.Column}} = ${{$f.UpdateParam}}{{end}}, updated_at = now()
+WHERE id = $1
+RETURNING *;
+
+-- name: Delete{{.Title}} :execrows
+DELETE FROM {{.Table}} WHERE id = $1;

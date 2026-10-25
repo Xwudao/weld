@@ -1,0 +1,163 @@
+package __modname__
+
+import (
+	"encoding/json"
+	"fmt"
+	nethttp "net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"__module__/internal/httpserver"
+	"__module__/internal/httpx"
+)
+
+// testPrefix is the prefix the tests mount the module under; the module itself
+// declares only relative paths.
+const testPrefix = "/api/" + Name
+
+// sampleBody is a valid create/update body.
+const sampleBody = `{{.SampleJSON}}`
+
+// envelope is the decoded {code,msg,data} response body.
+type envelope struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data json.RawMessage `json:"data"`
+}
+
+// newTestMux composes the module the way production does, over the in-memory
+// demo service and a test-only admin policy, so the tests need no database.
+func newTestMux() nethttp.Handler {
+	return httpserver.NewHandler(nil, nil, []httpserver.NamedPolicy{
+		{Name: httpserver.PolicyAdmin, Middleware: testAdminGuard},
+	}, func(router *httpx.Router) { Register(router.Group(testPrefix), NewDemoService()) })
+}
+
+// testAdminGuard is a test fake, not the shipped fail-closed policy.
+func testAdminGuard(next nethttp.Handler) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			httpx.Error(w, nethttp.StatusUnauthorized, "authentication required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// client sends requests to one mux, so state persists across a test's calls.
+type client struct {
+	t   *testing.T
+	mux nethttp.Handler
+}
+
+func (c client) do(method, target, body string, admin bool) *httptest.ResponseRecorder {
+	c.t.Helper()
+	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if admin {
+		request.Header.Set("Authorization", "Bearer test-token")
+	}
+	recorder := httptest.NewRecorder()
+	c.mux.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func decode[T any](t *testing.T, recorder *httptest.ResponseRecorder) (envelope, T) {
+	t.Helper()
+	var body envelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v (%s)", err, recorder.Body)
+	}
+	var value T
+	if len(body.Data) > 0 && string(body.Data) != "null" {
+		if err := json.Unmarshal(body.Data, &value); err != nil {
+			t.Fatalf("decode data: %v (%s)", err, body.Data)
+		}
+	}
+	return body, value
+}
+
+// TestCRUDLifecycle walks one {{.Resource}} through create, read, list, update and
+// delete.
+func TestCRUDLifecycle(t *testing.T) {
+	c := client{t: t, mux: newTestMux()}
+
+	recorder := c.do(nethttp.MethodPost, testPrefix, sampleBody, true)
+	if recorder.Code != nethttp.StatusCreated {
+		t.Fatalf("create = %d: %s", recorder.Code, recorder.Body)
+	}
+	_, created := decode[{{.Title}}](t, recorder)
+	if created.ID == 0 || created.CreatedAt.IsZero() {
+		t.Fatalf("created = %+v", created)
+	}
+	item := fmt.Sprintf("%s/%d", testPrefix, created.ID)
+
+	if recorder = c.do(nethttp.MethodGet, item, "", false); recorder.Code != nethttp.StatusOK {
+		t.Fatalf("get = %d: %s", recorder.Code, recorder.Body)
+	}
+	if _, got := decode[{{.Title}}](t, recorder); got.ID != created.ID {
+		t.Fatalf("get = %+v, want id %d", got, created.ID)
+	}
+
+	if recorder = c.do(nethttp.MethodGet, testPrefix+"?limit=10", "", false); recorder.Code != nethttp.StatusOK {
+		t.Fatalf("list = %d: %s", recorder.Code, recorder.Body)
+	}
+	if _, page := decode[ListResponse](t, recorder); page.Total != 1 || len(page.Items) != 1 || page.Limit != 10 {
+		t.Fatalf("list = %+v, want one item", page)
+	}
+
+	if recorder = c.do(nethttp.MethodPut, item, sampleBody, true); recorder.Code != nethttp.StatusOK {
+		t.Fatalf("update = %d: %s", recorder.Code, recorder.Body)
+	}
+
+	if recorder = c.do(nethttp.MethodDelete, item, "", true); recorder.Code != nethttp.StatusNoContent {
+		t.Fatalf("delete = %d: %s", recorder.Code, recorder.Body)
+	}
+	if recorder = c.do(nethttp.MethodGet, item, "", false); recorder.Code != nethttp.StatusNotFound {
+		t.Fatalf("get after delete = %d, want 404: %s", recorder.Code, recorder.Body)
+	}
+	if recorder = c.do(nethttp.MethodDelete, item, "", true); recorder.Code != nethttp.StatusNotFound {
+		t.Fatalf("delete twice = %d, want 404", recorder.Code)
+	}
+	if recorder = c.do(nethttp.MethodPut, item, sampleBody, true); recorder.Code != nethttp.StatusNotFound {
+		t.Fatalf("update after delete = %d, want 404", recorder.Code)
+	}
+}
+
+// TestWritesRequireTheAdminPolicy proves every write route is guarded.
+func TestWritesRequireTheAdminPolicy(t *testing.T) {
+	c := client{t: t, mux: newTestMux()}
+	for _, write := range []struct{ method, target, body string }{
+		{nethttp.MethodPost, testPrefix, sampleBody},
+		{nethttp.MethodPut, testPrefix + "/1", sampleBody},
+		{nethttp.MethodDelete, testPrefix + "/1", ""},
+	} {
+		if recorder := c.do(write.method, write.target, write.body, false); recorder.Code != nethttp.StatusUnauthorized {
+			t.Errorf("%s %s without a token = %d, want 401", write.method, write.target, recorder.Code)
+		}
+	}
+}
+
+// TestRejectsMalformedRequests proves the binder and the DTO rules run before
+// the handler.
+func TestRejectsMalformedRequests(t *testing.T) {
+	c := client{t: t, mux: newTestMux()}
+	if recorder := c.do(nethttp.MethodGet, testPrefix+"/not-a-number", "", false); recorder.Code != nethttp.StatusBadRequest {
+		t.Errorf("get with a non-numeric id = %d, want 400", recorder.Code)
+	}
+	if recorder := c.do(nethttp.MethodGet, fmt.Sprintf("%s?limit=%d", testPrefix, MaxLimit+1), "", false); recorder.Code != nethttp.StatusBadRequest {
+		t.Errorf("list above MaxLimit = %d, want 400", recorder.Code)
+	}
+{{- if .HasRequired}}
+	recorder := c.do(nethttp.MethodPost, testPrefix, `{{.InvalidJSON}}`, true)
+	if recorder.Code != nethttp.StatusBadRequest {
+		t.Fatalf("create with an invalid body = %d, want 400: %s", recorder.Code, recorder.Body)
+	}
+	if body, _ := decode[struct{}](t, recorder); body.Msg != "{{.InvalidMessage}}" {
+		t.Errorf("validation message = %q", body.Msg)
+	}
+{{- end}}
+}

@@ -74,6 +74,13 @@ type Result struct {
 	GenerateLoom bool
 	// DIPackage is the package directory to regenerate, relative to Dir.
 	DIPackage string
+	// GenerateSQLC requests a run of the project's pinned sqlc generator after
+	// the plan is written and before Loom, because the plan added statements
+	// that hand-written code already calls (`weld add crud`).
+	GenerateSQLC bool
+	// SQLCOutputs lists the generated files the sqlc run is expected to create,
+	// so a rollback removes them along with restoring the files it rewrote.
+	SQLCOutputs []string
 	// Verify is the post-apply check, copied from the request. When it is set,
 	// Apply runs it before and after the write: a project that already fails the
 	// check is written with a note (the check cannot attribute a failure to this
@@ -133,12 +140,29 @@ func (r *Result) Apply() (err error) {
 	if r.GenerateLoom {
 		paths = append(paths, filepath.Join(r.DIPackage, "loom_gen.go"), goModPath, goSumPath)
 	}
+	if r.GenerateSQLC {
+		// sqlc rewrites every file in its output directory, so all of them are
+		// captured, plus the files this run is expected to create.
+		existing, err := filesIn(r.Dir, sqlcOutputDir)
+		if err != nil {
+			return err
+		}
+		paths = append(append(paths, existing...), r.SQLCOutputs...)
+	}
 	snapshot, err := project.TakeSnapshot(r.Dir, paths)
 	if err != nil {
 		return err
 	}
 	if err := project.Apply(r.Dir, r.Operations); err != nil {
 		return err
+	}
+	// sqlc runs before Loom: Loom loads the packages it wires, and those packages
+	// call the code sqlc generates. Its output is deliberately not recorded in the
+	// manifest — like `weld gen sqlc`, it belongs to the generator.
+	if r.GenerateSQLC {
+		if err := runSQLC(r.Dir); err != nil {
+			return r.rollback(snapshot, err)
+		}
 	}
 	var generated []string
 	if r.GenerateLoom {

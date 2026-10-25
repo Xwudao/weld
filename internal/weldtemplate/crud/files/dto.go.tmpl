@@ -1,0 +1,122 @@
+package __modname__
+
+import (
+	"errors"
+	"fmt"
+{{- if .HasString}}
+	"strings"
+{{- end}}
+	"time"
+
+	"__module__/internal/data"
+)
+
+// Paging bounds for the list route. A request without ?limit= gets DefaultLimit;
+// a limit above MaxLimit is a 400, so one request cannot read the whole table.
+const (
+	DefaultLimit = 50
+	MaxLimit     = 200
+)
+
+// {{.Title}} is the wire shape of one {{.Resource}}. It is separate from
+// data.{{.Title}}, so a schema change never silently alters the API.
+type {{.Title}} struct {
+	ID int64 `json:"id"`
+{{- range .Fields}}
+	{{.GoName}} {{.GoType}} `json:"{{.Column}}"`
+{{- end}}
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ListRequest is the query of GET {prefix}?limit=&offset=.
+type ListRequest struct {
+	Limit  int `query:"limit"`
+	Offset int `query:"offset"`
+}
+
+// Validate bounds the page before the handler runs.
+func (r ListRequest) Validate() error {
+	if r.Limit < 0 || r.Limit > MaxLimit {
+		return fmt.Errorf("limit must be between 0 and %d", MaxLimit)
+	}
+	if r.Offset < 0 {
+		return errors.New("offset must not be negative")
+	}
+	return nil
+}
+
+// ListResponse is one page of {{.Table}} and the total count.
+type ListResponse struct {
+	Items  []{{.Title}} `json:"items"`
+	Total  int64        `json:"total"`
+	Limit  int          `json:"limit"`
+	Offset int          `json:"offset"`
+}
+
+// GetRequest addresses one {{.Resource}} by the {id} path parameter.
+type GetRequest struct {
+	ID int64 `path:"id"`
+}
+
+// DeleteRequest addresses the {{.Resource}} to delete.
+type DeleteRequest struct {
+	ID int64 `path:"id"`
+}
+
+// CreateRequest is the JSON body of POST {prefix}.
+type CreateRequest struct {
+{{- range .Fields}}
+	{{.GoName}} {{.GoType}} `json:"{{.Column}}"`
+{{- end}}
+}
+
+// Validate runs after binding; a failure is a 400 and the handler never runs.
+func (r CreateRequest) Validate() error { return validateInput(r.input()) }
+
+// input converts the request into the repository's writable fields.
+func (r CreateRequest) input() data.{{.Title}}Input {
+	return data.{{.Title}}Input{
+{{- range .Fields}}
+		{{.GoName}}: r.{{.GoName}},
+{{- end}}
+	}
+}
+
+// UpdateRequest replaces the writable fields of the {{.Resource}} the {id} path
+// parameter names. Every field is required, as in CreateRequest.
+type UpdateRequest struct {
+	ID int64 `path:"id" json:"-"`
+{{- range .Fields}}
+	{{.GoName}} {{.GoType}} `json:"{{.Column}}"`
+{{- end}}
+}
+
+// Validate applies the same rules as CreateRequest.
+func (r UpdateRequest) Validate() error { return validateInput(r.input()) }
+
+// input converts the request into the repository's writable fields.
+func (r UpdateRequest) input() data.{{.Title}}Input {
+	return data.{{.Title}}Input{
+{{- range .Fields}}
+		{{.GoName}}: r.{{.GoName}},
+{{- end}}
+	}
+}
+
+// validateInput holds the field rules create and update share, so they are
+// written once. Add your own rules here.
+func validateInput(input data.{{.Title}}Input) error {
+{{- range .Fields}}
+{{- if .IsString}}
+	if strings.TrimSpace(input.{{.GoName}}) == "" {
+		return errors.New("{{.Column}} must not be empty")
+	}
+{{- else if .IsTime}}
+	if input.{{.GoName}}.IsZero() {
+		return errors.New("{{.Column}} must be set")
+	}
+{{- end}}
+{{- end}}
+	return nil
+}

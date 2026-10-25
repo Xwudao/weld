@@ -1,0 +1,107 @@
+package __modname__
+
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"__module__/internal/data"
+)
+
+// Service is the {{.Resource}} business logic the HTTP handlers call. It is an
+// interface so a test can inject a fake and the command group from
+// `weld add module {{.Resource}} --command` can share it.
+type Service interface {
+	List(ctx context.Context, req ListRequest) (ListResponse, error)
+	Get(ctx context.Context, req GetRequest) ({{.Title}}, error)
+	Create(ctx context.Context, req CreateRequest) ({{.Title}}, error)
+	Update(ctx context.Context, req UpdateRequest) ({{.Title}}, error)
+	Delete(ctx context.Context, req DeleteRequest) error
+}
+
+// NewService is the provider the Loom server graph binds
+// (loom.Provide({{.Resource}}.NewService)). It takes the database pool, so serving
+// this module constructs the pool and needs the database settings in config.yml.
+// Change its signature freely — the graph follows it.
+func NewService(pool *pgxpool.Pool) Service {
+	return NewServiceWith(data.New{{.Title}}Repository(pool))
+}
+
+// NewServiceWith returns the Service over any repository, which is how a test or
+// another storage backend plugs in.
+func NewServiceWith(repository data.{{.Title}}Repository) Service {
+	return &service{repository: repository}
+}
+
+// NewDemoService returns the Service over an in-memory repository. It always
+// takes no arguments, so this package's tests (and a generated command group's)
+// need no database.
+func NewDemoService() Service {
+	return NewServiceWith(newMemoryRepository())
+}
+
+// service is the default Service: a thin layer over the repository that owns
+// paging defaults and the wire conversion.
+type service struct {
+	repository data.{{.Title}}Repository
+}
+
+func (s *service) List(ctx context.Context, req ListRequest) (ListResponse, error) {
+	limit := req.Limit
+	if limit == 0 {
+		limit = DefaultLimit
+	}
+	records, err := s.repository.List{{.Plural}}(ctx, limit, req.Offset)
+	if err != nil {
+		return ListResponse{}, err
+	}
+	total, err := s.repository.Count{{.Plural}}(ctx)
+	if err != nil {
+		return ListResponse{}, err
+	}
+	items := make([]{{.Title}}, len(records))
+	for i, record := range records {
+		items[i] = to{{.Title}}(record)
+	}
+	return ListResponse{Items: items, Total: total, Limit: limit, Offset: req.Offset}, nil
+}
+
+func (s *service) Get(ctx context.Context, req GetRequest) ({{.Title}}, error) {
+	record, err := s.repository.Get{{.Title}}(ctx, req.ID)
+	if err != nil {
+		return {{.Title}}{}, err
+	}
+	return to{{.Title}}(record), nil
+}
+
+func (s *service) Create(ctx context.Context, req CreateRequest) ({{.Title}}, error) {
+	record, err := s.repository.Create{{.Title}}(ctx, req.input())
+	if err != nil {
+		return {{.Title}}{}, err
+	}
+	return to{{.Title}}(record), nil
+}
+
+func (s *service) Update(ctx context.Context, req UpdateRequest) ({{.Title}}, error) {
+	record, err := s.repository.Update{{.Title}}(ctx, req.ID, req.input())
+	if err != nil {
+		return {{.Title}}{}, err
+	}
+	return to{{.Title}}(record), nil
+}
+
+func (s *service) Delete(ctx context.Context, req DeleteRequest) error {
+	return s.repository.Delete{{.Title}}(ctx, req.ID)
+}
+
+// to{{.Title}} converts the persistence model into the wire shape.
+func to{{.Title}}(record data.{{.Title}}) {{.Title}} {
+	return {{.Title}}{
+		ID: record.ID,
+{{- range .Fields}}
+		{{.GoName}}: record.{{.GoName}},
+{{- end}}
+		CreatedAt: record.CreatedAt,
+		UpdatedAt: record.UpdatedAt,
+	}
+}

@@ -133,7 +133,7 @@ func newAddCommand() *cobra.Command {
 		RunE: runAdd,
 	}
 	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
-	cmd.AddCommand(newAddModuleCommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddEnumCommand())
+	cmd.AddCommand(newAddModuleCommand(), newAddCrudSubcommand(), newAddCommandSubcommand(), newAddSeederSubcommand(), newAddEnumCommand())
 	return cmd
 }
 
@@ -159,6 +159,9 @@ func addHelp() string {
 	b.WriteString("\nand naming more than one implies --with-dependencies.")
 	b.WriteString("\n\nA single capability's required capabilities are not installed automatically: a")
 	b.WriteString("\nmissing requirement is an error unless --with-dependencies is given.")
+	b.WriteString("\n\n`weld add crud <name> [field:type...]` writes a database-backed resource: a")
+	b.WriteString("\nmigration, sqlc queries, a repository and a list/get/create/update/delete")
+	b.WriteString("\nmodule, then runs sqlc, Loom and go build, rolling back if any step fails.")
 	b.WriteString("\n\n`weld add seeder <name>` writes internal/data/seeder/seed_<name>.go and")
 	b.WriteString("\nregisters it in the seed capability's register.go index.")
 	b.WriteString("\n\n`weld add enum <name> <value>...` writes internal/enums/<name>.go (the type and")
