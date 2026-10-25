@@ -76,20 +76,60 @@ func TestRenderTeachesScaffoldFirstWithoutInstalledModules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	text := string(body)
 	for _, want := range []string{
-		"## Scaffold first, then customize",
+		"## Use weld commands, do not hand-write scaffolds",
 		"Always create business modules with `weld add module <name>` first",
-		"Do not hand-edit the manifest",
-		"weld add command <name>",
-		"weld add enum",
-		"weld add seeder",
+		"do not hand-edit the manifest",
+		"`weld add command <name>`",
+		"`weld add enum <name> <value>...`",
+		"`weld add seeder <name>`",
+		"`weld add crud <name> [field:type...]`",
+		"`weld add middleware <name>`",
+		"`weld add listener <name>`",
+		"`weld db create <name>`",
+		"--dry-run",
+		"weld explain <capability>",
+		"## Wiring rules",
 		"NewProjectRoutes",
 		"NewAppDependencies",
 		"never change hashes",
 	} {
-		if !strings.Contains(string(body), want) {
+		if !strings.Contains(text, want) {
 			t.Errorf("skill missing %q", want)
 		}
+	}
+	// The rule comes first: an agent that stops reading early still meets it.
+	if strings.Index(text, "## Use weld commands") > strings.Index(text, "## Installed capabilities") {
+		t.Error("the scaffold section comes after the capability list")
+	}
+	// The description is what an agent matches a coding task against.
+	if !strings.Contains(text, "description: Use before writing or changing code") {
+		t.Error("the frontmatter description does not trigger on coding tasks")
+	}
+}
+
+// A row's follow-up names the capability's own files only when the capability
+// is installed; otherwise the row says what is missing and does not suggest
+// installing it silently.
+func TestRenderScaffoldTableFollowsInstalledCapabilities(t *testing.T) {
+	body, err := Render(manifest("loom", "http", "events"), template.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"| HTTP middleware | `weld add middleware <name>` | add the printed `middleware.<Name>()` line",
+		"| event type and listener | `weld add listener <name>` | add the printed `events.On(...)` line",
+		"| scheduled job | `weld add job <name> --schedule \"0 3 * * *\"` | needs `cron`, not installed yet: add `--with-dependencies` only if the user wants it |",
+		"| database table with list/get/create/update/delete routes | `weld add crud <name> [field:type...]` | needs `db`, not installed yet",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("scaffold table missing %q", want)
+		}
+	}
+	if strings.Contains(text, "internal/di/cron_jobs.go") {
+		t.Error("a project without cron is pointed at the cron_jobs.go seam")
 	}
 }
 

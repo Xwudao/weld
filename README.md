@@ -663,7 +663,20 @@ weld skills --dir . --dry-run   # print the plan without writing
 weld skills --dir .             # write or refresh SKILL.md
 ```
 
-The document records the project name and module, each installed capability and
+Its first instruction is to **scaffold with weld instead of hand-writing**. The
+frontmatter description tells an agent to load the skill before writing or
+changing code, and the first section is a table mapping what the agent is about
+to add — a module, a CRUD resource, a command group, a middleware, an event
+listener, a cron job, a seeder, an enum, a migration, a client — to the weld
+command that generates it and what to do afterwards (the wiring line a
+middleware, listener or job prints). A row whose capability is not installed
+says so and tells the agent to add `--with-dependencies` only when the user
+wants that capability. It is followed by the workflow (`--dry-run` first, apply
+the printed follow-up, customize only inside what was generated, regenerate and
+test, re-run `weld skills` after an add) and the files never to write by hand:
+`weld.json`, migration filenames and every generated file.
+
+The document then records the project name and module, each installed capability and
 version, what being **installed** does and does not mean, and which files weld
 generates. It is honest about the difference between installed and **wired**:
 a business module's default `Service` is an in-memory development demo that

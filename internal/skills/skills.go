@@ -212,9 +212,10 @@ func Render(manifest *project.Manifest, catalog Catalog) ([]byte, error) {
 	var b strings.Builder
 	writeFrontmatter(&b)
 	writeHeader(&b, manifest)
+	writeScaffoldCommands(&b, set)
 	writeCapabilities(&b, caps, catalog)
 	writeWiring(&b, set)
-	writeScaffoldFirst(&b)
+	writeWiringRules(&b)
 	writeModules(&b, manifest)
 	writeCommands(&b, manifest)
 	writeEditing(&b, set)
@@ -226,7 +227,7 @@ func Render(manifest *project.Manifest, catalog Catalog) ([]byte, error) {
 func writeFrontmatter(b *strings.Builder) {
 	b.WriteString("---\n")
 	b.WriteString("name: weld\n")
-	b.WriteString("description: Project-specific guide to the weld capabilities installed in this repository.\n")
+	b.WriteString("description: Use before writing or changing code in this weld-scaffolded Go project. Create modules, CRUD resources, commands, middleware, event listeners, cron jobs, seeders, enums and migrations with weld commands instead of hand-writing them, then customize the generated seams; also explains the installed capabilities, wiring seams and generated files.\n")
 	b.WriteString("---\n\n")
 }
 
@@ -397,24 +398,108 @@ func writeWiring(b *strings.Builder, set map[string]bool) {
 	}
 }
 
-// writeScaffoldFirst applies even to a project with no modules yet: creating a
-// directory alone does not register its wiring in the generated graph.
-func writeScaffoldFirst(b *strings.Builder) {
-	b.WriteString("## Scaffold first, then customize\n\n")
+// scaffoldTask is one row of the "use weld, do not hand-write" table: what an
+// agent is about to build, the command that scaffolds it, the capabilities it
+// needs, and what is left to do after the command ran.
+type scaffoldTask struct {
+	task     string
+	command  string
+	requires []string
+	// after is the follow-up once the requirement is installed. It may name a
+	// capability's files, so it is only printed when that capability is present.
+	after string
+}
+
+// scaffoldTasks lists every per-name generator and the commands that keep
+// generated code in sync. The order is the order an agent usually meets them.
+var scaffoldTasks = []scaffoldTask{
+	{"HTTP business module (routes, service, DTOs)", "weld add module <name>", []string{"http"}, "mounted under `/api/<name>` automatically; edit `service.go`, `dto.go`, `handler.go`"},
+	{"database table with list/get/create/update/delete routes", "weld add crud <name> [field:type...]", []string{"http", "db"}, "writes the migration, sqlc queries, repository and module, then runs sqlc and Loom"},
+	{"root CLI command group", "weld add command <name>", []string{"loom"}, "edit `internal/commands/<name>`; inject through `Deps`/`NewDeps`"},
+	{"CLI commands over an existing module's service", "weld add module <name> --command", []string{"http"}, "adds only the command facet to an existing module"},
+	{"HTTP middleware", "weld add middleware <name>", []string{"http"}, "add the printed `middleware.<Name>()` line to `middlewareChain` in `internal/httpserver/middleware.go`"},
+	{"event type and listener", "weld add listener <name>", []string{"events"}, "add the printed `events.On(...)` line to `NewEventListeners` in `internal/di/events_listeners.go`"},
+	{"scheduled job", "weld add job <name> --schedule \"0 3 * * *\"", []string{"cron"}, "add the printed `s.Register(...)` call to `NewCronJobs` in `internal/di/cron_jobs.go`"},
+	{"database seeder", "weld add seeder <name>", []string{"seed"}, "registered in `internal/data/seeder/register.go` automatically"},
+	{"typed string enum", "weld add enum <name> <value>...", nil, "edit the constants, then `weld gen enum`"},
+	{"SQL migration", "weld db create <name>", []string{"db"}, "fill in the goose skeleton; apply with `weld db migrate up`"},
+	{"typed client for another weld service", "weld client add <name> --from <contract>", nil, "the producer runs `weld http export`; regenerate instead of editing"},
+}
+
+// writeScaffoldCommands is the first instruction an agent reads: weld already
+// has a generator for most of what a feature needs, and a hand-written copy is
+// not registered in weld.json, not wired into the generated graph and not
+// covered by upgrades. It is written for every project, even one with no module
+// yet, because that is exactly when an agent would otherwise create one by hand.
+func writeScaffoldCommands(b *strings.Builder, set map[string]bool) {
+	b.WriteString("## Use weld commands, do not hand-write scaffolds\n\n")
+	b.WriteString("**Before you create a package, file or wiring for a new feature, check this\n")
+	b.WriteString("table and run the weld command instead of writing the skeleton yourself.**\n")
+	b.WriteString("weld records what it generates in `weld.json`, wires it into the generated\n")
+	b.WriteString("Loom graph and keeps it upgradable. A hand-written equivalent is none of\n")
+	b.WriteString("those: a hand-created `internal/modules/<name>` directory is never mounted,\n")
+	b.WriteString("because routes are rendered from the `weld.json` modules record, not a\n")
+	b.WriteString("directory scan.\n")
 	b.WriteString("Always create business modules with `weld add module <name>` first, then\n")
-	b.WriteString("edit their service, DTO and handler seams. Use `--with-dependencies` when\n")
-	b.WriteString("requirements are missing. A hand-created `internal/modules/<name>` directory\n")
-	b.WriteString("does not register a module: weld renders routes from the `weld.json` modules\n")
-	b.WriteString("record, not a filesystem scan. Do not hand-edit the manifest to register it.\n")
-	b.WriteString("Likewise use `weld add command <name>` (or `weld add module <name> --command`),\n")
-	b.WriteString("`weld add enum`, `weld add seeder`, `weld add middleware`, `weld add listener`\n")
-	b.WriteString("and `weld add job` before customizing their editable files.\n")
-	b.WriteString("For a database table with list/get/create/update/delete routes, prefer\n")
-	b.WriteString("`weld add crud <name> [field:type...]`, which also writes the migration, sqlc\n")
-	b.WriteString("queries and repository. Run `weld explain <capability>` to see what a\n")
-	b.WriteString("capability writes and requires before adding it.\n")
-	b.WriteString("For existing handwritten code, back it up and migrate it into a weld-created\n")
-	b.WriteString("skeleton; do not overwrite it or assume add adopts existing files.\n\n")
+	b.WriteString("customize what it wrote.\n\n")
+
+	b.WriteString("| To add | Run | Then |\n")
+	b.WriteString("|---|---|---|\n")
+	for _, task := range scaffoldTasks {
+		var missing []string
+		for _, name := range task.requires {
+			if !set[name] {
+				missing = append(missing, "`"+name+"`")
+			}
+		}
+		after := task.after
+		if len(missing) > 0 {
+			after = "needs " + strings.Join(missing, " and ") + ", not installed yet: add `--with-dependencies` only if the user wants it"
+		}
+		fmt.Fprintf(b, "| %s | `%s` | %s |\n", task.task, task.command, after)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("Workflow for every scaffold:\n\n")
+	b.WriteString("1. Run the command with `--dry-run` first and read the plan: the files it\n")
+	b.WriteString("   writes and any capability it would install.\n")
+	b.WriteString("2. Run it for real. A missing requirement is an error naming it; re-run with\n")
+	b.WriteString("   `--with-dependencies` only when installing that capability is what the user\n")
+	b.WriteString("   asked for. Never install a capability silently.\n")
+	b.WriteString("3. Apply the follow-up the command prints (the wiring line for a middleware,\n")
+	b.WriteString("   listener or job). weld does not edit project-owned seams for you.\n")
+	b.WriteString("4. Customize only inside what was generated, keeping its shape (a module's\n")
+	b.WriteString("   `module.go` stays a route table; handler bodies live in `handler.go`).\n")
+	b.WriteString("5. Run `make generate` after changing a DI constructor's signature, then\n")
+	b.WriteString("   `go build ./...` and `go test ./...`. `weld routes` shows the HTTP surface\n")
+	b.WriteString("   from source and `weld config check` catches mistyped `config.yml` keys.\n")
+	b.WriteString("6. After `weld add <capability>`, re-run `weld skills` so this file matches.\n\n")
+
+	b.WriteString("For a new capability (database, Redis, mail, storage, JWT, users, cron,\n")
+	b.WriteString("events, rate limiting, web frontend), run `weld explain <capability>` to see what\n")
+	b.WriteString("it writes and requires, then `weld add <capability>`; `weld list` shows what\n")
+	b.WriteString("is installed. Never copy a capability's files in by hand or add its\n")
+	b.WriteString("`config.yml` section yourself.\n\n")
+
+	b.WriteString("Never hand-write or hand-edit:\n\n")
+	b.WriteString("- `weld.json` — do not hand-edit the manifest to register anything, and never\n")
+	b.WriteString("  change a recorded hash to get past a conflict;\n")
+	b.WriteString("- a migration filename — `weld db create` allocates the version;\n")
+	b.WriteString("- generated code: `*_gen.go` (`weld gen enum`), `internal/di/di.go`,\n")
+	b.WriteString("  `di_test.go` and `loom_gen.go` (`weld gen loom` / `make generate`),\n")
+	b.WriteString("  `internal/data/sqlc` (`weld gen sqlc`), and `internal/clients/<name>`\n")
+	b.WriteString("  (`weld client add`). Edit the source they are generated from and regenerate.\n\n")
+
+	b.WriteString("Write code by hand only where no command fits, and then inside an existing\n")
+	b.WriteString("generated package or seam. To bring existing handwritten code in, back it up,\n")
+	b.WriteString("scaffold the weld skeleton and migrate the code into it; do not overwrite it\n")
+	b.WriteString("or assume `weld add` adopts files it did not write.\n\n")
+}
+
+// writeWiringRules says where business wiring goes once the scaffold exists: the
+// stable seams, never the regenerated DI sources.
+func writeWiringRules(b *strings.Builder) {
+	b.WriteString("## Wiring rules\n\n")
 	b.WriteString("Never wire business behavior by editing `internal/di/di.go`, `di_test.go`\n")
 	b.WriteString("or `loom_gen.go`. Declare custom providers in `providers.go`; declarations\n")
 	b.WriteString("alone are pruned unless consumed. With HTTP installed, custom route dependencies\n")
