@@ -98,6 +98,7 @@ weld db create <name> [--dir dir] [--dry-run]
 weld doctor [--json] [--dir dir]
 weld upgrade [capability...] [--check] [--prune] [--verify vet|build|none] [--dir dir] [--dry-run]
 weld gen [enum|loom|sqlc] [--dir dir] [--dry-run]
+weld routes [--json] [--dir dir]
 weld dev [--dir dir]
 weld build [--docker] [--image tag] [--dockerfile path] [--platform os/arch] [--dir dir]
 weld docker init [--dir dir] [--dry-run]
@@ -1293,6 +1294,33 @@ A `*_gen.go` file is only overwritten when it carries the generated header, so a
 user file that happens to share the name is never clobbered. Use a pointer
 (`*Status`) for an optional field: the zero value `""` is not a valid value and
 `ParseStatus` fails closed on anything undeclared.
+
+## `weld routes`
+
+`weld routes` prints the HTTP routes the installed business modules register:
+
+```text
+METHOD  PATH                      POLICIES  MODULE   OPERATION
+GET     /api/catalog              -         catalog  catalog_index
+POST    /api/catalog/admin/items  admin     catalog  catalog_create_item
+GET     /api/catalog/greet        -         catalog  catalog_greet
+GET     /api/catalog/health       -         catalog  -
+```
+
+It reads the source the way `weld http export` does: each module's `Register`
+is type-checked and its typed (`httpx.Get`, `httpx.Post`, ...) and raw
+(`Router.Get`, `Router.Raw`, `Router.Handle`, ...) registrations are resolved to
+the full mount path (`internal/httpserver.ModulePrefix` plus any `Group`), the
+named policies (`Require`, `httpx.Policy`, `httpx.Open`) and the
+`httpx.Operation` ID. No constructor runs, so it needs no `config.yml`,
+database or network service, only source that type-checks.
+
+It is honest about its limits. A registration whose router, method or path is
+not static, and a module whose `Register` is not straight-line code, is listed
+under "Not read statically" instead of being guessed. Routes mounted outside a
+module's `Register` are not visible; the `web` capability's SPA is one `GET /`
+row. `--json` prints the same table for scripts. The running server logs its
+exact table at startup when `environment` is local or development.
 
 ## Typed HTTP clients between projects (preview)
 

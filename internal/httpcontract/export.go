@@ -35,40 +35,18 @@ func Export(ctx context.Context, dir string, opts ExportOptions) (*Contract, err
 	if opts.Prefix != nil && opts.Module == "" {
 		return nil, fmt.Errorf("--prefix requires --module")
 	}
-	patterns := []string{"./internal/httpserver"}
+	var modules []string
 	for _, mod := range m.Modules {
 		if opts.Module == "" || mod.Name == opts.Module {
-			patterns = append(patterns, "./internal/modules/"+mod.Name)
+			modules = append(modules, mod.Name)
 		}
 	}
-	if len(patterns) == 1 {
+	if len(modules) == 0 {
 		return nil, fmt.Errorf("no HTTP modules selected; add a module or check --module")
 	}
-	pkgs, err := packages.Load(&packages.Config{
-		Context: ctx, Dir: dir, Env: append(os.Environ(), "GOWORK=off"),
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports | packages.NeedDeps,
-	}, patterns...)
+	pkgs, server, err := loadHTTPSource(ctx, dir, m, modules)
 	if err != nil {
-		return nil, fmt.Errorf("load HTTP source: %w", err)
-	}
-	var errors []string
-	packages.Visit(pkgs, nil, func(p *packages.Package) {
-		for _, e := range p.Errors {
-			errors = append(errors, e.Error())
-		}
-	})
-	if len(errors) > 0 {
-		sort.Strings(errors)
-		return nil, fmt.Errorf("HTTP source does not type-check (run go mod tidy if dependencies are missing):\n%s", strings.Join(errors, "\n"))
-	}
-	var server *packages.Package
-	for _, p := range pkgs {
-		if p.PkgPath == m.Module+"/internal/httpserver" {
-			server = p
-		}
-	}
-	if server == nil {
-		return nil, fmt.Errorf("HTTP server package not found")
+		return nil, err
 	}
 	c := &Contract{Version: Version, Service: m.Name}
 	ex := &exporter{contract: c, httpx: m.Module + "/internal/httpx", defs: map[string]Definition{}, named: map[*types.Named]string{}, owners: map[string]*types.Named{}, packages: map[*types.Package]*packages.Package{}}
@@ -106,13 +84,51 @@ func Export(ctx context.Context, dir string, opts ExportOptions) (*Contract, err
 	return c, nil
 }
 
+// loadHTTPSource type-checks internal/httpserver and the named modules of the
+// project in dir. Any type error fails the load: a reader working from broken
+// source would report routes that do not exist.
+func loadHTTPSource(ctx context.Context, dir string, m *project.Manifest, modules []string) ([]*packages.Package, *packages.Package, error) {
+	patterns := []string{"./internal/httpserver"}
+	for _, name := range modules {
+		patterns = append(patterns, "./internal/modules/"+name)
+	}
+	pkgs, err := packages.Load(&packages.Config{
+		Context: ctx, Dir: dir, Env: append(os.Environ(), "GOWORK=off"),
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports | packages.NeedDeps,
+	}, patterns...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load HTTP source: %w", err)
+	}
+	var errors []string
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		for _, e := range p.Errors {
+			errors = append(errors, e.Error())
+		}
+	})
+	if len(errors) > 0 {
+		sort.Strings(errors)
+		return nil, nil, fmt.Errorf("HTTP source does not type-check (run go mod tidy if dependencies are missing):\n%s", strings.Join(errors, "\n"))
+	}
+	for _, p := range pkgs {
+		if p.PkgPath == m.Module+"/internal/httpserver" {
+			return pkgs, p, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("HTTP server package not found")
+}
+
 type exporter struct {
-	contract *Contract
-	httpx    string
-	defs     map[string]Definition
-	named    map[*types.Named]string
-	owners   map[string]*types.Named
-	packages map[*types.Package]*packages.Package
+	// routesOnly reads routes without their DTO shapes, and records raw routes
+	// instead of skipping them: it is the mode `weld routes` lists the surface
+	// in, which needs neither a contract-compatible DTO nor a typed handler.
+	routesOnly bool
+	raw        []Route
+	contract   *Contract
+	httpx      string
+	defs       map[string]Definition
+	named      map[*types.Named]string
+	owners     map[string]*types.Named
+	packages   map[*types.Package]*packages.Package
 }
 
 type mount struct {
@@ -219,6 +235,12 @@ func (r *moduleReader) statement(stmt ast.Stmt) error {
 			return r.endpoint(call, fn.Name())
 		}
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && isRouter(r.pkg.TypesInfo.TypeOf(sel.X), r.ex.httpx) {
+			if r.ex.routesOnly {
+				if route, ok := r.rawRoute(call, sel); ok {
+					r.ex.raw = append(r.ex.raw, route)
+					return nil
+				}
+			}
 			r.ex.contract.Skipped = append(r.ex.contract.Skipped, fmt.Sprintf("%s: raw Router.%s at %s:%d", r.pkg.Name, sel.Sel.Name, filepath.Base(r.pkg.Fset.Position(call.Pos()).Filename), r.pkg.Fset.Position(call.Pos()).Line))
 			return nil
 		}
@@ -470,6 +492,10 @@ func (r *moduleReader) endpoint(call *ast.CallExpr, verb string) error {
 	}
 	if op.Status == 204 || op.Status == 304 || op.Method == "HEAD" {
 		op.NoContent = true
+	}
+	if r.ex.routesOnly {
+		r.ex.contract.Operations = append(r.ex.contract.Operations, op)
+		return nil
 	}
 	if op.Name == "" {
 		h := call.Args[handlerIndex]

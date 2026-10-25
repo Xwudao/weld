@@ -94,6 +94,7 @@ func newRootCommand() *cobra.Command {
 		newConfigCommand(),
 		newHTTPCommand(),
 		newClientCommand(),
+		newRoutesCommand(),
 		newVersionCommand(),
 	)
 	return root
@@ -992,6 +993,12 @@ Diagnostics:
   drift, go.mod, installed tools, generated Loom and enum files and the db
   migration layout. Warnings are advisory; failures exit non-zero. --json prints
   the report for CI. It never writes, builds or connects to a service.
+
+Routes:
+  routes lists the HTTP routes the installed business modules register, read
+  from source without building or starting the application: method, full path,
+  named policies, module and httpx.Operation ID. A registration that is not
+  static is listed as not read rather than guessed. --json prints the table.
 
 Generators:
   gen runs every generator that applies to the project. gen enum regenerates
