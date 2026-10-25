@@ -10,14 +10,14 @@ import (
 )
 
 // newConfigCommand builds `weld config`, a namespace for project-configuration
-// helpers.
+// helpers: the weld.yml starter and the read-only configuration check.
 func newConfigCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "print and create the user-owned weld.yml project configuration",
+		Short: "create weld.yml and check the project's configuration files",
 		Args:  cobra.NoArgs,
 	}
-	cmd.AddCommand(newConfigExampleCommand(), newConfigInitCommand())
+	cmd.AddCommand(newConfigExampleCommand(), newConfigInitCommand(), newConfigCheckCommand())
 	return cmd
 }
 

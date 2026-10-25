@@ -1,6 +1,6 @@
 {
   "name": "ratelimit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "kind": "add",
   "summary": "Opt-in per-client HTTP rate limit: an in-memory token bucket per client address with a bounded client set, X-Forwarded-For read only from configured trusted proxies, 429 responses with Retry-After, and typed rate_limit configuration. Installing it limits nothing until you add httpserver.RateLimitMiddleware to the chain in internal/httpserver/middleware.go.",
   "requires": ["http"],

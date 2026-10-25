@@ -107,6 +107,7 @@ weld test [--db auto|off|require] [--db-url dsn] [--config path] [--] [go test a
 weld deploy [--no-build] [--artifact file] [--dir dir]
 weld config example
 weld config init [--force]
+weld config check [--config path] [--strict] [--json] [--dir dir]
 weld list [--dir dir]
 weld explain <capability> [--json] [--dir dir]
 weld skills [--dir dir] [--dry-run]
@@ -1453,6 +1454,28 @@ the plan fails with an actionable restore instruction (for example
 loader is unchanged: `config.Load` still errors on a missing `config.yml` until
 the file exists.
 
+### `weld config check`
+
+The generated loader decodes `config.yml` leniently, so a mistyped key
+(`rate_limit.burts`) is ignored and the setting silently keeps its default.
+`weld config check` catches that without running the project. It loads
+`weld.yml` the way the drivers do (an unknown key or an invalid hook fails), and
+compares `config.yml` key by key with the committed `config.example.yml`:
+
+- **fail** — a value the loader cannot decode into the shipped type (a list
+  where a string belongs, a quoted `"true"` for a boolean, `"5"` for a number),
+  or a key defined twice in one mapping;
+- **warn** — a key the example does not have (a typo, or a setting you added
+  without adding it to the example), a key the file leaves out (its default or
+  the environment applies), or a fractional number where the example has a
+  whole one.
+
+A finding names the dotted key and the YAML kind, never the value. It exits
+non-zero on a failure, or on any warning with `--strict`; `--config` checks
+another file and `--json` prints the report. Semantic rules the project
+enforces at startup (a minimum secret length, a valid CORS origin) are left to
+its own `Validate` methods.
+
 ## CORS
 
 The `http` capability ships a cross-origin policy, wired but **off by default**.
@@ -1575,7 +1598,7 @@ request is still logged with its request ID and carries the CORS headers.
 ```yaml
 rate_limit:
   enabled: true            # RATE_LIMIT_ENABLED
-  requests_per_second: 10  # RATE_LIMIT_REQUESTS_PER_SECOND
+  requests_per_second: 10.0  # RATE_LIMIT_REQUESTS_PER_SECOND
   burst: 20                # RATE_LIMIT_BURST
   max_clients: 100000      # RATE_LIMIT_MAX_CLIENTS
   trusted_proxies: []      # RATE_LIMIT_TRUSTED_PROXIES (comma-separated)

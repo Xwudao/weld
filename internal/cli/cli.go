@@ -1066,7 +1066,9 @@ manifest, and weld add never touches it. weld config example prints a
 commented starter and weld config init writes one into the project (existing
 files are kept unless --force is given); every setting defaults from the
 installed capabilities and the host platform, so a project without weld.yml
-still builds and runs.`
+still builds and runs. weld config check loads weld.yml and compares the local
+config.yml with the committed config.example.yml, reporting keys the loader
+would ignore and values it could not decode without printing a value.`
 
 // runNew plans and applies `weld new`.
 func runNew(cmd *cobra.Command, args []string) error {
