@@ -25,6 +25,28 @@ the upgrade rewrite the files weld wrote and the project never touched. A payloa
 edited without a version bump therefore never reaches an existing project, and
 `weld upgrade --check` will not flag it either.
 
+**Describe the bump in `changes`.** `weld upgrade` prints every changelog entry
+newer than the version a project recorded, next to the diffs, so whoever folds a
+seam change in — usually an agent — learns *why* the payload moved and what a
+diff cannot say:
+
+```json
+"changes": [
+  {
+    "version": "0.10.0",
+    "summary": "middleware chain gains Recover as the innermost entry",
+    "actions": ["add httpx.Recover(logger) last in middlewareChain in internal/httpserver/middleware.go"]
+  }
+]
+```
+
+`version` and `summary` are required and an entry may not be newer than the
+capability's `version`. List an `action` for every step an existing project
+takes by hand: a seam whose signature or contents changed, a renamed
+configuration key, a new call project code has to make, a new snippet line a
+marker region needs. A change that only touches files weld rewrites itself needs
+no action.
+
 ### File roles decide what an upgrade may touch
 
 Every file entry declares a `role`, and `weld upgrade` obeys it. Declaring the
@@ -35,7 +57,7 @@ never arriving:
 |---|---|---|
 | `payload` (default) | weld | rewrites while the project has not changed it, otherwise reports a diff |
 | `patched` | weld, plus the capabilities that patch its marker regions | renders the newer payload and splices the live region bodies into it |
-| `seam` | the project | **never writes it**; reports the diff when the shipped version moves |
+| `seam` | the project | **never writes it**; reports the change (with a three-way merge when weld can recover what it wrote) when the shipped version moves, until `weld upgrade resolve` accepts it |
 | `generated` (implied by `di`, never declared) | the Loom generator | re-renders it from the installed capability set; modified DI sources are conflicts, never silently replaced |
 
 Use `seam` for every file whose doc comment promises "weld writes this once and
@@ -411,6 +433,7 @@ A capability descriptor is JSON:
 - `patches` insert a snippet at an **owned extension point**: a marker pair such
   as `# weld:web:begin` / `# weld:web:end` that the owning capability places in
   a file. `weld` never performs arbitrary text replacement.
+- `changes` is the capability's changelog (see "Describe the bump" above).
 - `requires` lists capabilities that must be installed first. `weld add`
   reports a missing requirement as an error by default; `--with-dependencies`
   installs the chain, so a user controls the install and the order in which they

@@ -211,6 +211,8 @@ func TestUpgradeReportsDriftedFileAndLeavesItAlone(t *testing.T) {
 
 	const path = "internal/mailsender/README.md"
 	const mine = "my own notes, do not lose them\n"
+	// An older payload wrote different notes, then the project rewrote them.
+	weldWrote(t, dir, "mail", path, "older notes\n")
 	edited(t, dir, path, mine)
 	downgrade(t, dir, "mail", "0.0.1")
 

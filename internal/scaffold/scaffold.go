@@ -54,6 +54,11 @@ type Request struct {
 	// list writes the plan unchecked, which is the library default; the CLI sets
 	// it, so `weld upgrade` cannot leave a project that does not compile.
 	Verify []string
+	// History recovers the content weld once wrote for a file the manifest only
+	// records by hash, which turns an upgrade advisory into a three-way view
+	// (what weld changed, what the project changed, a merge of both). A nil
+	// History leaves advisories with the two-way diff; the CLI sets GitHistory.
+	History History
 	// Now overrides the clock used to version a capability migration. A nil clock
 	// uses time.Now; tests set it so a planned migration filename is predictable.
 	Now func() time.Time

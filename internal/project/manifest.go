@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -74,6 +75,13 @@ type Manifest struct {
 	// projects that have none.
 	Commands []CommandRef  `json:"commands,omitempty"`
 	Files    []ManagedFile `json:"files"`
+	// Pending records the upgrade changes weld handed to the project instead of
+	// writing (a seam whose shipped version moved, a payload file the project
+	// changed). The capability version moves forward when the rest of the
+	// upgrade lands, so without this record the change would be reported once
+	// and then never again; `weld upgrade` re-reports every entry until `weld
+	// upgrade resolve` accepts it. Omitted when empty.
+	Pending []PendingChange `json:"pending,omitempty"`
 	// LegacyBaseline reports that the manifest was written by a weld that
 	// refreshed every hash after every add, so a matching hash is not evidence
 	// that a file is unmodified. Weld keeps the conservative half of its rules
@@ -118,6 +126,56 @@ type ManagedFile struct {
 	// weld has none: it refreshed hashes it did not write.
 	Baseline bool   `json:"baseline,omitempty"`
 	SHA256   string `json:"sha256"`
+}
+
+// PendingChange is an upgrade change the project has not accepted yet.
+type PendingChange struct {
+	Path       string `json:"path"`
+	Capability string `json:"capability"`
+	// Reason is the upgrade advisory reason that created the entry ("seam",
+	// "modified", "missing", "retired", "orphaned-region", "patch").
+	Reason string `json:"reason"`
+	// Marker names the marker region of a "patch" entry.
+	Marker string `json:"marker,omitempty"`
+	// From and To are the capability versions the change spans. A later
+	// upgrade of the same file keeps From and moves To, so the range always
+	// covers every change the project has yet to fold in.
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// key identifies a pending change: one per file, or per marker region for a
+// marker patch.
+func (c PendingChange) key() string { return c.Path + "#" + c.Marker }
+
+// AddPending records a change the project has to fold in. An existing entry for
+// the same file keeps its From version, so the reported range never shrinks.
+func (m *Manifest) AddPending(change PendingChange) {
+	for i := range m.Pending {
+		if m.Pending[i].key() == change.key() {
+			change.From = m.Pending[i].From
+			m.Pending[i] = change
+			return
+		}
+	}
+	m.Pending = append(m.Pending, change)
+	sort.Slice(m.Pending, func(i, j int) bool { return m.Pending[i].key() < m.Pending[j].key() })
+}
+
+// RemovePending drops the pending change for path (and marker, for a patch). It
+// reports whether there was one.
+func (m *Manifest) RemovePending(path, marker string) bool {
+	key := PendingChange{Path: path, Marker: marker}.key()
+	for i := range m.Pending {
+		if m.Pending[i].key() == key {
+			m.Pending = append(m.Pending[:i], m.Pending[i+1:]...)
+			if len(m.Pending) == 0 {
+				m.Pending = nil
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // NewManifest builds an empty manifest for a freshly scaffolded project.

@@ -196,7 +196,10 @@ region. Keep it that way.
    and its `files/` payloads.
 2. **Bump that capability's `version` whenever its payload changes.** Upgrade
    gates on the recorded version; without a bump the change never reaches an
-   existing project and `weld upgrade --check` will not flag it.
+   existing project and `weld upgrade --check` will not flag it. Add a `changes`
+   entry for the new version, with an `action` for every manual step an existing
+   project needs (seam edits, renamed config keys, new snippet lines): agents
+   upgrading a project read it next to the diffs.
 3. Declare `requires`, and `role` for every file whose ownership is not plain
    `payload`. Use `seam` for files the project is meant to edit permanently.
 4. Add file/patch conditions with `when`/`whenAbsent` instead of branching in
@@ -231,6 +234,12 @@ region. Keep it that way.
   old record by refreshing hashes it does not prove.
 - Hash refresh must stay scoped to files weld itself rewrote.
 - Seams are never rewritten, even when the recorded hash still matches.
+- Every upgrade advisory is recorded in the manifest's `pending` list and
+  re-reported until `weld upgrade resolve` accepts it; resolve moves the baseline
+  to the shipped version and keeps a copy under `.weld/baseline/` when the
+  project file differs. Keep advisories carrying `target` and, when a base is
+  recoverable, `upstreamDiff`/`localDiff`/`merged` — that is what lets an agent
+  fold a change in without undoing a project edit.
 - Add regression tests for ownership, drift, deletion, retirement and rollback
   whenever you touch these paths. The upgrade tests in `internal/scaffold` are
   the specification.

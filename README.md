@@ -96,7 +96,8 @@ weld add enum <name> <value> [value...] [--dir dir] [--dry-run]
 weld db migrate up|status|down [--config path] [--yes] [--allow-missing] [--dir dir] [--dry-run]
 weld db create <name> [--dir dir] [--dry-run]
 weld doctor [--json] [--dir dir]
-weld upgrade [capability...] [--check] [--prune] [--verify vet|build|none] [--dir dir] [--dry-run]
+weld upgrade [capability...] [--check] [--prune] [--json] [--verify vet|build|none] [--dir dir] [--dry-run]
+weld upgrade resolve [path...] [--all] [--dir dir] [--dry-run]
 weld gen [enum|loom|sqlc] [--dir dir] [--dry-run]
 weld routes [--json] [--dir dir]
 weld dev [--dir dir]
@@ -542,7 +543,9 @@ from those three facts — what the payload ships, what weld wrote, what is on d
 weld upgrade                      # every installed capability
 weld upgrade http                 # one capability
 weld upgrade --dry-run            # print the plan, write nothing
-weld upgrade --check              # CI: fail when anything is out of date
+weld upgrade --dry-run --json     # the plan with every file's target, diffs and merge
+weld upgrade --check              # CI: fail when anything is out of date or pending
+weld upgrade resolve <path>...    # accept the changes you folded into those files
 weld upgrade --prune              # also delete retired, unmodified files
 weld upgrade --verify=build       # check with go build instead of go vet
 weld upgrade --verify=none        # write without checking
@@ -557,7 +560,7 @@ upgrade may do with it:
 |---|---|---|
 | `payload` (the default) | `internal/httpx/*.go`, `README.md` | rewritten while you have not changed it; otherwise reported with a diff |
 | `patched` | `internal/config/config.go` | the newer payload supplies the skeleton and your live marker regions are spliced into it |
-| `seam` | `internal/httpserver/middleware.go`, `internal/httpserver/mounts.go`, `internal/httpserver/policy.go`, `internal/httpserver/errors.go`, `internal/di/providers.go`, `internal/di/http_policies.go`, `internal/di/events_listeners.go`, `internal/di/cron_jobs.go`, capability provider seams, `internal/data/seeder/register.go`, the `Makefile`, `.gitignore`, `config.yml` | written once, then yours: **never rewritten**, reported with a diff when the shipped version moves |
+| `seam` | `internal/httpserver/middleware.go`, `internal/httpserver/mounts.go`, `internal/httpserver/policy.go`, `internal/httpserver/errors.go`, `internal/di/providers.go`, `internal/di/http_policies.go`, `internal/di/events_listeners.go`, `internal/di/cron_jobs.go`, capability provider seams, `internal/data/seeder/register.go`, the `Makefile`, `.gitignore`, `config.yml` | written once, then yours: **never rewritten**, reported (with a three-way merge when weld can recover what it wrote) when the shipped version moves, until you resolve it |
 | `generated` | `internal/di/di.go`, `internal/di/di_test.go` | re-rendered while unmodified; edited sources block the plan with a diff; never merged or pruned |
 
 **A versioned migration** is a payload file whose project path weld chose at
@@ -633,8 +636,61 @@ the payload has not moved yet, the project deliberately does not build, and the
 upgrade still has to be able to land.
 
 `--check` fails when weld would write anything at all, including a drifted
-generated file or an outstanding seam advisory, which makes it a CI gate rather
-than only a version comparison.
+generated file or a pending advisory, which makes it a CI gate rather than only
+a version comparison.
+
+### Folding changes in: advisories, pending changes and `resolve`
+
+The goal of an upgrade is a project that matches what this weld would generate
+today for the same capabilities, with the project's own work kept. Weld writes
+everything it owns; everything else becomes an **advisory** — a seam whose
+shipped version moved, a payload file you changed, a deleted or retired file, or
+a marker region that lacks lines of a newer snippet (a new configuration key,
+Makefile target or ignore rule; snippets are never re-applied, and a YAML line is
+compared by key, so your own values are not reported). Each advisory carries what
+is needed to fold it in without losing an edit:
+
+| field | meaning |
+|---|---|
+| `target` | the whole file as this weld generates it (a seam keeps your marker regions) |
+| `diff` | your file → `target`; your own edits show up as removals |
+| `upstreamDiff` | weld's change only: what weld last wrote → `target` |
+| `localDiff` | your change only: what weld last wrote → your file |
+| `merged`, `conflicts` | a three-way merge of both, with git-style conflict markers where both sides changed a block |
+| `base`, `baseTrusted` | where "what weld last wrote" came from: `disk` (the file is unchanged), `baseline` (the copy `resolve` kept) or `git` (the newest commit whose content matches the hash in `weld.json`) |
+
+The manifest only records a hash, so the three-way fields need the content
+behind it. Weld finds it in the file itself, in `.weld/baseline/`, or in the
+project's git history; a project that never committed weld's output only gets
+`diff` and `target`. The changelog entries of every capability between your
+recorded version and this weld's (`changelog`) say why each payload moved and
+list the manual steps a diff cannot express. `weld upgrade --json` prints all of
+it, plus `nextSteps`; the text report shows the upstream diff when there is one.
+
+Advisories are recorded in `weld.json` under `pending`. The rest of the upgrade
+still lands and the capability version moves, but every later `weld upgrade`
+re-reports the pending changes — recomputed against your files, and marked
+`settled` once a file equals `target` — and `--check` fails until they are
+accepted:
+
+```sh
+weld upgrade --dry-run --json > upgrade.json   # read the plan and the advisories
+weld upgrade                                   # write what weld owns
+# fold each advisory in: apply upstreamDiff (or take merged), keep localDiff
+go build ./... && go test ./...
+weld upgrade resolve internal/httpserver/middleware.go config.example.yml
+weld upgrade --check                           # nothing left
+```
+
+`resolve` moves a file's recorded baseline to the version this weld ships, so
+the next upgrade reports only what changes after it. When your file differs
+from that version — the normal case for a customised seam — weld keeps the
+accepted version in `.weld/baseline/<path>`: it is the base the next upgrade's
+three-way merge needs, so commit the directory with the project. `resolve`
+refuses a file that still contains conflict markers and a change whose
+capability is behind this weld; a retired file you keep leaves `weld.json` and
+becomes yours, and a deleted file stays recorded so it is still never
+resurrected. `--all` accepts every pending change.
 
 ### What it deliberately does not do
 
@@ -643,10 +699,10 @@ Upgrading is not a migration engine. A payload change that cannot be expressed a
 requirement removed from `go.mod`, a seam whose *signature* changed — is reported
 for you to apply, because weld performs no text substitution and rewrites nothing
 you own. Marker patch snippets are not re-applied either: a shared file moves
-forward by splicing the live regions into the newer skeleton, so a *changed
-snippet* on an existing region stays manual. A capability whose recorded version
-equals the catalog version is never rewritten, so an upgrade is deterministic and
-repeatable. The payloads of `weld add module`, `weld add command` and
+forward by splicing the live regions into the newer skeleton, and a region that
+lacks lines of a newer snippet is reported for you to add. A capability whose
+recorded version equals the catalog version is never rewritten, so an upgrade is
+deterministic and repeatable. The payloads of `weld add module`, `weld add command` and
 `weld add enum` are written once and belong to you; `weld upgrade` does not touch
 them.
 

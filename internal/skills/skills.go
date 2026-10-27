@@ -670,4 +670,31 @@ func writeRegenerate(b *strings.Builder, caps map[string]bool) {
 	b.WriteString("and rolls the whole change back if the project no longer builds, so an upgrade\n")
 	b.WriteString("never leaves the project broken; `--verify=build|none` selects the check.\n")
 	b.WriteString("`weld upgrade --check` reports the same thing for CI.\n\n")
+	writeUpgradeWorkflow(b)
+}
+
+// writeUpgradeWorkflow tells an agent how to carry a project forward to what the
+// running weld generates: which report to read, which diff to apply so a project
+// edit is never undone, and how to close each change.
+func writeUpgradeWorkflow(b *strings.Builder) {
+	b.WriteString("### Upgrading with an agent\n\n")
+	b.WriteString("The goal is a project that matches what this weld generates today for the same\n")
+	b.WriteString("capabilities, with the project's own work kept. Work through it in order:\n\n")
+	b.WriteString("1. `weld upgrade --dry-run --json > upgrade.json` and read it: `upgraded`,\n")
+	b.WriteString("   `operations`, `changelog` (its `actions` are manual steps a diff cannot\n")
+	b.WriteString("   express) and `advisories`.\n")
+	b.WriteString("2. `weld upgrade` writes every file weld owns and records each advisory as\n")
+	b.WriteString("   pending in `weld.json`.\n")
+	b.WriteString("3. For each advisory, apply `upstreamDiff` (weld's change) and keep `localDiff`\n")
+	b.WriteString("   (the project's change). When `conflicts` is 0, `merged` is exactly that file;\n")
+	b.WriteString("   otherwise settle the blocks between the conflict markers. Never apply `diff`\n")
+	b.WriteString("   blindly: it runs from the project's file to `target`, so the project's edits\n")
+	b.WriteString("   appear as removals. Without `base`, compare the file with `target` by hand.\n")
+	b.WriteString("   A `patch` advisory lists snippet lines its marker region lacks; add them\n")
+	b.WriteString("   inside the region.\n")
+	b.WriteString("4. Carry out the changelog actions, then `go build ./... && go test ./...`.\n")
+	b.WriteString("5. `weld upgrade resolve <path>...` (or `--all`) accepts the folded files; it\n")
+	b.WriteString("   refuses a file that still has conflict markers. Commit `.weld/baseline/`:\n")
+	b.WriteString("   it is the base the next upgrade's three-way merge needs.\n")
+	b.WriteString("6. `weld upgrade --check` must pass.\n\n")
 }

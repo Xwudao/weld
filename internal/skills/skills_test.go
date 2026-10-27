@@ -514,7 +514,8 @@ func TestRenderMentionsUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	for _, want := range []string{"`weld upgrade`", "`weld upgrade --check`", "is never resurrected"} {
+	for _, want := range []string{"`weld upgrade`", "`weld upgrade --check`", "is never resurrected",
+		"`weld upgrade --dry-run --json", "`upstreamDiff`", "`weld upgrade resolve <path>...`"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("rendered skill is missing %q:\n%s", want, body)
 		}

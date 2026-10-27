@@ -15,30 +15,84 @@ import (
 	"github.com/Xwudao/weld/internal/template"
 )
 
+// Advisory reasons. Each is a change a newer payload implies that weld refuses
+// to write on its own.
+const (
+	// ReasonSeam: the file is project-owned and weld never rewrites it; the
+	// shipped version changed, so the project folds it in.
+	ReasonSeam = "seam"
+	// ReasonModified: a payload file the project changed since weld wrote it.
+	ReasonModified = "modified"
+	// ReasonMissing: a payload file the project deleted, never resurrected.
+	ReasonMissing = "missing"
+	// ReasonRetired: the payload no longer ships the file, which the project
+	// also changed, so it is not deleted either.
+	ReasonRetired = "retired"
+	// ReasonOrphanedRegion: the newer payload no longer declares a marker region
+	// the live file fills, so splicing would drop live content.
+	ReasonOrphanedRegion = "orphaned-region"
+	// ReasonPatch: a marker region lacks lines of the snippet the newer payload
+	// patches into it. Snippets are never re-applied, so the project adds them.
+	ReasonPatch = "patch"
+)
+
 // Advisory is a change a newer capability payload implies for a file `weld
 // upgrade` refuses to write on its own, either because the file belongs to the
-// project or because the project changed it. It carries the unified diff the
-// project applies by hand, so an upgrade never loses an edit.
+// project or because the project changed it.
+//
+// It carries everything needed to fold the change in without losing an edit:
+// the content this weld would generate (Target), and — when the content weld
+// last wrote can be recovered — what weld changed since (UpstreamDiff), what the
+// project changed (LocalDiff) and a three-way merge of both (Merged). An
+// advisory is recorded in weld.json until `weld upgrade resolve` accepts it, so
+// it is reported on every run rather than once.
 type Advisory struct {
-	Path       string
-	Capability string
-	// Reason is one of:
-	//
-	//	"seam"            the file is project-owned and weld never rewrites it;
-	//	                  the shipped version changed, so fold it in yourself;
-	//	"modified"        a payload file the project changed since weld wrote it;
-	//	"missing"         a payload file the project deleted, never resurrected;
-	//	"retired"         the payload no longer ships the file, which the project
-	//	                  also changed, so it is not deleted either;
-	//	"orphaned-region" the newer payload no longer declares a marker region the
-	//	                  live file fills, so splicing would drop live content.
-	Reason string
-	// Detail explains an advisory that has no diff (a seam weld cannot compare, an
-	// orphaned region). It is empty when Diff carries the explanation.
-	Detail string
-	// Diff is the unified diff from the project's content to what the newer
-	// payload implies. It is advisory text, never applied.
-	Diff string
+	Path       string `json:"path"`
+	Capability string `json:"capability"`
+	// Role is the file's ownership role.
+	Role project.Role `json:"role,omitempty"`
+	// Reason is one of the Reason* constants.
+	Reason string `json:"reason"`
+	// Marker names the marker region of a ReasonPatch advisory.
+	Marker string `json:"marker,omitempty"`
+	// From and To are the capability versions the change spans: From is the
+	// version the project held when the change was first reported.
+	From string `json:"from,omitempty"`
+	To   string `json:"to,omitempty"`
+	// Pending reports that an earlier upgrade already reported the change and
+	// the project has not resolved it yet.
+	Pending bool `json:"pending,omitempty"`
+	// Settled reports that the project file already matches Target (or, for a
+	// retired file, is gone), so resolving it only records the fact.
+	Settled bool `json:"settled,omitempty"`
+	// Detail explains the advisory in a sentence, including one with no diff
+	// (an orphaned region, a missing snippet line).
+	Detail string `json:"detail,omitempty"`
+	// Diff is the unified diff from the project's file to Target. It mixes the
+	// project's own edits (as removals) with weld's change, so prefer
+	// UpstreamDiff when it is present.
+	Diff string `json:"diff,omitempty"`
+	// Base names where the content weld last wrote came from (BaseFrom*), or is
+	// empty when it could not be recovered and only Diff is available.
+	Base string `json:"base,omitempty"`
+	// BaseTrusted is false when the manifest predates trustworthy baselines, so
+	// the recovered base may already contain project edits.
+	BaseTrusted bool `json:"baseTrusted,omitempty"`
+	// UpstreamDiff is weld's own change: the recorded base to Target.
+	UpstreamDiff string `json:"upstreamDiff,omitempty"`
+	// LocalDiff is the project's change: the recorded base to its file.
+	LocalDiff string `json:"localDiff,omitempty"`
+	// Merged is the three-way merge of the project file with weld's change,
+	// conflict markers included. It is advisory: weld never writes it.
+	Merged string `json:"merged,omitempty"`
+	// Conflicts counts the conflicting blocks in Merged.
+	Conflicts int `json:"conflicts,omitempty"`
+	// Target is the full content this weld would give the file in a project
+	// generated today with the same capabilities (for a seam, with the
+	// project's marker regions kept). Empty for a retired file.
+	Target string `json:"target,omitempty"`
+	// Snippet is the snippet a ReasonPatch advisory's region should contain.
+	Snippet string `json:"snippet,omitempty"`
 }
 
 // CapabilityDelta records one capability moving to a newer template version.
@@ -51,13 +105,27 @@ type CapabilityDelta struct {
 	Files []string
 }
 
+// Changelog is the capability changelog an upgrade surfaces: the entries
+// between the version the project holds (or held when a still-pending change was
+// first reported) and the version this weld ships.
+type Changelog struct {
+	Capability string            `json:"capability"`
+	From       string            `json:"from"`
+	To         string            `json:"to"`
+	Changes    []template.Change `json:"changes"`
+}
+
 // UpgradeResult is a planned `weld upgrade`.
 type UpgradeResult struct {
 	*Result
 	// Upgraded lists the capabilities whose recorded version moved forward.
 	Upgraded []CapabilityDelta
-	// Advisories lists files weld will not rewrite on its own.
+	// Advisories lists files weld will not rewrite on its own: the ones this
+	// upgrade found and the pending ones earlier upgrades recorded.
 	Advisories []Advisory
+	// Changelog lists the changelog entries of every capability that moves or
+	// still has a pending change, so the reason for a diff travels with it.
+	Changelog []Changelog
 	// Current lists installed capabilities already at this weld's version.
 	Current []string
 	// Unknown lists capabilities the manifest records that this weld build no
@@ -67,6 +135,12 @@ type UpgradeResult struct {
 
 // Behind reports whether any installed capability is older than this weld build.
 func (r *UpgradeResult) Behind() bool { return len(r.Upgraded) > 0 }
+
+// UpToDate reports whether the project needs nothing at all: no capability
+// moves, nothing is written, and no change is waiting for the project.
+func (r *UpgradeResult) UpToDate() bool {
+	return len(r.Upgraded) == 0 && len(r.Operations) == 0 && len(r.Advisories) == 0
+}
 
 // Upgrade plans moving installed capabilities to the versions this weld ships.
 //
@@ -92,9 +166,12 @@ func (r *UpgradeResult) Behind() bool { return len(r.Upgraded) > 0 }
 // is a plain payload file and only when it is unmodified.
 //
 // Marker patches are not re-applied as snippets: a shared file is moved forward
-// by splicing the live region bodies into the newer skeleton, so a patch
-// snippet's own content changes are still a manual step. A changed snippet is
-// reported as an advisory rather than silently re-inserted.
+// by splicing the live region bodies into the newer skeleton. A region that
+// lacks lines of the newer snippet is reported as a ReasonPatch advisory instead.
+//
+// Every advisory is recorded in the manifest as pending, and pending changes of
+// capabilities that are already current are re-reported, so a change handed to
+// the project is never forgotten until `weld upgrade resolve` accepts it.
 //
 // names selects capabilities to upgrade; an empty list considers every installed
 // capability. Planning reads the project and writes nothing; Result.Apply
@@ -134,11 +211,27 @@ func Upgrade(req Request, names []string, prune bool) (*UpgradeResult, error) {
 		if !newer {
 			upgrade.Current = append(upgrade.Current, capability.Name)
 			result.Notes = append(result.Notes, driftNotes(req.Catalog, req.Dir, manifest, capability.Name)...)
+			advisories, err := p.pendingAdvisories(capability, shared, shippers)
+			if err != nil {
+				return nil, err
+			}
+			if len(advisories) > 0 {
+				upgrade.Advisories = append(upgrade.Advisories, advisories...)
+				upgrade.addChangelog(capability, earliestFrom(advisories), capability.Version)
+			}
 			continue
 		}
 		files, advisories, err := p.upgradeCapability(capability, prune, shared, shippers)
 		if err != nil {
 			return nil, err
+		}
+		patches, err := p.patchAdvisories(capability)
+		if err != nil {
+			return nil, err
+		}
+		advisories = append(advisories, patches...)
+		for i := range advisories {
+			p.recordPending(&advisories[i], recorded, capability.Version)
 		}
 		manifest.SetCapabilityVersion(capability.Name, capability.Version)
 		upgrade.Upgraded = append(upgrade.Upgraded, CapabilityDelta{
@@ -148,12 +241,165 @@ func Upgrade(req Request, names []string, prune bool) (*UpgradeResult, error) {
 			Files: files,
 		})
 		upgrade.Advisories = append(upgrade.Advisories, advisories...)
+		upgrade.addChangelog(capability, earliestFrom(advisories, recorded), capability.Version)
 	}
 	if err := p.finish(); err != nil {
 		return nil, err
 	}
 	return upgrade, nil
 }
+
+// addChangelog records the changelog entries of capability newer than from. A
+// capability whose changelog has nothing in the range adds nothing.
+func (r *UpgradeResult) addChangelog(capability *template.Capability, from, to string) {
+	changes := capability.ChangesSince(from)
+	if len(changes) == 0 {
+		return
+	}
+	r.Changelog = append(r.Changelog, Changelog{Capability: capability.Name, From: from, To: to, Changes: changes})
+}
+
+// earliestFrom returns the oldest From among advisories and fallbacks, so a
+// changelog covers every version a still-pending change spans.
+func earliestFrom(advisories []Advisory, fallbacks ...string) string {
+	earliest := ""
+	consider := func(version string) {
+		if version == "" {
+			return
+		}
+		if earliest == "" {
+			earliest = version
+			return
+		}
+		if older, err := semver.IsNewer(earliest, version); err == nil && older {
+			earliest = version
+		}
+	}
+	for _, fallback := range fallbacks {
+		consider(fallback)
+	}
+	for _, advisory := range advisories {
+		consider(advisory.From)
+	}
+	return earliest
+}
+
+// recordPending stores an advisory in the manifest as a pending change and
+// stamps it with the version range it spans. A change already pending keeps the
+// version it was first reported at.
+func (p *planner) recordPending(advisory *Advisory, from, to string) {
+	p.manifest.AddPending(project.PendingChange{
+		Path:       advisory.Path,
+		Capability: advisory.Capability,
+		Reason:     advisory.Reason,
+		Marker:     advisory.Marker,
+		From:       from,
+		To:         to,
+	})
+	for _, change := range p.manifest.Pending {
+		if change.Path == advisory.Path && change.Marker == advisory.Marker {
+			advisory.From, advisory.To = change.From, change.To
+			if change.From != from {
+				advisory.Pending = true
+			}
+		}
+	}
+}
+
+// pendingAdvisories re-reports the pending changes of a capability that is
+// already current, recomputed against the project as it is now: the diffs show
+// what is still left to fold in, and Settled says when nothing is.
+func (p *planner) pendingAdvisories(capability *template.Capability, shared map[string]bool, shippers map[string]string) ([]Advisory, error) {
+	var advisories []Advisory
+	for _, change := range p.manifest.Pending {
+		if change.Capability != capability.Name {
+			continue
+		}
+		advisory, err := p.pendingAdvisory(capability, change, shared, shippers)
+		if err != nil {
+			return nil, err
+		}
+		advisory.Pending = true
+		advisory.From, advisory.To = change.From, change.To
+		advisories = append(advisories, advisory)
+	}
+	return advisories, nil
+}
+
+// pendingAdvisory recomputes one pending change. A change the newer payload
+// can no longer describe (the file left the payload, the region was settled) is
+// reported as settled, so resolving it clears the record.
+func (p *planner) pendingAdvisory(capability *template.Capability, change project.PendingChange, shared map[string]bool, shippers map[string]string) (Advisory, error) {
+	settled := Advisory{Path: change.Path, Capability: change.Capability, Reason: change.Reason, Marker: change.Marker, Settled: true}
+	switch change.Reason {
+	case ReasonPatch:
+		for _, patch := range capability.Patches {
+			if patch.Path != change.Path || patch.Marker != change.Marker || !entryApplies(p.present, patch.When, patch.WhenAbsent) {
+				continue
+			}
+			advisory, err := p.patchAdvisory(capability, patch)
+			if err != nil {
+				return Advisory{}, err
+			}
+			if advisory != nil {
+				return *advisory, nil
+			}
+		}
+		settled.Detail = "every line of the snippet is in the region now"
+		return settled, nil
+
+	case ReasonRetired:
+		onDisk, err := os.ReadFile(filepath.Join(p.req.Dir, change.Path))
+		if errors.Is(err, os.ErrNotExist) {
+			settled.Detail = "the retired file is gone"
+			return settled, nil
+		}
+		if err != nil {
+			return Advisory{}, err
+		}
+		return Advisory{
+			Path:       change.Path,
+			Capability: change.Capability,
+			Reason:     ReasonRetired,
+			Detail:     retiredDetail,
+			Diff:       project.UnifiedDiff(change.Path, onDisk, nil),
+		}, nil
+	}
+
+	vars := template.Vars{Name: p.manifest.Name, Module: p.manifest.Module, Version: capability.Version}
+	for _, file := range capability.Files {
+		if !entryApplies(p.present, file.When, file.WhenAbsent) {
+			continue
+		}
+		target, err := p.payloadTarget(capability, file)
+		if err != nil {
+			return Advisory{}, err
+		}
+		if target != change.Path {
+			continue
+		}
+		assessed, err := p.assess(capability, file, target, vars, shared)
+		if err != nil {
+			return Advisory{}, err
+		}
+		if assessed.advisory != nil {
+			return *assessed.advisory, nil
+		}
+		settled.Role = assessed.role
+		settled.Detail = "the file no longer differs from what this weld ships"
+		if assessed.exists && bytes.Equal(assessed.onDisk, assessed.target) {
+			// Resolving records this as the baseline, so the file stops reading
+			// as a project edit.
+			settled.Target = string(assessed.target)
+		}
+		return settled, nil
+	}
+	settled.Detail = "this weld no longer ships the file"
+	return settled, nil
+}
+
+// retiredDetail explains a retired-file advisory.
+const retiredDetail = "this weld no longer ships the file and the project changed it, so weld did not delete it; delete it or keep it as your own, then run weld upgrade resolve"
 
 // upgradeTargets resolves the capabilities an upgrade considers, in a
 // deterministic order: the requested names in the order given, or every recorded
@@ -300,48 +546,35 @@ func (p *planner) upgradeCapability(capability *template.Capability, prune bool,
 		// too, so the retired-file pass below never mistakes it for a file the
 		// payload stopped shipping.
 		declared[target] = true
-		content, err := capability.ReadFile(file)
-		if err != nil {
-			return nil, nil, err
-		}
-		rendered := template.Render(content, vars)
 
 		if current, ok := p.planned[target]; ok {
-			if bytes.Equal(current, rendered) {
+			content, err := capability.ReadFile(file)
+			if err != nil {
+				return nil, nil, err
+			}
+			if bytes.Equal(current, template.Render(content, vars)) {
 				continue
 			}
 			return nil, nil, &project.ConflictError{Path: target, Reason: "planned by another capability"}
 		}
 
-		onDisk, readErr := os.ReadFile(filepath.Join(root, target))
-		exists := readErr == nil
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return nil, nil, readErr
-		}
-		entry, recorded := p.manifest.FileEntry(target)
-
-		role := capability.RoleOf(target)
-		if role == project.RolePayload && shared[target] {
-			role = project.RolePatched
-		}
-
-		candidate, advisory, err := p.upgradeCandidate(target, capability.Name, role, rendered, onDisk, exists, entry, recorded)
+		assessed, err := p.assess(capability, file, target, vars, shared)
 		if err != nil {
 			return nil, nil, err
 		}
-		if advisory != nil {
-			advisories = append(advisories, *advisory)
+		if assessed.advisory != nil {
+			advisories = append(advisories, *assessed.advisory)
 			continue
 		}
-		if candidate == nil {
+		if assessed.candidate == nil {
 			continue
 		}
-		if !exists {
-			if err := p.planNewFile(target, capability.Name, file.Source, role, candidate); err != nil {
+		if !assessed.exists {
+			if err := p.planNewFile(target, capability.Name, file.Source, assessed.role, assessed.candidate); err != nil {
 				return nil, nil, err
 			}
 		} else {
-			p.planManagedOverwrite(target, capability.Name, file.Source, role, candidate)
+			p.planManagedOverwrite(target, capability.Name, file.Source, assessed.role, assessed.candidate)
 		}
 		planned = append(planned, target)
 	}
@@ -369,7 +602,9 @@ func (p *planner) upgradeCapability(capability *template.Capability, prune bool,
 			advisories = append(advisories, Advisory{
 				Path:       entry.Path,
 				Capability: capability.Name,
-				Reason:     "retired",
+				Role:       roleOf(p.req.Catalog, entry),
+				Reason:     ReasonRetired,
+				Detail:     retiredDetail,
 				Diff:       project.UnifiedDiff(entry.Path, onDisk, nil),
 			})
 		case prune:
@@ -383,12 +618,220 @@ func (p *planner) upgradeCapability(capability *template.Capability, prune bool,
 	return planned, advisories, nil
 }
 
+// assessment is what an upgrade may do with one payload file: write candidate,
+// hand over advisory, or nothing.
+type assessment struct {
+	role      project.Role
+	exists    bool
+	onDisk    []byte
+	candidate []byte
+	advisory  *Advisory
+	// target is what this weld gives the file — the payload, with the live
+	// marker regions for a seam or shared file — whatever the decision was.
+	target []byte
+}
+
+// assess renders one payload file at its project path and decides what an
+// upgrade may do with it, with any advisory carrying the full three-way view.
+func (p *planner) assess(capability *template.Capability, file template.File, target string, vars template.Vars, shared map[string]bool) (assessment, error) {
+	content, err := capability.ReadFile(file)
+	if err != nil {
+		return assessment{}, err
+	}
+	rendered := template.Render(content, vars)
+
+	onDisk, readErr := os.ReadFile(filepath.Join(p.req.Dir, target))
+	exists := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return assessment{}, readErr
+	}
+	entry, recorded := p.manifest.FileEntry(target)
+
+	role := capability.RoleOf(target)
+	if role == project.RolePayload && shared[target] {
+		role = project.RolePatched
+	}
+
+	candidate, advisory, err := p.upgradeCandidate(target, capability.Name, role, rendered, onDisk, exists, entry, recorded)
+	if err != nil {
+		return assessment{}, err
+	}
+	if advisory != nil {
+		advisory.Role = role
+		p.enrich(advisory, entry, recorded, onDisk, exists)
+	}
+	shipped := rendered
+	if exists && (role == project.RoleSeam || role == project.RolePatched) {
+		if spliced, orphans, err := project.SpliceMarkerRegions(rendered, onDisk); err == nil && len(orphans) == 0 {
+			shipped = spliced
+		}
+	}
+	return assessment{role: role, exists: exists, onDisk: onDisk, candidate: candidate, advisory: advisory, target: shipped}, nil
+}
+
+// enrich completes an advisory with the three-way view: it recovers the content
+// weld last wrote (from the file itself, the copy resolve kept, or the project's
+// history) and derives weld's change, the project's change and their merge.
+// Without a recoverable base the advisory keeps its two-way Diff, which is still
+// correct, only harder to apply without undoing a project edit.
+func (p *planner) enrich(advisory *Advisory, entry project.ManagedFile, recorded bool, onDisk []byte, exists bool) {
+	if advisory.Reason == ReasonOrphanedRegion || advisory.Reason == ReasonRetired {
+		return
+	}
+	target := []byte(advisory.Target)
+	if exists && bytes.Equal(onDisk, target) {
+		advisory.Settled = true
+	}
+	if !recorded {
+		return
+	}
+	base, source := recordedContent(p.req.Dir, entry, onDisk, exists, p.req.History)
+	if base == nil {
+		return
+	}
+	if exists && (advisory.Role == project.RoleSeam || advisory.Role == project.RolePatched) {
+		// A region body is the project's (or another capability's) and the target
+		// already carries the live one, so the base gets it too: otherwise every
+		// line added to a region since weld wrote the file would show up as weld's
+		// change.
+		if spliced, orphans, err := project.SpliceMarkerRegions(base, onDisk); err == nil && len(orphans) == 0 {
+			base = spliced
+		}
+	}
+	advisory.Base = source
+	advisory.BaseTrusted = entry.Baseline && !p.manifest.LegacyBaseline
+	advisory.UpstreamDiff = changeDiff(advisory.Path, base, target)
+	if !exists {
+		return
+	}
+	advisory.LocalDiff = changeDiff(advisory.Path, base, onDisk)
+	if merged, ok := project.Merge3(base, onDisk, target); ok {
+		advisory.Merged = string(merged.Content)
+		advisory.Conflicts = merged.Conflicts
+	}
+}
+
+// changeDiff is UnifiedDiff that says nothing when nothing changed.
+func changeDiff(path string, before, after []byte) string {
+	if bytes.Equal(before, after) {
+		return ""
+	}
+	return project.UnifiedDiff(path, before, after)
+}
+
+// patchAdvisories reports the marker regions that lack lines of the snippet the
+// capability's newer payload patches into them. Snippets are never re-applied —
+// a region is the project's to edit — so this is how a new configuration key, a
+// new Makefile target or a new ignore rule reaches an existing project.
+func (p *planner) patchAdvisories(capability *template.Capability) ([]Advisory, error) {
+	var advisories []Advisory
+	for _, patch := range capability.Patches {
+		if !entryApplies(p.present, patch.When, patch.WhenAbsent) {
+			continue
+		}
+		advisory, err := p.patchAdvisory(capability, patch)
+		if err != nil {
+			return nil, err
+		}
+		if advisory != nil {
+			advisories = append(advisories, *advisory)
+		}
+	}
+	return advisories, nil
+}
+
+// patchAdvisory compares one marker patch's snippet with the live region. The Go
+// module files belong to the toolchain, a "replace" patch owns its region
+// wholesale, and an absent target (a git-ignored config.yml on a fresh clone) is
+// not this check's business, so none of them is reported.
+func (p *planner) patchAdvisory(capability *template.Capability, patch template.Patch) (*Advisory, error) {
+	if patch.Path == goModPath || patch.Path == goSumPath || patch.Mode == "replace" {
+		return nil, nil
+	}
+	live, ok := p.planned[patch.Path]
+	if !ok {
+		onDisk, err := os.ReadFile(filepath.Join(p.req.Dir, patch.Path))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		live = onDisk
+	}
+	raw, err := capability.ReadPatch(patch)
+	if err != nil {
+		return nil, err
+	}
+	vars := template.Vars{Name: p.manifest.Name, Module: p.manifest.Module, Version: capability.Version}
+	snippet := template.Render(raw, vars)
+	advisory := &Advisory{
+		Path:       patch.Path,
+		Capability: capability.Name,
+		Reason:     ReasonPatch,
+		Marker:     patch.Marker,
+		Snippet:    string(snippet),
+	}
+	if entry, ok := p.manifest.FileEntry(patch.Path); ok {
+		advisory.Role = roleOf(p.req.Catalog, entry)
+	}
+	regions, _, err := project.MarkerRegions(live)
+	if err != nil {
+		advisory.Detail = fmt.Sprintf("the file's marker regions cannot be read (%v); restore the weld:%s region and add the snippet inside it", err, patch.Marker)
+		return advisory, nil
+	}
+	body, found := regions[patch.Marker]
+	if !found {
+		advisory.Detail = fmt.Sprintf("the file has no weld:%s marker region; restore it and add the snippet inside it", patch.Marker)
+		return advisory, nil
+	}
+	missing := missingSnippetLines(patch.Path, snippet, body)
+	if len(missing) == 0 {
+		return nil, nil
+	}
+	advisory.Detail = fmt.Sprintf("the weld:%s region lacks %d line(s) of the snippet %s %s ships; add them inside the region where they belong:\n%s",
+		patch.Marker, len(missing), capability.Name, capability.Version, strings.Join(missing, "\n"))
+	return advisory, nil
+}
+
+// missingSnippetLines returns the non-blank snippet lines the region does not
+// contain, compared without indentation. A YAML line is compared by its key,
+// because a project sets its own values in config.yml and that is not a
+// missing line.
+func missingSnippetLines(file string, snippet []byte, region []string) []string {
+	yaml := strings.HasSuffix(file, ".yml") || strings.HasSuffix(file, ".yaml")
+	normalize := func(line string) string {
+		line = strings.TrimSpace(line)
+		if yaml && !strings.HasPrefix(line, "#") {
+			if key, _, ok := strings.Cut(line, ":"); ok {
+				return key + ":"
+			}
+		}
+		return line
+	}
+	have := map[string]bool{}
+	for _, line := range region {
+		have[normalize(line)] = true
+	}
+	var missing []string
+	for _, line := range strings.Split(string(snippet), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !have[normalize(line)] {
+			missing = append(missing, line)
+		}
+	}
+	return missing
+}
+
 // upgradeCandidate decides what an upgrade may write for one payload file.
 //
 // It returns the content to write (nil for nothing to do) or an advisory
 // explaining why weld will not write it. rendered is the newer payload, and for
 // a shared or project-owned file the candidate is the newer skeleton with the
-// live marker regions spliced in.
+// live marker regions spliced in. Every advisory but an orphaned region carries
+// the candidate as its Target.
 func (p *planner) upgradeCandidate(path, capability string, role project.Role, rendered, onDisk []byte, exists bool, entry project.ManagedFile, recorded bool) ([]byte, *Advisory, error) {
 	candidate := rendered
 	if exists && (role == project.RoleSeam || role == project.RolePatched) {
@@ -400,12 +843,32 @@ func (p *planner) upgradeCandidate(path, capability string, role project.Role, r
 			return nil, &Advisory{
 				Path:       path,
 				Capability: capability,
-				Reason:     "orphaned-region",
-				Detail: fmt.Sprintf("the newer payload no longer declares the marker region(s) %s, which hold live content, so weld did not splice the file",
+				Reason:     ReasonOrphanedRegion,
+				Detail: fmt.Sprintf("the newer payload no longer declares the marker region(s) %s, which hold live content, so weld did not splice the file; move that content out of the region(s), then run weld upgrade again",
 					strings.Join(orphans, ", ")),
 			}, nil
 		}
 		candidate = spliced
+	}
+	missing := func() *Advisory {
+		return &Advisory{
+			Path:       path,
+			Capability: capability,
+			Reason:     ReasonMissing,
+			Detail:     "the project deleted this file and weld never resurrects one; recreate it from target if the project needs it, then run weld upgrade resolve",
+			Diff:       project.UnifiedDiff(path, nil, candidate),
+			Target:     string(candidate),
+		}
+	}
+	modified := func() *Advisory {
+		return &Advisory{
+			Path:       path,
+			Capability: capability,
+			Reason:     ReasonModified,
+			Detail:     "the project changed this file since weld wrote it, so weld did not overwrite it; fold weld's change (upstreamDiff) into it, then run weld upgrade resolve",
+			Diff:       project.UnifiedDiff(path, onDisk, candidate),
+			Target:     string(candidate),
+		}
 	}
 
 	switch role {
@@ -419,12 +882,7 @@ func (p *planner) upgradeCandidate(path, capability string, role project.Role, r
 			return nil, nil, nil
 		}
 		if !exists {
-			return nil, &Advisory{
-				Path:       path,
-				Capability: capability,
-				Reason:     "missing",
-				Diff:       project.UnifiedDiff(path, nil, candidate),
-			}, nil
+			return nil, missing(), nil
 		}
 		if seamUnchanged(entry, rendered, onDisk, candidate) {
 			return nil, nil, nil
@@ -432,9 +890,10 @@ func (p *planner) upgradeCandidate(path, capability string, role project.Role, r
 		return nil, &Advisory{
 			Path:       path,
 			Capability: capability,
-			Reason:     "seam",
-			Detail:     "weld wrote this project-owned file once and never rewrites it; the diff below is your file -> the version this weld ships, so fold the change in yourself",
+			Reason:     ReasonSeam,
+			Detail:     "weld wrote this project-owned file once and never rewrites it; fold weld's change (upstreamDiff, or the diff from your file to target) into it yourself, then run weld upgrade resolve",
 			Diff:       project.UnifiedDiff(path, onDisk, candidate),
+			Target:     string(candidate),
 		}, nil
 
 	case project.RolePatched:
@@ -445,12 +904,7 @@ func (p *planner) upgradeCandidate(path, capability string, role project.Role, r
 			return nil, nil, &project.ConflictError{Path: path, Reason: "unmanaged file already exists"}
 		}
 		if !exists {
-			return nil, &Advisory{
-				Path:       path,
-				Capability: capability,
-				Reason:     "missing",
-				Diff:       project.UnifiedDiff(path, nil, candidate),
-			}, nil
+			return nil, missing(), nil
 		}
 		if bytes.Equal(onDisk, candidate) {
 			return nil, nil, nil
@@ -460,12 +914,11 @@ func (p *planner) upgradeCandidate(path, capability string, role project.Role, r
 		// Outside them weld owns the file, and a recorded baseline still matching
 		// the live file is what proves the project did not add anything there.
 		if entry.Baseline && project.HashContent(onDisk) != entry.SHA256 {
-			return nil, &Advisory{
-				Path:       path,
-				Capability: capability,
-				Reason:     "modified",
-				Diff:       project.UnifiedDiff(path, onDisk, candidate),
-			}, nil
+			if project.HashContent(candidate) == entry.SHA256 {
+				// The shipped version has not moved: the difference is the project's.
+				return nil, nil, nil
+			}
+			return nil, modified(), nil
 		}
 		if project.HashContent(candidate) == entry.SHA256 {
 			return nil, nil, nil
@@ -480,24 +933,16 @@ func (p *planner) upgradeCandidate(path, capability string, role project.Role, r
 			return nil, nil, &project.ConflictError{Path: path, Reason: "unmanaged file already exists"}
 		}
 		if !exists {
-			return nil, &Advisory{
-				Path:       path,
-				Capability: capability,
-				Reason:     "missing",
-				Diff:       project.UnifiedDiff(path, nil, candidate),
-			}, nil
-		}
-		if project.HashContent(onDisk) != entry.SHA256 {
-			return nil, &Advisory{
-				Path:       path,
-				Capability: capability,
-				Reason:     "modified",
-				Diff:       project.UnifiedDiff(path, onDisk, candidate),
-			}, nil
+			return nil, missing(), nil
 		}
 		if project.HashContent(candidate) == entry.SHA256 || bytes.Equal(onDisk, candidate) {
-			// The shipped version has not moved since weld wrote the file.
+			// The shipped version has not moved since weld wrote the file (or the
+			// project already has it), so there is nothing to bring forward; a
+			// project edit stays the project's and is reported as drift instead.
 			return nil, nil, nil
+		}
+		if project.HashContent(onDisk) != entry.SHA256 {
+			return nil, modified(), nil
 		}
 		return candidate, nil, nil
 	}

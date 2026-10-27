@@ -12,6 +12,7 @@ import (
 
 	"github.com/Xwudao/weld/internal/migration"
 	"github.com/Xwudao/weld/internal/project"
+	"github.com/Xwudao/weld/internal/semver"
 	weldtemplate "github.com/Xwudao/weld/internal/weldtemplate"
 )
 
@@ -147,8 +148,46 @@ type Capability struct {
 	// the composed application follows the installed capabilities without a
 	// runtime registry.
 	DI *DISpec `json:"di,omitempty"`
+	// Changes is the capability's changelog. `weld upgrade` prints every entry
+	// newer than the version a project recorded, so whoever folds a seam diff in
+	// — a person or an agent — reads why the payload moved and which manual steps
+	// it implies, not only what the bytes are. A diff cannot say "this key was
+	// renamed" or "call this new constructor from your mounts"; an entry can.
+	Changes []Change `json:"changes,omitempty"`
 
 	fsys fs.FS
+}
+
+// Change is one version's changelog entry.
+type Change struct {
+	// Version is the capability version that shipped the change.
+	Version string `json:"version"`
+	// Summary says what changed, in one sentence.
+	Summary string `json:"summary"`
+	// Actions lists the steps an existing project takes by hand, because weld
+	// never rewrites what the project owns (a seam signature, a renamed config
+	// key, a new call a project file has to make).
+	Actions []string `json:"actions,omitempty"`
+}
+
+// ChangesSince returns the changelog entries newer than from, oldest first. An
+// empty or unparseable from returns every entry up to the current version, which
+// is the conservative answer for a project that does not know its version.
+func (c *Capability) ChangesSince(from string) []Change {
+	var changes []Change
+	for _, change := range c.Changes {
+		if from != "" {
+			if newer, err := semver.IsNewer(change.Version, from); err == nil && !newer {
+				continue
+			}
+		}
+		changes = append(changes, change)
+	}
+	sort.SliceStable(changes, func(i, j int) bool {
+		order, err := semver.Compare(changes[i].Version, changes[j].Version)
+		return err == nil && order < 0
+	})
+	return changes
 }
 
 // DISpec is a capability's Loom dependency-graph contribution.
@@ -262,6 +301,14 @@ func (c *Capability) validate() error {
 		}
 		if err := c.requireSource(patch.Source); err != nil {
 			return err
+		}
+	}
+	for _, change := range c.Changes {
+		if !semver.Valid(change.Version) || change.Summary == "" {
+			return fmt.Errorf("capability %q: a changes entry needs a version and a summary", c.Name)
+		}
+		if newer, err := semver.IsNewer(change.Version, c.Version); err != nil || newer {
+			return fmt.Errorf("capability %q: changes entry %s is newer than the capability version %s", c.Name, change.Version, c.Version)
 		}
 	}
 	if c.DI != nil {
