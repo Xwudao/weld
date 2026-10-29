@@ -336,7 +336,9 @@ for CI; --prune deletes a generated file whose enum no longer exists.
 
 The sqlc generator only applies when the db capability is installed.
 ` + progName + ` gen sqlc --check compares the committed generated files with the
-pinned generator and fails instead of writing when they are stale.`
+pinned generator and fails instead of writing when they are stale. With the
+sqlcx capability installed, both run through sqlc-dynamic from tools/sqlcx,
+which also writes (or checks) internal/data/sqlc/dynamic.`
 }
 
 // runGen runs every generator that applies to the project.
@@ -790,8 +792,9 @@ Generators:
   rebuilds internal/di/loom_gen.go with the pinned tools/loom generator (the
   same generator make generate runs, without the make fallback). gen sqlc
   regenerates internal/data/sqlc from db/migrations and db/query with the
-  generator pinned in db/tools (the same generator make sqlc runs); --check
-  reports stale generated files for CI.
+  generator pinned in db/tools (the same generator make sqlc runs), or through
+  sqlc-dynamic from tools/sqlcx once sqlcx is installed; --check reports stale
+  generated files for CI.
 
 Upgrades:
   upgrade moves installed capabilities to the template versions this weld

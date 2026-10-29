@@ -1,0 +1,8 @@
+    # weld:sqlcx:installed __version__
+    # The plugin writes sqlcx.manifest.json here and sqlc-dynamic then links it
+    # with the code sqlc generated into sqlcx_gen.go (package dynamic).
+    codegen:
+      - plugin: sqlc-dynamic
+        out: "internal/data/sqlc/dynamic"
+        options:
+          package: "dynamic"

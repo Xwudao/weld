@@ -67,7 +67,8 @@ never regenerates it": `internal/httpserver/middleware.go`, `mounts.go`,
 `.gitignore`, `config.yml` and `config.example.yml`.
 
 Use `patched` for a file weld ships *and* another capability extends through a
-marker patch — today that is `internal/config/config.go`. Its regions are the
+marker patch — today that is `internal/config/config.go` and `sqlc.yaml`
+(extended by `sqlcx`). Its regions are the
 extension points, so project additions belong inside a region: the splice keeps
 regions verbatim and replaces everything outside them with the newer payload.
 
@@ -139,6 +140,15 @@ capabilities/
                    internal/testdb (database_test resolver and per-test-schema
                    pool), internal/di/migrate_provider.go (stable Loom seam),
                    snippets
+  sqlcx/           kind: add    -> go-sqlcx dynamic SQL, requires db
+    capability.json
+    files/         tools/sqlcx (nested module pinning sqlc-dynamic and the
+                   db/tools sqlc release), snippets for the sqlc.yaml
+                   sqlcplugins/sqlccodegen regions, the Makefile db region
+                   (SQLC_GENERATE) and go.mod (go-sqlcx, goversion 1.27),
+                   internal/data/items_search.go example + tests, README;
+                   "generates" makes the install run the sqlc generator, whose
+                   internal/data/sqlc/dynamic output is not recorded
   seed/            kind: add    -> database seeding, requires db
     capability.json
     files/         internal/data/seeder (Deps, Registry, Runner, the stable
@@ -444,7 +454,11 @@ Two optional fields let a payload vary with the installed set:
 - a `file` or `patch` may carry `when: [cap]` / `whenAbsent: [cap]`, so it is
   planned only when those capabilities are (or are not) installed; and
 - a `patch` may carry `mode: "replace"` to rewrite its region instead of
-  appending, which is how `loom`, `mail` and `storage` set the `go` directive.
+  appending, which is how `loom`, `mail`, `storage` and `sqlcx` set the `go`
+  directive. A replace of the `go.mod` `goversion` region never lowers the
+  directive: when the region already declares the same or a newer Go, the patch
+  is skipped, so installation order cannot drop a floor another capability
+  raised.
 
 A `file` may carry `versioned: true`, which marks a **goose migration**. Its
 `path` is the file's name without a version (`db/migrations/create_users.sql`) and

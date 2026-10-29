@@ -143,6 +143,12 @@ type Capability struct {
 	// install, for a capability whose payload needs a project generator to run
 	// (for example sqlc) before the project builds.
 	PostInstall []string `json:"postInstall,omitempty"`
+	// Generates lists the files the project's sqlc generator creates once the
+	// capability is installed (sqlcx's dynamic query code). A non-empty list
+	// makes the install run the generator before Loom and verification, and
+	// the files are captured so a failed install removes them again; like all
+	// generator output they are not recorded in the manifest.
+	Generates []string `json:"generates,omitempty"`
 	// DI declares a capability's Loom dependency-graph contribution. It is
 	// rendered per installed capability set when the capability is installed, so
 	// the composed application follows the installed capabilities without a

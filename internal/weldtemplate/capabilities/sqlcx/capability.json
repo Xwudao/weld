@@ -1,0 +1,30 @@
+{
+  "name": "sqlcx",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "Type-safe dynamic SQL over the sqlc models with go-sqlcx: the sqlc-dynamic plugin generates internal/data/sqlc/dynamic from the same sqlc.yaml, for statements whose filters, order and pagination depend on input. Raises the project's Go floor to 1.27.",
+  "requires": ["db"],
+  "files": [
+    { "path": "tools/sqlcx/go.mod", "source": "files/tools/go.mod.tmpl" },
+    { "path": "tools/sqlcx/go.sum", "source": "files/tools/go.sum" },
+    { "path": "tools/sqlcx/README.md", "source": "files/README.md" },
+    { "path": "internal/data/items_search.go", "source": "files/items_search.go.tmpl" },
+    { "path": "internal/data/items_search_test.go", "source": "files/items_search_test.go.tmpl" },
+    { "path": "internal/data/items_search_integration_test.go", "source": "files/items_search_integration_test.go.tmpl" }
+  ],
+  "patches": [
+    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
+    { "path": "go.mod", "marker": "goversion", "mode": "replace", "source": "files/goversion.snippet" },
+    { "path": "sqlc.yaml", "marker": "sqlcplugins", "source": "files/sqlc_plugins.snippet" },
+    { "path": "sqlc.yaml", "marker": "sqlccodegen", "source": "files/sqlc_codegen.snippet" },
+    { "path": "Makefile", "marker": "db", "source": "files/Makefile.snippet" }
+  ],
+  "generates": [
+    "internal/data/sqlc/dynamic/sqlcx.manifest.json",
+    "internal/data/sqlc/dynamic/sqlcx_gen.go"
+  ],
+  "postInstall": [
+    "sqlcx ran sqlc-dynamic once; regenerate with `make sqlc` or `weld gen sqlc` from now on (a bare `sqlc generate` cannot find the plugin).",
+    "a project created before db 0.4.0 must make its Makefile sqlc recipe run $(SQLC_GENERATE) (see `weld upgrade` for db 0.4.0)."
+  ]
+}

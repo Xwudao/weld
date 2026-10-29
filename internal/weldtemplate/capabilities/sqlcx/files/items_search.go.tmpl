@@ -1,0 +1,72 @@
+package data
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/Xwudao/go-sqlcx/sqlcx"
+
+	sqlc "__module__/internal/data/sqlc"
+	"__module__/internal/data/sqlc/dynamic"
+)
+
+// DefaultItemPageSize is the page size SearchItems uses when the filter names
+// none.
+const DefaultItemPageSize = 20
+
+// ItemFilter selects the items SearchItems returns. A zero field does not
+// filter, so the zero ItemFilter is the first page of every item, oldest first.
+type ItemFilter struct {
+	// Status keeps only items with exactly this status.
+	Status string
+	// NameContains keeps items whose name contains it. LIKE wildcards in it
+	// match literally.
+	NameContains string
+	// MinQuantity keeps items with at least this quantity.
+	MinQuantity int
+	// NewestFirst orders by creation time descending instead of ascending.
+	NewestFirst bool
+	// Page is 1-based; PageSize defaults to DefaultItemPageSize.
+	Page, PageSize int
+}
+
+// SearchItems returns one page of the items matching filter together with the
+// number of matching items across all pages.
+//
+// It is the go-sqlcx counterpart of the static sqlc statements in
+// db/query/items.sql: a statement whose WHERE clause depends on which filters
+// are set would otherwise need one sqlc query per combination. The columns and
+// value types come from internal/data/sqlc/dynamic, generated from the same
+// schema as the sqlc models, so a renamed column or a changed type fails to
+// compile here instead of at run time. db is the pool, or a pgx.Tx to search
+// inside a transaction.
+func SearchItems(ctx context.Context, db sqlcx.DB, filter ItemFilter) ([]Item, int64, error) {
+	rows, total, err := itemSearch(filter).AllAndCount(ctx, db)
+	if err != nil {
+		return nil, 0, fmt.Errorf("data: search items: %w", err)
+	}
+	items := make([]Item, len(rows))
+	for i, row := range rows {
+		items[i] = itemFromSQLC(row)
+	}
+	return items, total, nil
+}
+
+// itemSearch builds the SearchItems statement. Each condition joins the WHERE
+// clause only when its filter is set; id breaks creation-time ties so that
+// pages never overlap.
+func itemSearch(filter ItemFilter) sqlcx.Select[sqlc.Item] {
+	t := dynamic.Items
+	size := filter.PageSize
+	if size <= 0 {
+		size = DefaultItemPageSize
+	}
+	return t.Query().
+		Where(
+			t.Status.Eq(filter.Status).If(filter.Status != ""),
+			t.Name.Contains(filter.NameContains).If(filter.NameContains != ""),
+			t.Quantity.Gte(int32(filter.MinQuantity)).If(filter.MinQuantity > 0),
+		).
+		OrderBy(t.CreatedAt.Sort(filter.NewestFirst), t.ID.Sort(filter.NewestFirst)).
+		Page(int64(filter.Page), int64(size))
+}

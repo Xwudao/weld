@@ -3,7 +3,7 @@
 // application module, so the generator's x/tools dependency never enters the
 // app's go.mod or its go test ./.... Run it from here:
 //
-//	cd tools/loom && go build -o ../../bin/loom-gen github.com/Xwudao/loom/cmd/loom
+//	cd tools/loom && GOTOOLCHAIN=$(cd ../.. && go env GOVERSION) go build -o ../../bin/loom-gen github.com/Xwudao/loom/cmd/loom
 //	./bin/loom-gen generate ./internal/di
 //
 // or, from the project root: make generate

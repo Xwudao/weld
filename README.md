@@ -26,6 +26,7 @@ weld add web --with-dependencies  # installs http (and loom, config), then the f
 weld add module items  # JSON business module: typed handlers, DTO validation, {code,msg,data}
 weld add enum status draft published  # typed string enum + generated methods
 weld add db            # PostgreSQL: SQL migrations + sqlc, pool and repository
+weld add sqlcx         # type-safe dynamic SQL over the sqlc models (Go 1.27)
 weld add jwt --with-dependencies  # HS256 bearer tokens + middleware (installs http)
 weld add user --with-dependencies  # users table, repository, bcrypt login + JWT sessions
 weld db migrate up     # apply migrations with the pinned goose tool
@@ -296,6 +297,12 @@ Capabilities:
   code, an injectable connection pool and a repository, and optional startup
   migration from the migrations embedded in the binary. Requires `loom` but not
   `http`: it adds a pruned binding and no server.
+- `sqlcx` (add) — type-safe dynamic SQL with
+  [go-sqlcx](https://github.com/Xwudao/go-sqlcx): the `sqlc-dynamic` plugin
+  generates `internal/data/sqlc/dynamic` from the same `sqlc.yaml`, for the
+  statements whose filters, order and pagination depend on input. Requires `db`
+  and raises the project's Go floor to 1.27 (see
+  [`weld add sqlcx`](#weld-add-sqlcx)).
 - `seed` (add) — opt-in database seeding: named, idempotent seeders run by a
   short `seed` command (`make seed`, `weld seed`) over the repositories the Loom
   seed graph injects. The seeders are behind the `seed` build tag, so the
@@ -1001,6 +1008,53 @@ Because the generated initializer imports `github.com/Xwudao/loom`, installing
 `loom` raises the project's Go directive to `go 1.25.0`. The generator's
 `x/tools` dependency stays in `tools/loom`.
 
+## `weld add sqlcx`
+
+`weld add sqlcx` adds [go-sqlcx](https://github.com/Xwudao/go-sqlcx), a sqlc
+companion for dynamic SQL. It is not an ORM: static statements stay sqlc
+queries in `db/query`, and go-sqlcx covers the statements whose shape depends
+on input — optional filters, a sort order chosen at run time, pagination with
+a total count, partial updates — over the same models, with the column types
+sqlc generated:
+
+```go
+t := dynamic.Items
+rows, total, err := t.Query().
+	Where(
+		t.Status.Eq(status).If(status != ""),
+		t.Name.Contains(q).If(q != ""),
+	).
+	OrderBy(t.CreatedAt.Sort(newestFirst), t.ID.Sort(newestFirst)).
+	Page(page, size).
+	AllAndCount(ctx, pool) // []sqlc.Item
+```
+
+It requires `db`. What it changes:
+
+- `tools/sqlcx/`, a nested module pinning `sqlc-dynamic` and the same sqlc
+  release `db/tools` pins (a payload test keeps them equal);
+- `sqlc.yaml`'s `weld:sqlcplugins` and `weld:sqlccodegen` regions gain the
+  `sqlc-dynamic` process plugin and its output, `internal/data/sqlc/dynamic`;
+- the Makefile `db` region assigns `SQLC_GENERATE` again, so `make sqlc` runs
+  `cd tools/sqlcx && go tool sqlc-dynamic generate -f ../../sqlc.yaml`, and
+  `weld gen sqlc [--check]` switches the same way;
+- `go.mod` requires `github.com/Xwudao/go-sqlcx`, which raises pgx to v5.9.2,
+  and the `goversion` region to `go 1.27`, because the API is built on generic
+  methods. A goversion patch never lowers the directive, so a capability with
+  an older floor installed later keeps 1.27, and the Loom generator is built
+  with the toolchain the project's go.mod selects;
+- `internal/data/items_search.go`, `SearchItems` over the demo `items` table,
+  with a `Build()` unit test and an opt-in PostgreSQL integration test.
+
+The install runs the generator once, so the dynamic package covers every table
+the project already has; a failed run rolls the whole install back. The
+generated directory is generator output, not recorded in `weld.json`. After
+install a bare `sqlc generate` cannot find the plugin: regenerate with
+`make sqlc` or `weld gen sqlc`. A project whose db capability is older than
+0.4.0 has no `sqlc.yaml` regions: run `weld upgrade db` first, and make the
+Makefile seam's sqlc recipe run `$(SQLC_GENERATE)` as its changelog says.
+`tools/sqlcx/README.md` in the generated project covers usage.
+
 ## `weld add events` (in-process, synchronous by default)
 
 `weld add events` adds an in-process event dispatcher: `events.On[E](d, listener)`
@@ -1375,7 +1429,10 @@ weld gen sqlc --check  # CI: fail when the committed generated files are stale
 
 `--check` runs `sqlc diff`, prints the unified diff and fails without writing;
 run the command without `--check` to refresh the files. Both forms are also
-available through `make sqlc`.
+available through `make sqlc`. Once `sqlcx` is installed both go through
+`go tool sqlc-dynamic generate [-check]` from `tools/sqlcx` instead, which runs
+the same sqlc with the plugin on its PATH and also checks
+`internal/data/sqlc/dynamic`.
 
 A `*_gen.go` file is only overwritten when it carries the generated header, so a
 user file that happens to share the name is never clobbered. Use a pointer

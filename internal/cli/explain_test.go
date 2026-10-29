@@ -18,7 +18,7 @@ func TestExplainOutsideAProject(t *testing.T) {
 	for _, want := range []string{
 		"db v",
 		"Requires:    loom",
-		"Required by: seed, user",
+		"Required by: seed, sqlcx, user",
 		"db/migrations/<version>_create_items.sql",
 		"internal/di/migrate_provider.go",
 		"when loom",

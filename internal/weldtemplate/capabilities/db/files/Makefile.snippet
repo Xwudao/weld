@@ -4,8 +4,13 @@
 # The sqlc generator and the goose migration tool are pinned in the nested
 # db/tools module, so their large dependency graphs never enter the application
 # go.mod. Both tools run from db/tools; -dir is relative to that directory.
+# SQLC_GENERATE is the generator command; a capability that extends sqlc
+# (sqlcx) assigns it again further down this region, and the later assignment
+# wins because make expands the recipe only when it runs.
+SQLC_GENERATE = cd db/tools && go tool sqlc generate -f ../../sqlc.yaml
+
 sqlc: ## Regenerate internal/data/sqlc from db/migrations and db/query
-	cd db/tools && go tool sqlc generate -f ../../sqlc.yaml
+	$(SQLC_GENERATE)
 
 # require-dsn refuses to run when DATABASE_URL is unset or empty. Without it
 # goose would silently fall back to a local database, so the guard is not

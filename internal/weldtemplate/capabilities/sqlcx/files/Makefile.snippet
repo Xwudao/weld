@@ -1,0 +1,5 @@
+# weld:sqlcx:installed __version__
+# sqlc.yaml names the sqlc-dynamic plugin, so plain sqlc can no longer generate
+# on its own: sqlc-dynamic runs the sqlc pinned beside it in tools/sqlcx with
+# itself on PATH, then writes internal/data/sqlc/dynamic/sqlcx_gen.go.
+SQLC_GENERATE = cd tools/sqlcx && go tool sqlc-dynamic generate -f ../../sqlc.yaml

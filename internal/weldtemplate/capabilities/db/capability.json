@@ -1,11 +1,11 @@
 {
   "name": "db",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "kind": "add",
   "summary": "PostgreSQL persistence: SQL migrations and queries, sqlc-generated code, an injectable pool and repository, plus optional startup migration from the embedded db/migrations files.",
   "requires": ["loom"],
   "files": [
-    { "path": "sqlc.yaml", "source": "files/sqlc.yaml" },
+    { "path": "sqlc.yaml", "source": "files/sqlc.yaml", "role": "patched" },
     { "path": "db/embed.go", "source": "files/embed.go" },
     { "path": "db/migrations/create_items.sql", "source": "files/migrations/create_items.sql", "versioned": true },
     { "path": "db/query/items.sql", "source": "files/query/items.sql" },
@@ -30,5 +30,15 @@
     { "path": "Makefile", "marker": "db", "source": "files/Makefile.snippet" },
     { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
     { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" }
+  ],
+  "changes": [
+    {
+      "version": "0.4.0",
+      "summary": "sqlc.yaml gains the weld:sqlcplugins and weld:sqlccodegen marker regions and is now a patched file, and make sqlc runs $(SQLC_GENERATE), so the sqlcx capability can add the sqlc-dynamic plugin and switch the generator",
+      "actions": [
+        "in the Makefile weld:db region, add `SQLC_GENERATE = cd db/tools && go tool sqlc generate -f ../../sqlc.yaml` above the sqlc target and change the sqlc recipe to `$(SQLC_GENERATE)`",
+        "if sqlc.yaml was edited by hand, add `# weld:sqlcplugins:begin` / `# weld:sqlcplugins:end` after `version: \"2\"` and `# weld:sqlccodegen:begin` / `# weld:sqlccodegen:end` at the end of the first sql entry (indented like its keys)"
+      ]
+    }
   ]
 }

@@ -1,0 +1,57 @@
+package data
+
+import (
+	"context"
+	"testing"
+
+	"__module__/internal/testdb"
+)
+
+// TestSearchItemsIntegration runs SearchItems against a real PostgreSQL
+// server. Like TestPostgresRepositoryIntegration it runs only when a test
+// database is configured (database_test in config.yml or PG_TEST_DSN), in a
+// throwaway schema that testdb.Pool drops afterwards.
+func TestSearchItemsIntegration(t *testing.T) {
+	pool := testdb.Pool(t)
+	ctx := context.Background()
+
+	repository := NewRepository(pool)
+	for _, item := range []Item{
+		{ID: "a", Name: "red widget", Quantity: 5, Status: "active"},
+		{ID: "b", Name: "blue widget", Quantity: 1, Status: "active"},
+		{ID: "c", Name: "50% off widget", Quantity: 9, Status: "draft"},
+		{ID: "d", Name: "gadget", Quantity: 7, Status: "active"},
+	} {
+		if _, err := repository.CreateItem(ctx, item); err != nil {
+			t.Fatalf("CreateItem %s: %v", item.ID, err)
+		}
+	}
+
+	ids := func(items []Item) string {
+		var out string
+		for _, item := range items {
+			out += item.ID
+		}
+		return out
+	}
+	cases := []struct {
+		name   string
+		filter ItemFilter
+		ids    string
+		total  int64
+	}{
+		{name: "everything", filter: ItemFilter{}, ids: "abcd", total: 4},
+		{name: "status and quantity", filter: ItemFilter{Status: "active", MinQuantity: 2}, ids: "ad", total: 2},
+		{name: "name with a literal wildcard", filter: ItemFilter{NameContains: "50%"}, ids: "c", total: 1},
+		{name: "second page newest first", filter: ItemFilter{NameContains: "widget", NewestFirst: true, Page: 2, PageSize: 2}, ids: "a", total: 3},
+	}
+	for _, c := range cases {
+		items, total, err := SearchItems(ctx, pool, c.filter)
+		if err != nil {
+			t.Fatalf("%s: SearchItems: %v", c.name, err)
+		}
+		if got := ids(items); got != c.ids || total != c.total {
+			t.Fatalf("%s: got %q (total %d), want %q (total %d)", c.name, got, total, c.ids, c.total)
+		}
+	}
+}

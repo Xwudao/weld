@@ -1,4 +1,6 @@
 version: "2"
+# weld:sqlcplugins:begin
+# weld:sqlcplugins:end
 sql:
   - engine: "postgresql"
     schema: "db/migrations"
@@ -9,3 +11,5 @@ sql:
         out: "internal/data/sqlc"
         sql_package: "pgx/v5"
         emit_empty_slices: true
+    # weld:sqlccodegen:begin
+    # weld:sqlccodegen:end

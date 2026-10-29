@@ -1,0 +1,8 @@
+# weld:sqlcx:installed __version__
+# sqlc-dynamic is the go-sqlcx codegen plugin. sqlc finds it on PATH, which
+# `make sqlc` and `weld gen sqlc` arrange by running sqlc through
+# `go tool sqlc-dynamic generate` from tools/sqlcx.
+plugins:
+  - name: sqlc-dynamic
+    process:
+      cmd: sqlc-dynamic

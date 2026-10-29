@@ -1,0 +1,48 @@
+package data
+
+import (
+	"fmt"
+	"testing"
+)
+
+// TestItemSearchBuildsOnlyTheSetFilters renders the SearchItems statement
+// without a database: unset filters leave the WHERE clause, and every value is
+// a bound parameter.
+func TestItemSearchBuildsOnlyTheSetFilters(t *testing.T) {
+	cases := []struct {
+		name   string
+		filter ItemFilter
+		sql    string
+		args   string
+	}{
+		{
+			name:   "no filter",
+			filter: ItemFilter{},
+			sql:    `SELECT_ALL ORDER BY "items"."created_at" ASC, "items"."id" ASC LIMIT $1 OFFSET $2`,
+			args:   "[20 0]",
+		},
+		{
+			name:   "every filter",
+			filter: ItemFilter{Status: "active", NameContains: "50%", MinQuantity: 2, NewestFirst: true, Page: 3, PageSize: 10},
+			sql:    `SELECT_ALL WHERE "items"."status" = $1 AND "items"."name" LIKE $2 AND "items"."quantity" >= $3 ORDER BY "items"."created_at" DESC, "items"."id" DESC LIMIT $4 OFFSET $5`,
+			args:   `[active %50\%% 2 10 20]`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sql, args, err := itemSearch(c.filter).Build()
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			want := selectAllItems + c.sql[len("SELECT_ALL"):]
+			if sql != want {
+				t.Fatalf("sql =\n%s\nwant\n%s", sql, want)
+			}
+			if got := fmt.Sprint(args); got != c.args {
+				t.Fatalf("args = %s, want %s", got, c.args)
+			}
+		})
+	}
+}
+
+const selectAllItems = `SELECT "items"."id", "items"."name", "items"."quantity", "items"."status", "items"."created_at" FROM "items"`

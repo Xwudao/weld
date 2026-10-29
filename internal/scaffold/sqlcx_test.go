@@ -1,0 +1,359 @@
+package scaffold
+
+import (
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/Xwudao/weld/internal/db"
+	"github.com/Xwudao/weld/internal/project"
+	"github.com/Xwudao/weld/internal/weldtemplate"
+)
+
+const sqlcxDynamicDir = "internal/data/sqlc/dynamic"
+
+var (
+	sqlcxToolOnce sync.Once
+	sqlcxToolErr  error
+)
+
+// requireSQLCXTool skips the test when the pinned sqlc-dynamic and sqlc cannot
+// be built (no network or module cache, or no Go 1.27 toolchain to switch to).
+// It builds both once from a copy of the shipped tools/sqlcx module, which is
+// exactly what installing the capability runs.
+func requireSQLCXTool(t *testing.T) {
+	t.Helper()
+	sqlcxToolOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "weld-sqlcx-tool-")
+		if err != nil {
+			sqlcxToolErr = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		for _, name := range []string{"go.mod", "go.sum"} {
+			source := "capabilities/sqlcx/files/tools/" + name
+			if name == "go.mod" {
+				source += ".tmpl"
+			}
+			raw, err := fs.ReadFile(weldtemplate.FS(), source)
+			if err != nil {
+				sqlcxToolErr = err
+				return
+			}
+			content := strings.ReplaceAll(string(raw), "__module__", testModule)
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+				sqlcxToolErr = err
+				return
+			}
+		}
+		cmd := exec.Command("go", "build", "-o", os.DevNull, "github.com/Xwudao/go-sqlcx/cmd/sqlc-dynamic", "github.com/sqlc-dev/sqlc/cmd/sqlc")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GOWORK=off")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			sqlcxToolErr = fmt.Errorf("build pinned sqlc-dynamic: %w\n%s", err, out)
+		}
+	})
+	if sqlcxToolErr != nil {
+		t.Skipf("cannot build the pinned sqlc-dynamic tool (network/module cache or Go 1.27 toolchain unavailable): %v", sqlcxToolErr)
+	}
+}
+
+func goDirectiveOf(t *testing.T, dir string) string {
+	t.Helper()
+	for _, line := range strings.Split(readFile(t, filepath.Join(dir, "go.mod")), "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 && fields[0] == "go" {
+			return fields[1]
+		}
+	}
+	t.Fatal("go.mod has no go directive")
+	return ""
+}
+
+// TestAddSQLCXRequiresDB proves sqlcx is not installed over a project without
+// the db capability unless the caller opts into its requirements.
+func TestAddSQLCXRequiresDB(t *testing.T) {
+	t.Parallel()
+	dir := create(t, t.TempDir())
+	_, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "sqlcx")
+	missing, ok := err.(*MissingRequirementsError)
+	if !ok {
+		t.Fatalf("Add sqlcx error = %v, want *MissingRequirementsError", err)
+	}
+	if got, want := strings.Join(missing.Missing, ","), "config,loom,db"; got != want {
+		t.Fatalf("missing = %q, want %q", got, want)
+	}
+}
+
+// TestAddSQLCXIsDryRunnable proves the plan names the tools module, the shared
+// file patches and the generator run without writing anything.
+func TestAddSQLCXIsDryRunnable(t *testing.T) {
+	t.Parallel()
+	dir := create(t, t.TempDir())
+	add(t, dir, "db")
+	before := snapshotTree(t, dir)
+
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "sqlcx")
+	if err != nil {
+		t.Fatalf("Add sqlcx: %v", err)
+	}
+	for _, path := range []string{"tools/sqlcx/go.mod", "tools/sqlcx/go.sum", "internal/data/items_search.go", "sqlc.yaml", "Makefile", "go.mod"} {
+		plannedOperation(t, result, path)
+	}
+	if !result.GenerateSQLC {
+		t.Fatal("the plan does not run the sqlc generator")
+	}
+	want := []string{sqlcxDynamicDir + "/sqlcx.manifest.json", sqlcxDynamicDir + "/sqlcx_gen.go"}
+	if strings.Join(result.SQLCOutputs, ",") != strings.Join(want, ",") {
+		t.Fatalf("SQLCOutputs = %v, want %v", result.SQLCOutputs, want)
+	}
+	if goMod := string(plannedOperation(t, result, "go.mod").Content); !strings.Contains(goMod, "\ngo 1.27\n") {
+		t.Fatalf("planned go.mod does not raise the floor to 1.27:\n%s", goMod)
+	}
+	after := snapshotTree(t, dir)
+	if len(after) != len(before) {
+		t.Fatal("planning wrote files")
+	}
+	for path, content := range before {
+		if after[path] != content {
+			t.Fatalf("planning changed %s", path)
+		}
+	}
+}
+
+// TestAddSQLCXGeneratesDynamicCode installs sqlcx over an existing db project
+// and proves the generator ran, the shared files gained the plugin, and the
+// project builds and tests; then `weld gen sqlc --check` goes through
+// sqlc-dynamic and finds the tree current.
+func TestAddSQLCXGeneratesDynamicCode(t *testing.T) {
+	t.Parallel()
+	requireSQLCXTool(t)
+	dir := create(t, t.TempDir())
+	add(t, dir, "db")
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "sqlcx")
+	if err != nil {
+		t.Fatalf("Add sqlcx: %v", err)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("Apply sqlcx: %v", err)
+	}
+
+	if got := goDirectiveOf(t, dir); got != "1.27" {
+		t.Fatalf("go directive = %s, want 1.27", got)
+	}
+	gen := readFile(t, filepath.Join(dir, sqlcxDynamicDir, "sqlcx_gen.go"))
+	for _, want := range []string{"Code generated by sqlc-dynamic", "package dynamic", "Items"} {
+		if !strings.Contains(gen, want) {
+			t.Fatalf("sqlcx_gen.go is missing %q:\n%s", want, gen)
+		}
+	}
+	sqlcYAML := readFile(t, filepath.Join(dir, "sqlc.yaml"))
+	for _, want := range []string{"cmd: sqlc-dynamic", "plugin: sqlc-dynamic", `out: "internal/data/sqlc/dynamic"`} {
+		if !strings.Contains(sqlcYAML, want) {
+			t.Fatalf("sqlc.yaml is missing %q:\n%s", want, sqlcYAML)
+		}
+	}
+	makefile := readFile(t, filepath.Join(dir, "Makefile"))
+	if !strings.Contains(makefile, "SQLC_GENERATE = cd tools/sqlcx && go tool sqlc-dynamic generate -f ../../sqlc.yaml") {
+		t.Fatalf("Makefile does not switch the generator:\n%s", makefile)
+	}
+
+	// Generator output is the only drift: every file weld wrote still matches
+	// its record, and the patched sqlc.yaml keeps its db ownership.
+	manifest := mustLoad(t, dir)
+	for _, item := range manifest.Drift(dir) {
+		if !strings.HasPrefix(item.Path, sqlcOutputDir+"/") {
+			t.Errorf("unexpected drift after add sqlcx: %+v", item)
+		}
+	}
+	if entry, ok := manifest.FileEntry("sqlc.yaml"); !ok || entry.Capability != "db" || entry.Role != project.RolePatched {
+		t.Errorf("sqlc.yaml record = %+v, want db-owned and patched", entry)
+	}
+	for _, path := range result.SQLCOutputs {
+		if _, ok := manifest.FileEntry(path); ok {
+			t.Errorf("generator output %s is recorded in the manifest", path)
+		}
+	}
+
+	if _, err := db.SQLC(db.SQLCRequest{Dir: dir, Check: true, Stdout: io.Discard, Stderr: io.Discard}); err != nil {
+		t.Fatalf("weld gen sqlc --check after install: %v", err)
+	}
+	if !buildAndTestGeneratedProject(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	runMake(t, dir, nil, "sqlc")
+}
+
+// TestAddSQLCXWithDependenciesAndLaterCapabilities installs sqlcx with its
+// requirements in one plan, then capabilities whose Go floor is lower in both
+// orders: the directive never drops below 1.27, and the Loom graph those
+// capabilities change is still generated for a 1.27 project.
+func TestAddSQLCXWithDependenciesAndLaterCapabilities(t *testing.T) {
+	t.Parallel()
+	requireSQLCXTool(t)
+
+	after := create(t, t.TempDir())
+	result := add(t, after, "sqlcx")
+	if got, want := strings.Join(result.Installed, ","), "config,loom,db,sqlcx"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
+	}
+	add(t, after, "storage", "mail")
+	if got := goDirectiveOf(t, after); got != "1.27" {
+		t.Fatalf("storage and mail after sqlcx: go directive = %s, want 1.27", got)
+	}
+
+	before := create(t, t.TempDir())
+	add(t, before, "storage")
+	add(t, before, "sqlcx")
+	if got := goDirectiveOf(t, before); got != "1.27" {
+		t.Fatalf("sqlcx after storage: go directive = %s, want 1.27", got)
+	}
+
+	for _, dir := range []string{after, before} {
+		if !buildAndTestGeneratedProject(t, dir) {
+			t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+		}
+	}
+}
+
+// TestAddSQLCXCoversExistingTables proves the install-time generator run sees
+// every table the project already has, not only the db capability's demo.
+func TestAddSQLCXCoversExistingTables(t *testing.T) {
+	t.Parallel()
+	requireSQLCXTool(t)
+	dir := create(t, t.TempDir())
+	add(t, dir, "user")
+	add(t, dir, "sqlcx")
+	gen := readFile(t, filepath.Join(dir, filepath.FromSlash(sqlcxDynamicDir), "sqlcx_gen.go"))
+	if !strings.Contains(gen, "Users") {
+		t.Fatalf("sqlcx_gen.go does not cover the users table:\n%s", gen)
+	}
+	if !goModTidy(t, dir) {
+		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
+	}
+	goBuild(t, dir)
+}
+
+// TestAddSQLCXRollsBackWhenGenerationFails proves a failed generator run undoes
+// the whole install: the tools module, the generated directory and every
+// patched shared file are restored.
+func TestAddSQLCXRollsBackWhenGenerationFails(t *testing.T) {
+	t.Parallel()
+	dir := create(t, t.TempDir())
+	add(t, dir, "db")
+	writeProjectFile(t, dir, "db/query/broken.sql", "-- name: Broken :one\nSELECT FROM WHERE;\n")
+	before := snapshotTree(t, dir)
+
+	result, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "sqlcx")
+	if err != nil {
+		t.Fatalf("Add sqlcx: %v", err)
+	}
+	if err := result.Apply(); err == nil || !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("Apply with broken SQL = %v, want a rolled-back failure", err)
+	}
+	after := snapshotTree(t, dir)
+	for path, content := range before {
+		if after[path] != content {
+			t.Errorf("%s was not restored", path)
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; !ok {
+			t.Errorf("rollback left %s behind", path)
+		}
+	}
+}
+
+// TestUpgradeDBAddsTheSQLCExtensionPoints proves a db 0.3.0 project, whose
+// sqlc.yaml has no marker regions, gains them on upgrade, reads why from the
+// changelog, and can then install sqlcx.
+func TestUpgradeDBAddsTheSQLCExtensionPoints(t *testing.T) {
+	t.Parallel()
+	dir := create(t, t.TempDir())
+	add(t, dir, "db")
+	const old = `version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/query"
+    gen:
+      go:
+        package: "sqlc"
+        out: "internal/data/sqlc"
+        sql_package: "pgx/v5"
+        emit_empty_slices: true
+`
+	weldWrote(t, dir, "db", "sqlc.yaml", old)
+	downgrade(t, dir, "db", "0.3.0")
+	if _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "sqlcx"); err == nil || !strings.Contains(err.Error(), "weld:sqlcplugins") {
+		t.Fatalf("Add sqlcx over db 0.3.0 = %v, want a missing extension point", err)
+	}
+
+	result := upgrade(t, dir, []string{"db"}, false)
+	sqlcYAML := string(plannedOperation(t, result.Result, "sqlc.yaml").Content)
+	for _, want := range []string{"# weld:sqlcplugins:begin", "    # weld:sqlccodegen:end"} {
+		if !strings.Contains(sqlcYAML, want) {
+			t.Fatalf("upgraded sqlc.yaml is missing %q:\n%s", want, sqlcYAML)
+		}
+	}
+	var logged bool
+	for _, entry := range result.Changelog {
+		for _, change := range entry.Changes {
+			logged = logged || (entry.Capability == "db" && change.Version == "0.4.0")
+		}
+	}
+	if !logged {
+		t.Fatalf("changelog does not explain db 0.4.0: %+v", result.Changelog)
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if _, err := Add(Request{Dir: dir, Catalog: newCatalog()}, "sqlcx"); err != nil {
+		t.Fatalf("Add sqlcx after upgrading db: %v", err)
+	}
+}
+
+// TestUpgradeLoomReportsTheToolchainAwareGenerateRecipe proves a loom 0.8.0
+// project, whose Makefile seam builds the generator with whatever go is local,
+// is told to switch the recipe to the project's toolchain rather than having
+// its Makefile rewritten.
+func TestUpgradeLoomReportsTheToolchainAwareGenerateRecipe(t *testing.T) {
+	t.Parallel()
+	dir := create(t, t.TempDir())
+	add(t, dir, "loom")
+	const current = "cd tools/loom && GOTOOLCHAIN=$$(cd ../.. && go env GOVERSION) go build"
+	makefile := readFile(t, filepath.Join(dir, "Makefile"))
+	if !strings.Contains(makefile, current) {
+		t.Fatalf("Makefile does not build the generator with the project's toolchain:\n%s", makefile)
+	}
+	edited(t, dir, "Makefile", strings.Replace(makefile, current, "cd tools/loom && go build", 1))
+	downgrade(t, dir, "loom", "0.8.0")
+
+	result := upgrade(t, dir, []string{"loom"}, false)
+	var advised bool
+	for _, advisory := range result.Advisories {
+		advised = advised || (advisory.Path == "Makefile" && advisory.Marker == "loom" && strings.Contains(advisory.Snippet, current))
+	}
+	if !advised {
+		t.Fatalf("no Makefile advisory for the loom generate recipe: %+v", result.Advisories)
+	}
+	for _, operation := range result.Operations {
+		if operation.Path == "Makefile" {
+			t.Fatal("upgrade rewrote the Makefile seam")
+		}
+	}
+	var logged bool
+	for _, entry := range result.Changelog {
+		for _, change := range entry.Changes {
+			logged = logged || (entry.Capability == "loom" && change.Version == "0.9.0" && len(change.Actions) > 0)
+		}
+	}
+	if !logged {
+		t.Fatalf("changelog does not explain loom 0.9.0: %+v", result.Changelog)
+	}
+}

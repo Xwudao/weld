@@ -1,6 +1,6 @@
 {
   "name": "loom",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "kind": "add",
   "summary": "Compile-time dependency injection: one Loom graph wires the configuration, the logger and the installed bindings, and, once http is installed, the HTTP server and the business modules. Every added capability is a Loom project.",
   "requires": ["config"],
@@ -23,5 +23,14 @@
     { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
     { "path": "go.mod", "marker": "goversion", "mode": "replace", "source": "files/goversion.snippet" },
     { "path": "Makefile", "marker": "loom", "source": "files/Makefile.snippet" }
+  ],
+  "changes": [
+    {
+      "version": "0.9.0",
+      "summary": "make generate builds the Loom generator with the toolchain the project's go.mod selects, so a project whose Go floor is newer than the local go (sqlcx raises it to 1.27) still generates",
+      "actions": [
+        "in the Makefile weld:loom region, change the generate recipe's build line to `cd tools/loom && GOTOOLCHAIN=$$(cd ../.. && go env GOVERSION) go build -o ../../bin/loom-gen github.com/Xwudao/loom/cmd/loom`"
+      ]
+    }
   ]
 }

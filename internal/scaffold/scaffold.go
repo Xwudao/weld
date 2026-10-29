@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,6 +35,51 @@ const (
 	goModPath = "go.mod"
 	goSumPath = "go.sum"
 )
+
+// goVersionMarker is the go.mod region holding the go directive. Capabilities
+// replace it to raise the project's toolchain floor.
+const goVersionMarker = "goversion"
+
+// keepsGoFloor reports whether the go directive already in original's
+// goversion region is at least the one snippet declares. Several capabilities
+// replace that region with their own floor, so without this check whichever
+// was installed last would decide the floor, and installing a capability that
+// needs an older Go could lower the directive below what another one requires.
+// A region without a go directive is replaced as usual.
+func keepsGoFloor(original, snippet []byte) (bool, error) {
+	regions, _, err := project.MarkerRegions(original)
+	if err != nil {
+		return false, err
+	}
+	body, ok := regions[goVersionMarker]
+	if !ok {
+		return false, nil
+	}
+	current, ok := goDirective(body)
+	if !ok {
+		return false, nil
+	}
+	wanted, ok := goDirective(strings.Split(string(snippet), "\n"))
+	if !ok {
+		return false, fmt.Errorf("the %s snippet declares no go directive", goVersionMarker)
+	}
+	order, err := semver.Compare(current, wanted)
+	if err != nil {
+		return false, fmt.Errorf("compare go directives %q and %q: %w", current, wanted, err)
+	}
+	return order >= 0, nil
+}
+
+// goDirective returns the version of the first go directive among lines.
+func goDirective(lines []string) (string, bool) {
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "go" {
+			return fields[1], true
+		}
+	}
+	return "", false
+}
 
 // Request describes a scaffold action.
 type Request struct {
@@ -147,12 +193,26 @@ func (r *Result) Apply() (err error) {
 	}
 	if r.GenerateSQLC {
 		// sqlc rewrites every file in its output directory, so all of them are
-		// captured, plus the files this run is expected to create.
-		existing, err := filesIn(r.Dir, sqlcOutputDir)
-		if err != nil {
-			return err
+		// captured, plus the files this run is expected to create and whatever
+		// already sits beside them (a codegen plugin writes its own directory).
+		// Loading the generated packages may also settle go.mod and go.sum.
+		dirs := []string{sqlcOutputDir}
+		for _, output := range r.SQLCOutputs {
+			if dir := path.Dir(output); !slices.Contains(dirs, dir) {
+				dirs = append(dirs, dir)
+			}
 		}
-		paths = append(append(paths, existing...), r.SQLCOutputs...)
+		for _, dir := range dirs {
+			existing, err := filesIn(r.Dir, dir)
+			if err != nil {
+				return err
+			}
+			paths = append(paths, existing...)
+		}
+		paths = append(paths, r.SQLCOutputs...)
+		if !r.GenerateLoom {
+			paths = append(paths, goModPath, goSumPath)
+		}
 	}
 	snapshot, err := project.TakeSnapshot(r.Dir, paths)
 	if err != nil {
@@ -346,6 +406,8 @@ func CreateWith(req Request, names ...string) (*Result, error) {
 		Notes:        added.Notes,
 		GenerateLoom: added.GenerateLoom,
 		DIPackage:    added.DIPackage,
+		GenerateSQLC: added.GenerateSQLC,
+		SQLCOutputs:  added.SQLCOutputs,
 		Verify:       req.Verify,
 		NewDir:       true,
 	}
@@ -537,6 +599,14 @@ func (p *planner) installCapability(capability *template.Capability) error {
 		}
 	}
 	p.manifest.AddCapability(project.CapabilityRef{Name: capability.Name, Version: capability.Version})
+	if len(capability.Generates) > 0 {
+		p.result.GenerateSQLC = true
+		for _, output := range capability.Generates {
+			if !slices.Contains(p.result.SQLCOutputs, output) {
+				p.result.SQLCOutputs = append(p.result.SQLCOutputs, output)
+			}
+		}
+	}
 	for _, note := range capability.PostInstall {
 		p.result.Notes = append(p.result.Notes, string(template.Render([]byte(note), vars)))
 	}
@@ -558,6 +628,15 @@ func (p *planner) applyPatch(capability *template.Capability, patch template.Pat
 		return err
 	}
 	rendered := template.Render(snippet, vars)
+	if patch.Path == goModPath && patch.Marker == goVersionMarker && patch.Mode == "replace" {
+		keep, err := keepsGoFloor(original, rendered)
+		if err != nil {
+			return &project.ConflictError{Path: patch.Path, Reason: err.Error()}
+		}
+		if keep {
+			return nil
+		}
+	}
 	var updated []byte
 	var already bool
 	if patch.Mode == "replace" {
