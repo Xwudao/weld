@@ -68,5 +68,5 @@ func itemSearch(filter ItemFilter) sqlcx.Select[sqlc.Item] {
 			t.Quantity.Gte(int32(filter.MinQuantity)).If(filter.MinQuantity > 0),
 		).
 		OrderBy(t.CreatedAt.Sort(filter.NewestFirst), t.ID.Sort(filter.NewestFirst)).
-		Page(int64(filter.Page), int64(size))
+		Page(filter.Page, size)
 }
