@@ -20,7 +20,9 @@ development server side by side.
 Settings come from the optional weld.yml (dev.backend, dev.frontend) with
 defaults derived from the installed capabilities: the backend runs ` + "`go run .`" + `
 (which serves once http is installed) and the frontend runs ` + "`pnpm run dev`" + ` in
-web/. Ctrl-C stops both. Control commands on stdin: rs backend|b,
+web/. Configure dev.backend.watch globs for automatic backend restarts and
+watch_exclude to ignore matching files. ** matches any directory depth.
+Ctrl-C stops both. Control commands on stdin: rs backend|b,
 rs frontend|f, rs all|a, o (open), status|st, help|h, quit.`,
 		Args: cobra.NoArgs,
 		RunE: runDev,

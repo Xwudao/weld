@@ -85,6 +85,11 @@ type DevBackendConfig struct {
 	// Args are appended to the default backend command (and ignored when Cmd is
 	// set).
 	Args []string `yaml:"args"`
+	// Watch contains project-relative globs that trigger a backend restart.
+	// Empty disables watching; ** matches zero or more directory levels.
+	Watch []string `yaml:"watch"`
+	// WatchExclude contains globs excluded from Watch.
+	WatchExclude []string `yaml:"watch_exclude"`
 }
 
 // DevFrontendConfig holds the frontend process of `weld dev`.
@@ -282,6 +287,8 @@ func (c *Config) EffectiveDev() DevConfig {
 	if len(c.Dev.Backend.Args) > 0 {
 		cfg.Backend.Args = append([]string(nil), c.Dev.Backend.Args...)
 	}
+	cfg.Backend.Watch = append([]string(nil), c.Dev.Backend.Watch...)
+	cfg.Backend.WatchExclude = append([]string(nil), c.Dev.Backend.WatchExclude...)
 	if c.Dev.Frontend.Dir != "" {
 		cfg.Frontend.Dir = c.Dev.Frontend.Dir
 	}
@@ -438,6 +445,12 @@ dev:
     # cmd: "go run ./cmd/app serve"
     # Appended to the default command (ignored when cmd is set).
     # args: []
+    # Opt-in auto-restart on file creation, content change or deletion.
+    # Globs are relative to the project; ** matches any directory depth.
+    # watch: ["**/*.go", "go.mod", "go.sum", "config.yml"]
+    # watch_exclude: ["**/*_test.go", "internal/web/dist/**"]
+    # Polls every 250ms, debounces saves for 300ms. .git, .weld and
+    # node_modules directories are always skipped; symlinks are not followed.
   frontend:
     dir: web
     pm: pnpm

@@ -124,6 +124,28 @@ both; control commands on stdin restart or open either side
 (`rs backend|b`, `rs frontend|f`, `rs all|a`, `o`, `status|st`, `help|h`,
 `quit`).
 
+Opt into backend auto-restart in the user-owned `weld.yml`:
+
+```yaml
+dev:
+  backend:
+    watch: ["**/*.go", "go.mod", "go.sum", "config.yml"]
+    watch_exclude: ["**/*_test.go", "internal/web/dist/**"]
+```
+
+Globs use project-relative paths with `/` separators: `*`, `?` and `[abc]`
+match within one path segment; a standalone `**` matches zero or more directory
+levels (so `**/*.go` includes root-level Go files). Exclusions win over watch
+patterns. Empty or omitted `watch` disables automatic restarts. File creation,
+content changes, deletion and renames are detected by polling every 250ms;
+300ms of quiet coalesces consecutive saves into one restart. Only the backend
+restarts, including when it previously failed to start or exited; the frontend
+continues running. `.git`, `.weld` and `node_modules` directories are always
+skipped, and symlinks are not followed. Prefer narrow globs for large projects;
+exclude build outputs to avoid restart loops. Changes to these settings require
+relaunching `weld dev`. Watching does not run code generators or lifecycle hooks
+on each restart; the normal `dev.pre` / `dev.post` hooks still wrap the session.
+
 `weld build` builds the frontend first when the web capability is installed and
 then cross-compiles the Go binary for every configured target. It is the
 release path; `make build` stays available as the self-contained, no-weld

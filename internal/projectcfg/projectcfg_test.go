@@ -67,6 +67,33 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestDevWatchSettings(t *testing.T) {
+	dir := writeConfig(t, `version: 1
+dev:
+  backend:
+    watch: ["**/*.go", "config.yml"]
+    watch_exclude: ["**/*_test.go"]
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := cfg.EffectiveDev()
+	if len(dev.Backend.Watch) != 2 || dev.Backend.Watch[0] != "**/*.go" ||
+		len(dev.Backend.WatchExclude) != 1 || dev.Backend.WatchExclude[0] != "**/*_test.go" {
+		t.Fatalf("watch settings = %+v", dev.Backend)
+	}
+	dev.Backend.Watch[0] = "changed"
+	dev.Backend.WatchExclude[0] = "changed"
+	if cfg.Dev.Backend.Watch[0] != "**/*.go" || cfg.Dev.Backend.WatchExclude[0] != "**/*_test.go" {
+		t.Fatal("EffectiveDev aliased watch settings")
+	}
+	var absent *Config
+	if got := absent.EffectiveDev(); len(got.Backend.Watch) != 0 {
+		t.Fatalf("watch enabled by default: %+v", got)
+	}
+}
+
 func TestBuildSettings(t *testing.T) {
 	dir := writeConfig(t, `
 version: 1

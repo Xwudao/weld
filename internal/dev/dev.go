@@ -87,10 +87,17 @@ func Run(req Request) error {
 		return err
 	}
 
+	cfg := req.Config.EffectiveDev()
+	watcher, err := newFileWatcher(req.Dir, cfg.Backend.Watch, cfg.Backend.WatchExclude)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	supervisor := newSupervisor(ctx, specs, stdin, stdout, stderr)
+	supervisor.watcher = watcher
 	return supervisor.run()
 }
 
@@ -191,6 +198,7 @@ type supervisor struct {
 
 	shuttingDown bool
 	frontendURL  string
+	watcher      *fileWatcher
 }
 
 func newSupervisor(ctx context.Context, specs []spec, stdin io.Reader, stdout, stderr io.Writer) *supervisor {
@@ -219,6 +227,14 @@ func newSupervisor(ctx context.Context, specs []spec, stdin io.Reader, stdout, s
 }
 
 func (s *supervisor) run() error {
+	defer s.cancel()
+	var ticks <-chan time.Time
+	if s.watcher != nil {
+		ticker := time.NewTicker(watchInterval)
+		defer ticker.Stop()
+		ticks = ticker.C
+		s.message("watching backend files (auto-restart enabled)")
+	}
 	for _, name := range s.order {
 		if err := s.start(name); err != nil {
 			s.message(fmt.Sprintf("failed to start %s: %v", name, err))
@@ -241,6 +257,20 @@ func (s *supervisor) run() error {
 				continue
 			}
 			s.handle(line)
+		case <-ticks:
+			changed, err := s.watcher.poll(time.Now())
+			if err != nil {
+				s.message(err.Error())
+				continue
+			}
+			if changed {
+				// An earlier restart may still have an exit event queued.
+				// That restart will pick up these changes without stopping twice.
+				if !s.processes[backendName].restarting {
+					s.message("watched files changed, restarting backend")
+					_ = s.restart(backendName)
+				}
+			}
 		case event := <-s.exits:
 			s.handleExit(event)
 			if s.shuttingDown {
