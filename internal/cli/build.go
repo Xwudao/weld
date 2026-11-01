@@ -70,11 +70,14 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		if cfg != nil && len(cfg.Build.Targets) > 1 {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: --docker builds one image on --platform and ignores build.targets\n")
 		}
+		if cfg != nil && len(cfg.Build.Env) > 0 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: --docker does not pass build.env into the image build; only build hooks receive it\n")
+		}
 		image, _ := cmd.Flags().GetString("image")
 		dockerfile, _ := cmd.Flags().GetString("dockerfile")
 		platform, _ := cmd.Flags().GetString("platform")
 		dry, _ := cmd.Flags().GetBool("dry-run")
-		buildEnv := []string{"WELD_BUILD_OUTPUT=" + cfg.Output()}
+		buildEnv := buildHookEnv(cfg)
 		if err := runHooks(cmd, cfg, hook.EventBuildPre, dry, buildEnv...); err != nil {
 			return err
 		}
@@ -95,12 +98,18 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	return err
 }
 
+// buildHookEnv returns the environment of the build.pre and build.post hooks:
+// build.env, then the WELD_* value it must not override.
+func buildHookEnv(cfg *projectcfg.Config) []string {
+	return append(cfg.BuildEnv(), "WELD_BUILD_OUTPUT="+cfg.Output())
+}
+
 // buildHost runs the host build with its build.pre and build.post hooks and
 // reports what it built. It is `weld build` without --docker, shared with
 // `weld release` so a release builds exactly what a build does.
 func buildHost(cmd *cobra.Command, dir, name string, cfg *projectcfg.Config, webInstalled bool) (*build.Result, error) {
 	stdout := cmd.OutOrStdout()
-	buildEnv := []string{"WELD_BUILD_OUTPUT=" + cfg.Output()}
+	buildEnv := buildHookEnv(cfg)
 	if err := runHooks(cmd, cfg, hook.EventBuildPre, false, buildEnv...); err != nil {
 		return nil, err
 	}

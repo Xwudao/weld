@@ -151,6 +151,25 @@ then cross-compiles the Go binary for every configured target. It is the
 release path; `make build` stays available as the self-contained, no-weld
 fallback.
 
+`build.env` in `weld.yml` injects environment into the frontend install and
+build, `go build` and the `build.pre`/`build.post` hooks, so a setting can apply
+to a weld build without affecting a bare `pnpm build`:
+
+```yaml
+build:
+  env:
+    S3_PUBLISH_ENABLED: "true"
+    VITE_BUILD_HASH: "${git_hash}"
+```
+
+It also applies to the builds `weld deploy` and `weld release` run. A value
+overrides the inherited environment; `build.targets` and `build.cgo` still win
+over `GOOS`, `GOARCH` and `CGO_ENABLED`. Values expand the `build.ldflags`
+placeholders and `${VAR}` from the process environment, with no escape for a
+literal `$`, so reference secrets rather than committing them. `weld build
+--docker` does not pass `build.env` into the image build; it warns and gives the
+values only to the hooks.
+
 `weld new <name> --with http,db` creates the project with those capabilities
 (and their requirements) already installed. It is exactly `weld new` followed
 by `weld add http db` — the same files, bytes and manifest — but built as one
@@ -1971,7 +1990,8 @@ after the platform check, so a step can be both platform- and capability-gated.
 - **A hook inherits the environment**, with the step's `env` and a set of
   `WELD_*` variables overlaid: `WELD_COMMAND`, `WELD_EVENT`, `WELD_DIR`,
   `WELD_VERSION`, `WELD_PROJECT`, plus `WELD_BUILD_OUTPUT`, `WELD_DEPLOY_HOST` /
-  `WELD_DEPLOY_TARGET` and `WELD_SEED_TAG` for the matching command.
+  `WELD_DEPLOY_TARGET` and `WELD_SEED_TAG` for the matching command. Build hooks
+  also receive `build.env`.
 - **dry-run is truthful.** `weld deploy --dry-run` and `weld build --docker
   --dry-run` print the hook steps they would run instead of running them. A
   command that ignores `--dry-run` (plain `weld build`, `weld dev`, `weld seed`)

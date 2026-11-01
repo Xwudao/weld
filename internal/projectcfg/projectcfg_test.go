@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -124,6 +125,36 @@ build:
 	}
 	if targets := cfg.Targets(); len(targets) != 2 || targets[1].OS != "windows" {
 		t.Errorf("Targets = %+v", targets)
+	}
+}
+
+func TestBuildEnv(t *testing.T) {
+	t.Setenv("WELD_TEST_TOKEN", "from-shell")
+	dir := writeConfig(t, `
+build:
+  env:
+    S3_PUBLISH_ENABLED: true
+    TOKEN: "${WELD_TEST_TOKEN}"
+    GO: "${go_version}"
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GO=" + runtime.Version(), "S3_PUBLISH_ENABLED=true", "TOKEN=from-shell"}
+	if got := cfg.BuildEnv(); !reflect.DeepEqual(got, want) {
+		t.Errorf("BuildEnv = %v, want %v", got, want)
+	}
+	var none *Config
+	if got := none.BuildEnv(); got != nil {
+		t.Errorf("nil config BuildEnv = %v", got)
+	}
+}
+
+func TestLoadRejectsInvalidBuildEnvName(t *testing.T) {
+	dir := writeConfig(t, "build:\n  env:\n    \"A=B\": x\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "build.env") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

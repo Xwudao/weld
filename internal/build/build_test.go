@@ -100,6 +100,35 @@ func TestBuildRunsWebFirst(t *testing.T) {
 	}
 }
 
+func TestBuildEnvReachesEveryCommand(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &projectcfg.Config{Build: projectcfg.BuildConfig{
+		Cgo:     boolPtr(false),
+		Targets: []projectcfg.Target{{OS: "linux", Arch: "amd64"}},
+		Env:     map[string]string{"S3_PUBLISH_ENABLED": "true", "GOOS": "windows", "CGO_ENABLED": "1"},
+	}}
+	var calls []call
+	if _, err := Run(Request{Dir: dir, Name: "demo", Config: cfg, WebInstalled: true, Runner: recorder(&calls)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("calls = %d, want 3", len(calls))
+	}
+	for _, c := range calls {
+		if !contains(c.env, "S3_PUBLISH_ENABLED=true") {
+			t.Errorf("%s %v env = %v", c.name, c.args, c.env)
+		}
+	}
+	// exec keeps the last duplicate, so the configured settings must follow build.env.
+	goEnv := calls[2].env
+	if last := goEnv[len(goEnv)-3:]; !reflect.DeepEqual(last, []string{"GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0"}) {
+		t.Errorf("go build env = %v", goEnv)
+	}
+}
+
 func TestBuildWebMissingDirectory(t *testing.T) {
 	_, err := Run(Request{Dir: t.TempDir(), WebInstalled: true, Runner: func(string, string, []string, ...string) error { return nil }})
 	if err == nil {

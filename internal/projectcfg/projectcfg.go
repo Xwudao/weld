@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -74,6 +75,10 @@ type BuildConfig struct {
 	Cgo *bool `yaml:"cgo"`
 	// Ldflags injects variables with -ldflags -X.
 	Ldflags []Ldflag `yaml:"ldflags"`
+	// Env is extra environment for the frontend and Go build commands and the
+	// build hooks. Values expand the same placeholders as Ldflags and may
+	// reference the process environment with ${VAR}.
+	Env map[string]string `yaml:"env"`
 }
 
 // DevBackendConfig holds the backend process of `weld dev`.
@@ -172,6 +177,11 @@ func Load(dir string) (*Config, error) {
 	if err := cfg.validateHooks(); err != nil {
 		return nil, err
 	}
+	for key := range cfg.Build.Env {
+		if key == "" || strings.Contains(key, "=") {
+			return nil, fmt.Errorf("weld.yml: build.env has invalid variable name %q", key)
+		}
+	}
 	return cfg, nil
 }
 
@@ -255,6 +265,24 @@ func (c *Config) GoBuildEnv() []string {
 		return []string{"CGO_ENABLED=1"}
 	}
 	return []string{"CGO_ENABLED=0"}
+}
+
+// BuildEnv returns build.env as KEY=VALUE pairs in a stable key order, with
+// placeholders expanded at call time. It returns nil when none are configured.
+func (c *Config) BuildEnv() []string {
+	if c == nil || len(c.Build.Env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(c.Build.Env))
+	for key := range c.Build.Env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
+		env = append(env, key+"="+expandVars(c.Build.Env[key]))
+	}
+	return env
 }
 
 // BuildLdflags returns the -ldflags value for `go build`, or "" when no
@@ -437,6 +465,14 @@ build:
   #   - package: example.com/app/internal/app
   #     vars:
   #       Version: "${git_tag}"
+  # Extra environment for the frontend and Go builds and the build hooks. It
+  # overrides the inherited environment and applies to weld build, deploy and
+  # release, not to a bare package manager build. Values take the placeholders
+  # above and ${VAR}; keep secrets out of this file. --docker does not pass it
+  # into the image build.
+  # env:
+  #   S3_PUBLISH_ENABLED: "true"
+  #   VITE_BUILD_HASH: "${git_hash}"
 
 dev:
   backend:

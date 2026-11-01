@@ -70,9 +70,12 @@ func Run(req Request) (*Result, error) {
 		}
 	}
 
+	// Expanded once, so ${timestamp} and friends agree across every command.
+	userEnv := cfg.BuildEnv()
+
 	result := &Result{}
 	if cfg.WebEnabled(req.WebInstalled) {
-		if err := buildWeb(cfg, runner, req.Dir); err != nil {
+		if err := buildWeb(cfg, runner, req.Dir, userEnv); err != nil {
 			return nil, err
 		}
 		result.WebBuilt = true
@@ -82,7 +85,10 @@ func Run(req Request) (*Result, error) {
 	single := len(targets) == 1
 	for _, target := range targets {
 		out := binaryName(outputDir, name, target, single)
-		env := []string{"GOOS=" + target.OS, "GOARCH=" + target.Arch}
+		// The target and cgo settings come last: the last duplicate wins, so
+		// build.env cannot silently redirect a configured target.
+		env := append([]string{}, userEnv...)
+		env = append(env, "GOOS="+target.OS, "GOARCH="+target.Arch)
 		env = append(env, cfg.GoBuildEnv()...)
 		args := []string{"build", "-trimpath"}
 		if tags := cfg.BuildTags(); tags != "" {
@@ -116,7 +122,7 @@ func binaryName(outputDir, name string, target projectcfg.Target, single bool) s
 
 // buildWeb runs the package manager's install and build in the frontend
 // directory. It mirrors the generated Makefile's web-build target.
-func buildWeb(cfg *projectcfg.Config, runner Runner, dir string) error {
+func buildWeb(cfg *projectcfg.Config, runner Runner, dir string, env []string) error {
 	frontend := cfg.EffectiveDev().Frontend
 	webDir := filepath.Join(dir, frontend.Dir)
 	info, err := os.Stat(webDir)
@@ -127,10 +133,10 @@ func buildWeb(cfg *projectcfg.Config, runner Runner, dir string) error {
 	if pm == "" {
 		pm = "pnpm"
 	}
-	if err := runner(pm, webDir, nil, "install"); err != nil {
+	if err := runner(pm, webDir, env, "install"); err != nil {
 		return fmt.Errorf("%s install: %w", pm, err)
 	}
-	if err := runner(pm, webDir, nil, "run", "build"); err != nil {
+	if err := runner(pm, webDir, env, "run", "build"); err != nil {
 		return fmt.Errorf("%s run build: %w", pm, err)
 	}
 	return nil
