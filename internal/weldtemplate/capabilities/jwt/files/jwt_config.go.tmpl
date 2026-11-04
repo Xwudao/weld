@@ -23,7 +23,7 @@ import (
 // than signing with an invented key.
 const (
 	DefaultJWTIssuer        = "__name__"
-	DefaultJWTTTLSeconds    = 900
+	DefaultJWTTTL           = 15 * time.Minute
 	DefaultJWTLeewaySeconds = 30
 	// MinJWTSecretBytes is the minimum HS256 key length. A shorter shared secret
 	// is brute-forceable, so configuration validation rejects it instead of
@@ -36,22 +36,30 @@ const (
 	EnvJWTSecret        = "JWT_SECRET"
 	EnvJWTIssuer        = "JWT_ISSUER"
 	EnvJWTAudience      = "JWT_AUDIENCE"
-	EnvJWTTTLSeconds    = "JWT_TTL_SECONDS"
+	EnvJWTTTL           = "JWT_TTL"
 	EnvJWTLeewaySeconds = "JWT_LEEWAY_SECONDS"
+	// EnvJWTTTLSeconds is the deprecated integer form of EnvJWTTTL, which wins
+	// when both are set.
+	EnvJWTTTLSeconds = "JWT_TTL_SECONDS"
 )
 
 // JWT holds the bearer-token settings.
 //
 // Secret is a Secret so it cannot reach a log, a formatted dump, JSON or YAML.
 // The value is read only when a token manager is built. Issuer is required and
-// is written into every token, audience is optional, and the TTL and leeway are
-// integer seconds so the YAML file needs no custom duration syntax.
+// is written into every token, audience is optional, the TTL is a Go duration
+// string such as "120h", and the leeway is integer seconds.
+//
+// LegacyTTLSeconds reads the deprecated ttl_seconds key so a deployed config.yml
+// keeps its lifetime: the loader ignores unknown keys, so dropping the key would
+// silently shorten every session to the default. ttl wins when both are set.
 type JWT struct {
-	Secret        Secret `yaml:"secret"`
-	Issuer        string `yaml:"issuer"`
-	Audience      string `yaml:"audience"`
-	TTLSeconds    int    `yaml:"ttl_seconds"`
-	LeewaySeconds int    `yaml:"leeway_seconds"`
+	Secret           Secret        `yaml:"secret"`
+	Issuer           string        `yaml:"issuer"`
+	Audience         string        `yaml:"audience"`
+	TTL              time.Duration `yaml:"ttl"`
+	LegacyTTLSeconds int           `yaml:"ttl_seconds,omitempty"`
+	LeewaySeconds    int           `yaml:"leeway_seconds"`
 }
 
 // applyJWTEnv overrides the JWT section with the environment. A variable that
@@ -59,6 +67,9 @@ type JWT struct {
 // silent fallback. The secret is intentionally not length-checked here: installing
 // jwt must not require a secret until a token manager is actually constructed.
 func (c *Config) applyJWTEnv(lookupEnv LookupEnvFunc) error {
+	if c.JWT.TTL == 0 {
+		c.JWT.TTL = time.Duration(c.JWT.LegacyTTLSeconds) * time.Second
+	}
 	if value, ok := lookupEnv(EnvJWTSecret); ok {
 		c.JWT.Secret = Secret(value)
 	}
@@ -77,7 +88,14 @@ func (c *Config) applyJWTEnv(lookupEnv LookupEnvFunc) error {
 		if err != nil {
 			return fmt.Errorf("config: %s is not a number", EnvJWTTTLSeconds)
 		}
-		c.JWT.TTLSeconds = seconds
+		c.JWT.TTL = time.Duration(seconds) * time.Second
+	}
+	if value, ok := lookupEnv(EnvJWTTTL); ok {
+		ttl, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: %s is not a duration", EnvJWTTTL)
+		}
+		c.JWT.TTL = ttl
 	}
 	if value, ok := lookupEnv(EnvJWTLeewaySeconds); ok {
 		seconds, err := strconv.Atoi(strings.TrimSpace(value))
@@ -95,8 +113,8 @@ func (c *Config) applyJWTDefaults() {
 	if strings.TrimSpace(c.JWT.Issuer) == "" {
 		c.JWT.Issuer = DefaultJWTIssuer
 	}
-	if c.JWT.TTLSeconds == 0 {
-		c.JWT.TTLSeconds = DefaultJWTTTLSeconds
+	if c.JWT.TTL == 0 {
+		c.JWT.TTL = DefaultJWTTTL
 	}
 	if c.JWT.LeewaySeconds == 0 {
 		c.JWT.LeewaySeconds = DefaultJWTLeewaySeconds
@@ -105,7 +123,7 @@ func (c *Config) applyJWTDefaults() {
 
 // JWTTTL returns the configured token lifetime.
 func (c *Config) JWTTTL() time.Duration {
-	return time.Duration(c.JWT.TTLSeconds) * time.Second
+	return c.JWT.TTL
 }
 
 // JWTLeeway returns the configured clock-skew tolerance.
@@ -130,8 +148,8 @@ func (c *Config) ValidateJWT() error {
 	if strings.TrimSpace(c.JWT.Issuer) == "" {
 		return errors.New("config: jwt.issuer must not be blank")
 	}
-	if c.JWT.TTLSeconds <= 0 {
-		return errors.New("config: jwt.ttl_seconds must be positive")
+	if c.JWT.TTL <= 0 {
+		return errors.New("config: jwt.ttl must be positive")
 	}
 	if c.JWT.LeewaySeconds < 0 {
 		return errors.New("config: jwt.leeway_seconds must not be negative")

@@ -3,11 +3,11 @@
 # a token manager; use at least 32 random bytes, keep it out of git, and
 # override it in production with JWT_SECRET. The issuer is written into every
 # token and required on verification. An empty audience disables the audience
-# check. ttl_seconds is the token lifetime; leeway_seconds tolerates small
-# clock differences between services.
+# check. ttl is the token lifetime as a duration such as 15m or 120h;
+# leeway_seconds tolerates small clock differences between services.
 jwt:
   secret: ""
   issuer: "__name__"
   audience: ""
-  ttl_seconds: 900
+  ttl: 15m
   leeway_seconds: 30

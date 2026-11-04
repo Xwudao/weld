@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -38,14 +39,14 @@ func jwtLoader(files, env map[string]string) *Loader {
 // the section, the environment overrides it, and an omitted TTL and leeway get
 // the explicit defaults without inventing a secret.
 func TestJWTLoadsFileEnvironmentAndDefaults(t *testing.T) {
-	file := "jwt:\n  secret: \"" + jwtSentinel + "\"\n  issuer: file-issuer\n  audience: file-audience\n  ttl_seconds: 120\n  leeway_seconds: 5\n"
+	file := "jwt:\n  secret: \"" + jwtSentinel + "\"\n  issuer: file-issuer\n  audience: file-audience\n  ttl: 120h\n  leeway_seconds: 5\n"
 
 	cfg, err := jwtLoader(map[string]string{DefaultPath: file}, nil).Load("")
 	if err != nil {
 		t.Fatalf("Load file: %v", err)
 	}
 	if cfg.JWT.Secret.Value() != jwtSentinel || cfg.JWT.Issuer != "file-issuer" ||
-		cfg.JWT.Audience != "file-audience" || cfg.JWT.TTLSeconds != 120 || cfg.JWT.LeewaySeconds != 5 {
+		cfg.JWT.Audience != "file-audience" || cfg.JWTTTL() != 120*time.Hour || cfg.JWT.LeewaySeconds != 5 {
 		t.Fatalf("JWT from file = %+v", cfg.JWT)
 	}
 
@@ -54,14 +55,14 @@ func TestJWTLoadsFileEnvironmentAndDefaults(t *testing.T) {
 		EnvJWTSecret:        envSecret,
 		EnvJWTIssuer:        "env-issuer",
 		EnvJWTAudience:      "env-audience",
-		EnvJWTTTLSeconds:    "300",
+		EnvJWTTTL:           "5m",
 		EnvJWTLeewaySeconds: "10",
 	}).Load("")
 	if err != nil {
 		t.Fatalf("Load environment: %v", err)
 	}
 	if cfg.JWT.Secret.Value() != envSecret || cfg.JWT.Issuer != "env-issuer" ||
-		cfg.JWT.Audience != "env-audience" || cfg.JWT.TTLSeconds != 300 || cfg.JWT.LeewaySeconds != 10 {
+		cfg.JWT.Audience != "env-audience" || cfg.JWTTTL() != 5*time.Minute || cfg.JWT.LeewaySeconds != 10 {
 		t.Fatalf("JWT from environment = %+v", cfg.JWT)
 	}
 
@@ -72,9 +73,44 @@ func TestJWTLoadsFileEnvironmentAndDefaults(t *testing.T) {
 	if cfg.JWT.Secret.Value() != "" {
 		t.Fatalf("default secret = %q, want empty", cfg.JWT.Secret.Value())
 	}
-	if cfg.JWT.Issuer != DefaultJWTIssuer || cfg.JWT.TTLSeconds != DefaultJWTTTLSeconds ||
+	if cfg.JWT.Issuer != DefaultJWTIssuer || cfg.JWTTTL() != DefaultJWTTTL ||
 		cfg.JWT.LeewaySeconds != DefaultJWTLeewaySeconds {
 		t.Fatalf("JWT defaults = %+v", cfg.JWT)
+	}
+}
+
+// TestJWTLegacyTTLSeconds proves a deployed ttl_seconds keeps its lifetime, and
+// that the duration form wins over the deprecated one at each precedence level
+// while the environment still overrides the file.
+func TestJWTLegacyTTLSeconds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file string
+		env  map[string]string
+		want time.Duration
+	}{
+		"file seconds":          {file: "jwt:\n  ttl_seconds: 7200\n", want: 2 * time.Hour},
+		"file ttl wins":         {file: "jwt:\n  ttl: 1h\n  ttl_seconds: 7200\n", want: time.Hour},
+		"env seconds over file": {file: "jwt:\n  ttl: 1h\n", env: map[string]string{EnvJWTTTLSeconds: "60"}, want: time.Minute},
+		"env ttl wins":          {env: map[string]string{EnvJWTTTL: "3h", EnvJWTTTLSeconds: "60"}, want: 3 * time.Hour},
+	} {
+		cfg, err := jwtLoader(map[string]string{DefaultPath: tc.file}, tc.env).Load("")
+		if err != nil {
+			t.Errorf("%s: Load: %v", name, err)
+			continue
+		}
+		if got := cfg.JWTTTL(); got != tc.want {
+			t.Errorf("%s: TTL = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// TestJWTInvalidTTLInFileIsAnError proves a unitless ttl fails to load instead of
+// being read as nanoseconds.
+func TestJWTInvalidTTLInFileIsAnError(t *testing.T) {
+	for _, file := range []string{"jwt:\n  ttl: 900\n", "jwt:\n  ttl: soon\n"} {
+		if _, err := jwtLoader(map[string]string{DefaultPath: file}, nil).Load(""); err == nil {
+			t.Errorf("file %q was accepted", file)
+		}
 	}
 }
 
@@ -82,6 +118,8 @@ func TestJWTLoadsFileEnvironmentAndDefaults(t *testing.T) {
 // explicitly blank issuer are load errors rather than silent defaults.
 func TestJWTInvalidEnvironmentIsAnError(t *testing.T) {
 	for _, env := range []map[string]string{
+		{EnvJWTTTL: "soon"},
+		{EnvJWTTTL: "900"},
 		{EnvJWTTTLSeconds: "soon"},
 		{EnvJWTLeewaySeconds: "later"},
 		{EnvJWTIssuer: "   "},
@@ -99,19 +137,19 @@ func TestJWTValidationFailsClosed(t *testing.T) {
 	valid := JWT{
 		Secret:        Secret(jwtSentinel),
 		Issuer:        "app",
-		TTLSeconds:    900,
+		TTL:           15 * time.Minute,
 		LeewaySeconds: 30,
 	}
 	if err := (&Config{JWT: valid}).ValidateJWT(); err != nil {
 		t.Fatalf("valid JWT rejected: %v", err)
 	}
 	for name, jwt := range map[string]JWT{
-		"missing secret":  {Issuer: "app", TTLSeconds: 900},
-		"short secret":    {Secret: Secret("too-short"), Issuer: "app", TTLSeconds: 900},
-		"blank issuer":    {Secret: Secret(jwtSentinel), Issuer: "  ", TTLSeconds: 900},
+		"missing secret":  {Issuer: "app", TTL: 15 * time.Minute},
+		"short secret":    {Secret: Secret("too-short"), Issuer: "app", TTL: 15 * time.Minute},
+		"blank issuer":    {Secret: Secret(jwtSentinel), Issuer: "  ", TTL: 15 * time.Minute},
 		"zero ttl":        {Secret: Secret(jwtSentinel), Issuer: "app"},
-		"negative ttl":    {Secret: Secret(jwtSentinel), Issuer: "app", TTLSeconds: -1},
-		"negative leeway": {Secret: Secret(jwtSentinel), Issuer: "app", TTLSeconds: 900, LeewaySeconds: -1},
+		"negative ttl":    {Secret: Secret(jwtSentinel), Issuer: "app", TTL: -time.Second},
+		"negative leeway": {Secret: Secret(jwtSentinel), Issuer: "app", TTL: 15 * time.Minute, LeewaySeconds: -1},
 	} {
 		if err := (&Config{JWT: jwt}).ValidateJWT(); err == nil {
 			t.Errorf("%s was accepted", name)
@@ -122,7 +160,7 @@ func TestJWTValidationFailsClosed(t *testing.T) {
 // TestJWTSecretRedacts proves the secret cannot survive formatting, logging,
 // JSON or YAML, including as part of the whole configuration.
 func TestJWTSecretRedacts(t *testing.T) {
-	cfg := &Config{JWT: JWT{Secret: Secret(jwtSentinel), Issuer: "app", TTLSeconds: 900}}
+	cfg := &Config{JWT: JWT{Secret: Secret(jwtSentinel), Issuer: "app", TTL: 15 * time.Minute}}
 
 	if got := cfg.JWT.Secret.String(); strings.Contains(got, jwtSentinel) {
 		t.Fatalf("formatting the JWT secret leaked it: %s", got)

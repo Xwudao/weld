@@ -60,7 +60,7 @@ func TestAddJWTInstallsHTTPAndConfig(t *testing.T) {
 		}
 	}
 	cfg := readFile(t, filepath.Join(dir, "config.yml"))
-	for _, want := range []string{"jwt:", "weld:jwt:installed", `secret: ""`, "ttl_seconds:"} {
+	for _, want := range []string{"jwt:", "weld:jwt:installed", `secret: ""`, "ttl:"} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("config.yml is missing %q:\n%s", want, cfg)
 		}
@@ -133,5 +133,43 @@ func TestAddJWTIsIdempotent(t *testing.T) {
 		if readFile(t, filepath.Join(dir, path)) != want {
 			t.Errorf("%s changed on repeat add", path)
 		}
+	}
+}
+
+// TestUpgradeJWTKeepsADeployedTTLSeconds proves moving to the duration form takes
+// the new payload without touching a project's config.yml: its ttl_seconds stays
+// as written, the missing ttl line is only reported, and the changelog carries
+// the manual steps.
+func TestUpgradeJWTKeepsADeployedTTLSeconds(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+	add(t, dir, "jwt")
+
+	const payload = "internal/config/jwt.go"
+	weldWrote(t, dir, "jwt", payload, readFile(t, filepath.Join(dir, payload))+"\n// an older payload\n")
+	configured := strings.Replace(readFile(t, filepath.Join(dir, "config.yml")), "  ttl: 15m\n", "  ttl_seconds: 7200\n", 1)
+	if !strings.Contains(configured, "ttl_seconds: 7200") {
+		t.Fatalf("config.yml has no ttl line to replace:\n%s", configured)
+	}
+	edited(t, dir, "config.yml", configured)
+	downgrade(t, dir, "jwt", "0.1.0")
+
+	result := upgrade(t, dir, nil, false)
+	advisory := findAdvisory(t, result.Advisories, "config.yml", ReasonPatch)
+	if !strings.Contains(advisory.Detail, "ttl:") {
+		t.Fatalf("patch advisory detail:\n%s", advisory.Detail)
+	}
+	if len(result.Changelog) == 0 {
+		t.Fatal("upgrade reported no changelog for jwt")
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, payload)); strings.Contains(got, "an older payload") || !strings.Contains(got, `yaml:"ttl"`) {
+		t.Fatalf("%s was not updated:\n%s", payload, got)
+	}
+	if got := readFile(t, filepath.Join(dir, "config.yml")); got != configured {
+		t.Fatalf("upgrade rewrote config.yml:\n%s", got)
 	}
 }

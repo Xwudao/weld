@@ -21,7 +21,7 @@ func testManager(t *testing.T, mutate func(*config.Config)) *Manager {
 		Secret:        config.Secret(testSecret),
 		Issuer:        "test-issuer",
 		Audience:      "test-audience",
-		TTLSeconds:    60,
+		TTL:           time.Minute,
 		LeewaySeconds: 0,
 	}}
 	if mutate != nil {
@@ -78,9 +78,9 @@ func TestNewRejectsInvalidConfiguration(t *testing.T) {
 		t.Fatal("New(nil) succeeded")
 	}
 	for name, cfg := range map[string]*config.Config{
-		"missing secret": {JWT: config.JWT{Issuer: "app", TTLSeconds: 60}},
-		"short secret":   {JWT: config.JWT{Secret: config.Secret("short"), Issuer: "app", TTLSeconds: 60}},
-		"blank issuer":   {JWT: config.JWT{Secret: config.Secret(testSecret), Issuer: " ", TTLSeconds: 60}},
+		"missing secret": {JWT: config.JWT{Issuer: "app", TTL: time.Minute}},
+		"short secret":   {JWT: config.JWT{Secret: config.Secret("short"), Issuer: "app", TTL: time.Minute}},
+		"blank issuer":   {JWT: config.JWT{Secret: config.Secret(testSecret), Issuer: " ", TTL: time.Minute}},
 		"zero ttl":       {JWT: config.JWT{Secret: config.Secret(testSecret), Issuer: "app"}},
 	} {
 		if _, err := New(cfg); err == nil {

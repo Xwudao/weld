@@ -1,9 +1,19 @@
 {
   "name": "jwt",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "kind": "add",
   "summary": "Opt-in JWT bearer-token authentication: typed, secret-redacted configuration, HS256 issue/verify with issuer, audience and TTL checks, and composable net/http middleware that puts validated claims on the request context. Installing it issues no token and guards no route until you wire a policy or middleware.",
   "requires": ["http"],
+  "changes": [
+    {
+      "version": "0.2.0",
+      "summary": "the token lifetime is a Go duration: jwt.ttl (15m, 120h) and JWT_TTL replace jwt.ttl_seconds and JWT_TTL_SECONDS, which keep working as deprecated fallbacks; the duration form wins when both are set",
+      "actions": [
+        "replace config.JWT.TTLSeconds with config.JWT.TTL (a time.Duration) in project code and tests, and DefaultJWTTTLSeconds with DefaultJWTTTL",
+        "optionally change ttl_seconds: 900 to ttl: 15m in config.yml and JWT_TTL_SECONDS to JWT_TTL; a unitless ttl: 900 fails to load"
+      ]
+    }
+  ],
   "files": [
     { "path": "internal/config/jwt.go", "source": "files/jwt_config.go.tmpl" },
     { "path": "internal/config/jwt_test.go", "source": "files/jwt_config_test.go.tmpl" },

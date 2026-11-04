@@ -14,12 +14,12 @@ jwt:
   secret: ""              # required when a manager is constructed; use >= 32 random bytes
   issuer: "my-app"        # required; written into and verified from every token
   audience: ""            # optional; empty disables the audience check
-  ttl_seconds: 900        # token lifetime
+  ttl: 15m                # token lifetime, a duration such as 15m or 120h
   leeway_seconds: 30      # clock-skew tolerance
 ```
 
 Every value is overridable in the environment (`JWT_SECRET`, `JWT_ISSUER`,
-`JWT_AUDIENCE`, `JWT_TTL_SECONDS`, `JWT_LEEWAY_SECONDS`), so production does not
+`JWT_AUDIENCE`, `JWT_TTL`, `JWT_LEEWAY_SECONDS`), so production does not
 need the secret in the image. `config.Secret` redacts it in `fmt`, logging, JSON
 and YAML. The manager is constructed only when a provider consumes it: installing
 `jwt` alone does not require a secret and does not guard a route.

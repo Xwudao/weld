@@ -132,7 +132,7 @@ func TestJWTExtendsConfigurationThroughMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config snippet: %v", err)
 	}
-	for _, want := range []string{"jwt:", `secret: ""`, "issuer:", "ttl_seconds:", "leeway_seconds:"} {
+	for _, want := range []string{"jwt:", `secret: ""`, "issuer:", "ttl:", "leeway_seconds:"} {
 		if !strings.Contains(string(snippet), want) {
 			t.Errorf("config snippet is missing %q:\n%s", want, snippet)
 		}

@@ -1798,11 +1798,11 @@ jwt:
   secret: ""              # required when a manager is built; >= 32 bytes
   issuer: "my-app"        # required; written into and verified from every token
   audience: ""            # optional; empty disables the audience check
-  ttl_seconds: 900
+  ttl: 15m                # token lifetime, a duration such as 15m or 120h
   leeway_seconds: 30
 ```
 
-`JWT_SECRET`, `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_TTL_SECONDS` and
+`JWT_SECRET`, `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_TTL` and
 `JWT_LEEWAY_SECONDS` override the file, and `config.Secret` keeps the secret out
 of logs, formatted output, JSON and YAML. The manager accepts **HS256 only**,
 requires a valid signature, issuer and expiry, optionally requires an audience,
