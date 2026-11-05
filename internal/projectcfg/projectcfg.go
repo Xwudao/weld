@@ -124,10 +124,16 @@ type DeployConfig struct {
 	// Host is the ssh destination the artifact is uploaded to, usually a Host
 	// alias from ~/.ssh/config.
 	Host string `yaml:"host"`
-	// RemoteUploadDir is the remote directory the artifact is uploaded to.
+	// RemoteUploadDir is the remote directory the artifact is uploaded to. It is
+	// not used, and not required, when UploadCommand is set.
 	RemoteUploadDir string `yaml:"remote_upload_dir"`
+	// UploadCommand replaces the scp upload: a local shell command that publishes
+	// the artifact named by WELD_ARTIFACT, for example to object storage. The last
+	// non-empty line of its stdout, split on whitespace, becomes the arguments of
+	// RemoteScript. Progress belongs on stderr.
+	UploadCommand string `yaml:"upload_command"`
 	// RemoteScript is the remote script run after the upload. The uploaded
-	// artifact path is passed as its argument.
+	// artifact path, or the UploadCommand output, is passed as its arguments.
 	RemoteScript string `yaml:"remote_script"`
 	// Target is the GOOS/GOARCH built and uploaded. It defaults to linux/amd64.
 	Target *Target `yaml:"target"`
@@ -358,7 +364,7 @@ func (c DeployConfig) Validate() error {
 	if strings.TrimSpace(c.Host) == "" {
 		return errors.New("weld.yml: deploy.host is required")
 	}
-	if strings.TrimSpace(c.RemoteUploadDir) == "" {
+	if strings.TrimSpace(c.RemoteUploadDir) == "" && strings.TrimSpace(c.UploadCommand) == "" {
 		return errors.New("weld.yml: deploy.remote_upload_dir is required")
 	}
 	if strings.TrimSpace(c.RemoteScript) == "" {
@@ -508,6 +514,10 @@ deploy:
   # as its argument. ` + "`weld deploy`" + ` builds the linux target, scp's the
   # binary and runs this script over ssh.
   remote_script: /srv/app/deploy.sh
+  # Publish the binary yourself instead of scp, for example to object storage
+  # (remote_upload_dir is then not needed). The command reads WELD_ARTIFACT; the
+  # last line of its stdout, split on whitespace, becomes the script's arguments.
+  # upload_command: ./scripts/publish.sh
   # GOOS/GOARCH built and uploaded (default: linux/amd64).
   # target: { os: linux, arch: arm64 }
 

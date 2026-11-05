@@ -33,9 +33,14 @@ The deploy section names the host and remote paths:
     remote_script: /srv/app/deploy.sh
     target: { os: linux, arch: amd64 }
 
+deploy.upload_command replaces scp with your own local command, for example one
+that publishes to object storage (remote_upload_dir is then not needed). It reads
+the binary's path from WELD_ARTIFACT; the last line of its stdout, split on
+whitespace, becomes the arguments of remote_script and is never printed.
+
 weld.yml is user-owned: weld never rewrites it and ` + "`weld add`" + ` never touches it.
 --no-build uploads an existing artifact, and --artifact names one explicitly
-(which also skips the build). --dry-run prints the scp/ssh steps without
+(which also skips the build). --dry-run prints the upload and ssh steps without
 building or running anything.`,
 		Args: cobra.NoArgs,
 		RunE: runDeploy,
@@ -114,6 +119,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		Config:   cfg,
 		Artifact: local,
 		DryRun:   dryRun,
+		Dir:      dir,
+		Env:      deployEnv,
 		Stdout:   stdout,
 		Stderr:   stderr,
 	})
@@ -130,7 +137,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	}
-	fmt.Fprintf(stdout, "uploaded %s to %s:%s\n", result.Artifact, deployCfg.Host, result.RemotePath)
+	if result.RemotePath == "" {
+		fmt.Fprintf(stdout, "published %s with deploy.upload_command\n", result.Artifact)
+	} else {
+		fmt.Fprintf(stdout, "uploaded %s to %s:%s\n", result.Artifact, deployCfg.Host, result.RemotePath)
+	}
 	fmt.Fprintf(stdout, "ran %s on %s\n", deployCfg.RemoteScript, deployCfg.Host)
 	return nil
 }

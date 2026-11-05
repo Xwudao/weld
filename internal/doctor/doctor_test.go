@@ -169,6 +169,15 @@ func TestCheckToolchainValidatesDeploySettings(t *testing.T) {
 	if check := findCheck(t, result, "deploy"); check.Level != LevelWarn || !strings.Contains(check.Message, "ssh") {
 		t.Fatalf("missing ssh check = %+v", check)
 	}
+
+	// An upload command replaces scp, so neither remote_upload_dir nor scp is needed.
+	cfg.Deploy.RemoteUploadDir = ""
+	cfg.Deploy.UploadCommand = "./publish.sh"
+	result, add = collector()
+	checkToolchain(t.TempDir(), manifest, cfg, missingLookPath("scp"), add)
+	if check := findCheck(t, result, "deploy"); check.Level != LevelOK {
+		t.Fatalf("upload command check = %+v", check)
+	}
 }
 
 // TestCheckGeneratedFilesReportsMissingLoom proves a missing generated graph is

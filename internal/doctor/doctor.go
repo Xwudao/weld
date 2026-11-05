@@ -249,12 +249,16 @@ func checkToolchain(dir string, manifest *project.Manifest, cfg *projectcfg.Conf
 
 	if cfg != nil {
 		deploy := cfg.EffectiveDeploy()
-		if deploy.Host != "" || deploy.RemoteUploadDir != "" || deploy.RemoteScript != "" {
+		if deploy.Host != "" || deploy.RemoteUploadDir != "" || deploy.UploadCommand != "" || deploy.RemoteScript != "" {
 			if err := deploy.Validate(); err != nil {
 				add("deploy", LevelFail, "%v", err)
 			} else {
 				missing := []string{}
-				for _, name := range []string{"scp", "ssh"} {
+				tools := []string{"scp", "ssh"}
+				if strings.TrimSpace(deploy.UploadCommand) != "" {
+					tools = []string{"ssh"}
+				}
+				for _, name := range tools {
 					if _, err := lookPath(name); err != nil {
 						missing = append(missing, name)
 					}

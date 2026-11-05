@@ -266,7 +266,16 @@ uploads an existing artifact instead and `--artifact file` names one
 explicitly (which also skips the build). The artifact is `scp`'d to
 `host:remote_upload_dir` and the remote script is run as `sh <remote_script>
 <uploaded-path>`, so the script decides how to swap the running service over.
-`--dry-run` prints the `scp`/`ssh` steps without building or running anything.
+`--dry-run` prints the upload and `ssh` steps without building or running
+anything.
+
+`deploy.upload_command` replaces `scp` with your own local command, for example
+one that publishes to object storage so the server downloads the binary itself;
+`remote_upload_dir` is then not needed. It runs through the shell in the project
+directory with the absolute artifact path in `WELD_ARTIFACT`. The last non-empty
+line of its stdout, split on whitespace, becomes the arguments of the remote
+script. That line may carry a presigned URL, so weld never prints it; earlier
+stdout lines are shown after the command finishes, and stderr streams live.
 
 `weld release <version>` cuts a local release. It refuses a project that is not
 a git repository, has an uncommitted change to a tracked file (untracked files

@@ -1223,6 +1223,26 @@ func TestDeployDryRunPlans(t *testing.T) {
 	}
 }
 
+func TestDeployDryRunPlansUploadCommand(t *testing.T) {
+	dir := t.TempDir()
+	body := "version: 1\ndeploy:\n  host: prod-app\n  upload_command: ./publish.sh\n  remote_script: /srv/app/deploy.sh\n"
+	if err := os.WriteFile(filepath.Join(dir, "weld.yml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, "deploy", "--dry-run", "--dir", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "scp ") {
+		t.Errorf("dry run still plans scp: %q", out)
+	}
+	for _, want := range []string{"./publish.sh", "ssh prod-app", "sh '/srv/app/deploy.sh'"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry run output = %q, missing %q", out, want)
+		}
+	}
+}
+
 // rewriteCapabilityVersion stands in for a project an older weld scaffolded, so
 // `weld upgrade` has something to do.
 func rewriteCapabilityVersion(t *testing.T, dir, name, version string) {
