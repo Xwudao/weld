@@ -169,6 +169,17 @@ func TestBuildLdflagsExpandsBuiltins(t *testing.T) {
 	}
 }
 
+func TestBuildLdflagsAlwaysStrips(t *testing.T) {
+	for _, cfg := range []*Config{nil, {}, {Build: BuildConfig{Ldflags: []Ldflag{{
+		Package: "example.com/demo",
+		Vars:    map[string]string{"Version": "1"},
+	}}}}} {
+		if got := cfg.BuildLdflags(); !strings.HasPrefix(got, "-s -w") {
+			t.Errorf("BuildLdflags = %q", got)
+		}
+	}
+}
+
 func TestExpandVarsPrefersBuiltinOverEnv(t *testing.T) {
 	t.Setenv("year", "not-the-year")
 	if got := expandVars("${year}"); got == "not-the-year" {

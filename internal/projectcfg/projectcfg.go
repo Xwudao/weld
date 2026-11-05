@@ -291,14 +291,15 @@ func (c *Config) BuildEnv() []string {
 	return env
 }
 
-// BuildLdflags returns the -ldflags value for `go build`, or "" when no
-// ldflags are configured. Placeholders in every value are expanded at call
-// time, so ${datetime}, ${git_tag} and friends reflect the build, not the parse.
+// BuildLdflags returns the -ldflags value for `go build`. Binaries are always
+// stripped of the symbol table and DWARF; stack traces do not depend on them.
+// Placeholders in every value are expanded at call time, so ${datetime},
+// ${git_tag} and friends reflect the build, not the parse.
 func (c *Config) BuildLdflags() string {
-	if c == nil || len(c.Build.Ldflags) == 0 {
-		return ""
+	parts := []string{"-s", "-w"}
+	if c == nil {
+		return strings.Join(parts, " ")
 	}
-	var parts []string
 	for _, lf := range c.Build.Ldflags {
 		for name, value := range lf.Vars {
 			parts = append(parts, fmt.Sprintf("-X '%s.%s=%s'", lf.Package, name, expandVars(value)))

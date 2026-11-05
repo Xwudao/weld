@@ -43,7 +43,7 @@ func TestBuildHostTarget(t *testing.T) {
 	if calls[0].name != "go" || calls[0].dir != dir {
 		t.Errorf("call = %+v", calls[0])
 	}
-	want := []string{"build", "-trimpath", "-o", filepath.FromSlash("bin/demo"), "."}
+	want := []string{"build", "-trimpath", "-ldflags=-s -w", "-o", filepath.FromSlash("bin/demo"), "."}
 	if !reflect.DeepEqual(calls[0].args, want) {
 		t.Errorf("args = %v, want %v", calls[0].args, want)
 	}

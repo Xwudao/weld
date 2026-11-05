@@ -94,9 +94,7 @@ func Run(req Request) (*Result, error) {
 		if tags := cfg.BuildTags(); tags != "" {
 			args = append(args, "-tags", tags)
 		}
-		if ldflags := cfg.BuildLdflags(); ldflags != "" {
-			args = append(args, "-ldflags="+ldflags)
-		}
+		args = append(args, "-ldflags="+cfg.BuildLdflags())
 		args = append(args, "-o", filepath.FromSlash(out), ".")
 		if err := runner("go", req.Dir, env, args...); err != nil {
 			return nil, fmt.Errorf("go build %s/%s: %w", target.OS, target.Arch, err)
