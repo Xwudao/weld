@@ -87,7 +87,7 @@ runtime. Template changes and the CLI are tested and released together.
 ```
 weld new <name> [--module path] [--with capability,...] [--dir dir] [--dry-run]
 weld add <capability> [capability...] [--dir dir] [--dry-run]
-weld add module <name> [--command] [--dir dir] [--dry-run]
+weld add module <name> [--command] [--adopt] [--dir dir] [--dry-run]
 weld add crud <name> [field:type...] [--with-dependencies] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]
@@ -577,7 +577,8 @@ It checks the manifest, `weld.yml`, `config.yml` (presence and YAML validity),
 managed-file drift, `go.mod` and its module path, the Go toolchain, the node/pnpm
 toolchain when `web` is installed, docker when a Dockerfile or `build.docker` is
 configured, ssh/scp for a deploy section, installed capabilities against this
-weld's catalog, the generated Loom graph, generated enum files and the `db`
+weld's catalog, packages under `internal/modules` that `weld.json` does not
+record as modules, the generated Loom graph, generated enum files and the `db`
 migration layout. It never writes, builds, connects to a database or prints a
 credential.
 
@@ -1221,6 +1222,17 @@ manifest facet, never rewriting your module service or handler. The group also
 gets a stable command graph in `internal/di/<name>_graph.go` and resolves the
 module's `Service` lazily through it (see
 [`weld add command`](#weld-add-command-stage-2b)).
+
+With `--adopt`, `weld add module <name> --adopt` registers a package you wrote
+by hand under `internal/modules/<name>` instead of generating one. The package
+must declare the names the generated graph references (`Name`, `Service`,
+`NewService` and `Register`); weld records the module in `weld.json` and wires
+it into `internal/di/di.go` like a generated one, but writes none of its files
+and tracks none of them as managed. Remove the routes and providers you wired by
+hand first, or the Loom generation fails on the duplicate and the add rolls
+back. Without `--adopt`, adding a module whose package already exists is a
+conflict that points at this flag, and `weld doctor` fails on any such
+unrecorded package, so a module cannot stay outside the graph unnoticed.
 
 ## `weld add crud`
 

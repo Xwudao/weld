@@ -325,3 +325,95 @@ func TestAddLoomAfterModuleRendersGraph(t *testing.T) {
 	}
 	gofmtCheck(t, dir)
 }
+
+// TestAddModuleAdoptsHandWrittenPackage proves --adopt wires an existing
+// package into the graph and the manifest without writing or tracking its files,
+// and that a plain add points at the flag instead.
+func TestAddModuleAdoptsHandWrittenPackage(t *testing.T) {
+	t.Parallel()
+	// The hand-written package is a generated one copied into a project that
+	// never added it.
+	source := create(t, t.TempDir())
+	addModule(t, source, "widget")
+	dir := create(t, t.TempDir())
+	add(t, dir, "http")
+	moduleDir := filepath.Join(dir, "internal", "modules", "widget")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dto.go", "service.go", "module.go", "handler.go"} {
+		content := readFile(t, filepath.Join(source, "internal", "modules", "widget", name))
+		if err := os.WriteFile(filepath.Join(moduleDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := readFile(t, filepath.Join(moduleDir, "service.go"))
+
+	if _, err := AddModule(Request{Dir: dir, Catalog: newCatalog()}, "widget"); err == nil || !strings.Contains(err.Error(), "--adopt") {
+		t.Fatalf("plain add over a hand-written package = %v, want a conflict naming --adopt", err)
+	}
+	if names, err := UnregisteredModules(dir, mustLoad(t, dir)); err != nil || strings.Join(names, ",") != "widget" {
+		t.Fatalf("UnregisteredModules = %v, %v; want [widget]", names, err)
+	}
+
+	result, err := AddModule(Request{Dir: dir, Catalog: newCatalog(), Adopt: true}, "widget")
+	if err != nil {
+		t.Fatalf("AddModule --adopt: %v", err)
+	}
+	for _, operation := range result.Operations {
+		if strings.HasPrefix(operation.Path, "internal/modules/") {
+			t.Errorf("adopt planned a module file: %s", operation.Path)
+		}
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("Apply adopt: %v", err)
+	}
+	if got := readFile(t, filepath.Join(moduleDir, "service.go")); got != original {
+		t.Fatal("adopt rewrote the hand-written service")
+	}
+	di := readFile(t, filepath.Join(dir, "internal/di/di.go"))
+	for _, want := range []string{"loom.Provide(widget.NewService)", `widget.Register(base.Group(httpserver.ModulePrefix(widget.Name)), widgetService)`} {
+		if !strings.Contains(di, want) {
+			t.Errorf("di.go is missing %q", want)
+		}
+	}
+	manifest := mustLoad(t, dir)
+	if !manifest.HasModule("widget") {
+		t.Fatalf("module not recorded: %+v", manifest.Modules)
+	}
+	for _, file := range manifest.Files {
+		if strings.HasPrefix(file.Path, "internal/modules/") {
+			t.Errorf("adopt tracked %s as a managed file", file.Path)
+		}
+	}
+	if names, err := UnregisteredModules(dir, manifest); err != nil || len(names) != 0 {
+		t.Fatalf("UnregisteredModules after adopt = %v, %v", names, err)
+	}
+}
+
+func TestCheckModuleContract(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := CheckModuleContract(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("a missing directory passed")
+	}
+	if err := CheckModuleContract(dir); err == nil || !strings.Contains(err.Error(), "no Go files") {
+		t.Fatalf("an empty directory = %v", err)
+	}
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "module.go"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("package widget\n\nconst Name = \"widget\"\n\ntype api struct{}\n\nfunc (api) Register() {}\n")
+	err := CheckModuleContract(dir)
+	if err == nil || !strings.Contains(err.Error(), "Register, NewService, Service") {
+		t.Fatalf("a partial package = %v, want Register, NewService and Service missing", err)
+	}
+	// An alias to a concrete type is a Service as far as the graph is concerned.
+	write("package widget\n\nconst Name = \"widget\"\n\ntype API struct{}\n\ntype Service = *API\n\nfunc NewService() Service { return &API{} }\n\nfunc Register(any, Service) {}\n")
+	if err := CheckModuleContract(dir); err != nil {
+		t.Fatalf("a complete package = %v", err)
+	}
+}

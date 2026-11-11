@@ -262,3 +262,29 @@ func TestHelpers(t *testing.T) {
 		t.Fatal("invalid YAML was accepted")
 	}
 }
+
+func TestCheckModulesFailsOnUnrecordedPackage(t *testing.T) {
+	dir := newProject(t)
+	manifest, err := project.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, add := collector()
+	checkModules(dir, manifest, add)
+	if check := findCheck(t, result, "modules"); check.Level != LevelOK {
+		t.Fatalf("fresh project modules = %+v", check)
+	}
+	moduleDir := filepath.Join(dir, "internal", "modules", "stats")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDir, "module.go"), []byte("package stats\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, add = collector()
+	checkModules(dir, manifest, add)
+	check := findCheck(t, result, "modules")
+	if check.Level != LevelFail || !strings.Contains(check.Message, "weld add module stats --adopt") {
+		t.Fatalf("unrecorded package = %+v", check)
+	}
+}

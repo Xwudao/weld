@@ -1,9 +1,17 @@
 package scaffold
 
 import (
+	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
 	"go/token"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/template"
@@ -48,6 +56,11 @@ func ValidateModuleName(name string) error {
 // extension point. The module files are written once and recorded in the
 // manifest under module:<name>, so a later `weld add` never rewrites them.
 //
+// With req.Adopt it registers an existing hand-written package instead: nothing
+// under internal/modules/<name> is written or recorded as a managed file, the
+// package must already declare the module contract (see CheckModuleContract),
+// and the module is recorded and wired exactly like a generated one.
+//
 // With req.Command it additionally generates a root command group backed by the
 // same Service interface and NewService constructor, recorded under
 // command:<name>. On a module that is already installed it writes only that
@@ -86,6 +99,17 @@ func AddModule(req Request, name string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	moduleDir := filepath.Join(req.Dir, ModuleDir(name))
+	if req.Adopt {
+		if err := CheckModuleContract(moduleDir); err != nil {
+			return nil, err
+		}
+	} else if hasGoFiles(moduleDir) {
+		return nil, &project.ConflictError{
+			Path:   ModuleDir(name),
+			Reason: fmt.Sprintf("a hand-written package already exists; register it with `weld add module %s --adopt`", name),
+		}
+	}
 
 	// A module is served over HTTP through the Loom graph, so http (with the loom
 	// and config it requires) is installed first when absent. An already-present
@@ -121,6 +145,9 @@ func AddModule(req Request, name string) (*Result, error) {
 		ModTitle: template.ExportName(name),
 	}
 	for _, file := range moduleTemplate.Files {
+		if req.Adopt {
+			break
+		}
 		content, err := moduleTemplate.ReadFile(file)
 		if err != nil {
 			return nil, err
@@ -191,4 +218,109 @@ func alreadyInstalledModuleNotes(root string, manifest *project.Manifest, name s
 		notes = append(notes, fmt.Sprintf("  %s (%s)", item.Path, item.Reason))
 	}
 	return notes
+}
+
+// ModuleDir is the project-relative directory of the business module name.
+func ModuleDir(name string) string {
+	return filepath.ToSlash(filepath.Join("internal", "modules", name))
+}
+
+// moduleContract is what the generated dependency graph references in a module
+// package: Name for the mount prefix, Service as the injected type, NewService
+// as its Loom provider and Register to install the routes.
+var moduleContract = []string{"Name", "Register", "NewService", "Service"}
+
+// CheckModuleContract reports why the package in dir cannot be wired as a
+// module: it is missing, has no Go files, does not parse, or lacks a top-level
+// declaration the generated graph references. It checks names only; the Loom
+// generation and build that follow an add catch a mismatched signature.
+func CheckModuleContract(dir string) error {
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("adopt module: %s does not exist", filepath.ToSlash(dir))
+		}
+		return err
+	}
+	declared := map[string]bool{}
+	files := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			return fmt.Errorf("adopt module: %w", err)
+		}
+		files++
+		for _, decl := range file.Decls {
+			switch decl := decl.(type) {
+			case *ast.FuncDecl:
+				if decl.Recv == nil {
+					declared[decl.Name.Name] = true
+				}
+			case *ast.GenDecl:
+				for _, spec := range decl.Specs {
+					switch spec := spec.(type) {
+					case *ast.TypeSpec:
+						declared[spec.Name.Name] = true
+					case *ast.ValueSpec:
+						for _, ident := range spec.Names {
+							declared[ident.Name] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	if files == 0 {
+		return fmt.Errorf("adopt module: %s has no Go files", filepath.ToSlash(dir))
+	}
+	var missing []string
+	for _, name := range moduleContract {
+		if !declared[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("adopt module: %s does not declare %s; a module needs Name, Service, NewService and Register(*httpx.Router, Service)", filepath.ToSlash(dir), strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// UnregisteredModules lists the packages under internal/modules that weld.json
+// does not record as modules, sorted. Their routes and providers are wired by
+// hand, outside the generated graph.
+func UnregisteredModules(root string, manifest *project.Manifest) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(root, "internal", "modules"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() && !manifest.HasModule(entry.Name()) && hasGoFiles(filepath.Join(root, "internal", "modules", entry.Name())) {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// hasGoFiles reports whether dir directly holds a Go file.
+func hasGoFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			return true
+		}
+	}
+	return false
 }

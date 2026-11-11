@@ -100,6 +100,9 @@ type Request struct {
 	// list writes the plan unchecked, which is the library default; the CLI sets
 	// it, so `weld upgrade` cannot leave a project that does not compile.
 	Verify []string
+	// Adopt registers an existing internal/modules/<name> package with `weld add
+	// module <name> --adopt` instead of generating one. It is ignored elsewhere.
+	Adopt bool
 	// History recovers the content weld once wrote for a file the manifest only
 	// records by hash, which turns an upgrade advisory into a three-way view
 	// (what weld changed, what the project changed, a merge of both). A nil

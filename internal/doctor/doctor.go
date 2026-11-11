@@ -111,6 +111,7 @@ func Run(req Request) *Result {
 
 	cfg := checkConfigFile(dir, manifest, add)
 	checkManagedFiles(dir, manifest, add)
+	checkModules(dir, manifest, add)
 	checkGoModule(dir, manifest, add)
 	checkToolchain(dir, manifest, cfg, req.LookPath, add)
 	checkCapabilities(manifest, req.Catalog, add)
@@ -183,6 +184,27 @@ func checkManagedFiles(dir string, manifest *project.Manifest, add func(string, 
 		parts = append(parts[:8], fmt.Sprintf("and %d more", len(parts)-8))
 	}
 	add("managed files", LevelWarn, "%d file(s) differ: %s; run `weld upgrade --dry-run` or restore a missing local file", len(drift), strings.Join(parts, ", "))
+}
+
+// checkModules fails on a package under internal/modules that weld.json does
+// not record: it is mounted and provided by hand, outside the generated graph,
+// so a later `weld add` cannot see it. Registering it is one command.
+func checkModules(dir string, manifest *project.Manifest, add func(string, Level, string, ...any)) {
+	unregistered, err := scaffold.UnregisteredModules(dir, manifest)
+	if err != nil {
+		add("modules", LevelFail, "%v", err)
+		return
+	}
+	if len(unregistered) == 0 {
+		add("modules", LevelOK, "%d module(s) recorded", len(manifest.Modules))
+		return
+	}
+	commands := make([]string, 0, len(unregistered))
+	for _, name := range unregistered {
+		commands = append(commands, "weld add module "+name+" --adopt")
+	}
+	add("modules", LevelFail, "%d package(s) under internal/modules are not recorded in weld.json: %s; remove their hand-written routes and providers, then run %s",
+		len(unregistered), strings.Join(unregistered, ", "), strings.Join(commands, "; "))
 }
 
 // checkGoModule verifies that go.mod still declares the manifest's module path.

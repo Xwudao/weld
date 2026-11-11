@@ -128,7 +128,7 @@ func newAddCommand() *cobra.Command {
 		Long:  addHelp(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 1 {
-				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add listener <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add job <name> [--schedule spec] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName, progName, progName, progName)
+				return fmt.Errorf("usage: %s add <capability> [capability...] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add seeder <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add listener <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add job <name> [--schedule spec] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add module <name> [--command] [--adopt] [--with-dependencies] [--dir dir] [--dry-run]\n       %s add command <name> [--with-dependencies] [--dir dir] [--dry-run]\n       %s add enum <name> <value> [value...] [--dir dir] [--dry-run]", progName, progName, progName, progName, progName, progName, progName, progName)
 			}
 			return nil
 		},
@@ -190,13 +190,14 @@ func newAddModuleCommand() *cobra.Command {
 		Short: "add an HTTP business module under internal/modules/<name>",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("usage: %s add module <name> [--command] [--dir dir] [--dry-run]", progName)
+				return fmt.Errorf("usage: %s add module <name> [--command] [--adopt] [--dir dir] [--dry-run]", progName)
 			}
 			return nil
 		},
 		RunE: runAddModule,
 	}
 	cmd.Flags().Bool("command", false, "also add a root command group backed by the module's Service")
+	cmd.Flags().Bool("adopt", false, "register an existing hand-written internal/modules/<name> package instead of generating one")
 	cmd.Flags().Bool("with-dependencies", false, "install missing required capabilities instead of failing")
 	return cmd
 }
@@ -691,6 +692,12 @@ Modules:
   carries the module's Service through a stable command graph
   (internal/di/<name>_graph.go) and resolves it lazily on a real subcommand
   through the shared internal/commandkit seam.
+  add module <name> --adopt registers a hand-written internal/modules/<name>
+  package instead of generating one: it must declare Name, Service, NewService
+  and Register, and weld records it and wires it into the graph like a
+  generated module without writing or tracking its files. Remove the routes
+  and providers you wired by hand first; weld doctor fails on a package under
+  internal/modules that weld.json does not record.
 
 Commands:
   add command <name> generates an independent root command group in
@@ -950,8 +957,12 @@ func runAddModule(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	adopt, err := cmd.Flags().GetBool("adopt")
+	if err != nil {
+		return err
+	}
 
-	result, err := scaffold.AddModule(scaffold.Request{Dir: dir, Catalog: template.Load(), Command: withCommand, WithDependencies: withDependencies}, args[0])
+	result, err := scaffold.AddModule(scaffold.Request{Dir: dir, Catalog: template.Load(), Command: withCommand, WithDependencies: withDependencies, Adopt: adopt}, args[0])
 	if err != nil {
 		return err
 	}
