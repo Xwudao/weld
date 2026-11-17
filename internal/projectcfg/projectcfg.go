@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -107,8 +108,17 @@ type DevFrontendConfig struct {
 	Cmd string `yaml:"cmd"`
 }
 
+// DevOpenConfig controls the browser target for the dev open command.
+type DevOpenConfig struct {
+	// Target defaults to frontend; backend opens the Go HTTP server.
+	Target string `yaml:"target"`
+	// BackendURL overrides inference from config.yml's http.addr.
+	BackendURL string `yaml:"backend_url"`
+}
+
 // DevConfig holds the `weld dev` process settings.
 type DevConfig struct {
+	Open     DevOpenConfig     `yaml:"open"`
 	Backend  DevBackendConfig  `yaml:"backend"`
 	Frontend DevFrontendConfig `yaml:"frontend"`
 }
@@ -179,6 +189,15 @@ func Load(dir string) (*Config, error) {
 	}
 	if cfg.Version != 0 && cfg.Version != 1 {
 		return nil, fmt.Errorf("%s: unsupported %s version %d (want 1)", dir, FileName, cfg.Version)
+	}
+	if target := cfg.Dev.Open.Target; target != "" && target != "frontend" && target != "backend" {
+		return nil, errors.New("weld.yml: dev.open.target must be frontend or backend")
+	}
+	if raw := cfg.Dev.Open.BackendURL; raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+			return nil, errors.New("weld.yml: dev.open.backend_url must be an http(s) URL without credentials")
+		}
 	}
 	if err := cfg.validateHooks(); err != nil {
 		return nil, err
@@ -312,10 +331,15 @@ func (c *Config) BuildLdflags() string {
 func (c *Config) EffectiveDev() DevConfig {
 	cfg := DevConfig{
 		Frontend: DevFrontendConfig{Dir: "web", Pm: "pnpm", Cmd: "run dev"},
+		Open:     DevOpenConfig{Target: "frontend"},
 	}
 	if c == nil {
 		return cfg
 	}
+	if c.Dev.Open.Target != "" {
+		cfg.Open.Target = c.Dev.Open.Target
+	}
+	cfg.Open.BackendURL = c.Dev.Open.BackendURL
 	if c.Dev.Backend.Cmd != "" {
 		cfg.Backend.Cmd = c.Dev.Backend.Cmd
 	}
@@ -482,6 +506,12 @@ build:
   #   VITE_BUILD_HASH: "${git_hash}"
 
 dev:
+  open:
+    # Default target for o; o f / o b override it for one command.
+    target: frontend
+    # Backend defaults to http://127.0.0.1:<port> from config.yml's http.addr.
+    # Set this when using custom config, HTTP_ADDR, --addr or HTTPS.
+    # backend_url: http://127.0.0.1:8080
   backend:
     # Replace the default ` + "`go run .`" + ` backend command. When omitted the
     # bare binary is run, which serves once the http capability is installed.

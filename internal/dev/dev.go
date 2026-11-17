@@ -98,6 +98,8 @@ func Run(req Request) error {
 
 	supervisor := newSupervisor(ctx, specs, stdin, stdout, stderr)
 	supervisor.watcher = watcher
+	supervisor.openConfig = cfg.Open
+	supervisor.dir = req.Dir
 	return supervisor.run()
 }
 
@@ -199,6 +201,10 @@ type supervisor struct {
 	shuttingDown bool
 	frontendURL  string
 	watcher      *fileWatcher
+	openConfig   projectcfg.DevOpenConfig
+	dir          string
+	openBrowser  func(string) error
+	readFile     func(string) ([]byte, error)
 }
 
 func newSupervisor(ctx context.Context, specs []spec, stdin io.Reader, stdout, stderr io.Writer) *supervisor {
@@ -210,15 +216,17 @@ func newSupervisor(ctx context.Context, specs []spec, stdin io.Reader, stdout, s
 		order = append(order, s.Name)
 	}
 	s := &supervisor{
-		ctx:       ctx,
-		cancel:    cancel,
-		stdin:     stdin,
-		stdout:    stdout,
-		stderr:    stderr,
-		order:     order,
-		processes: processes,
-		exits:     make(chan exitEvent, len(specs)*4),
-		commands:  make(chan string, 8),
+		openBrowser: openBrowser,
+		readFile:    os.ReadFile,
+		ctx:         ctx,
+		cancel:      cancel,
+		stdin:       stdin,
+		stdout:      stdout,
+		stderr:      stderr,
+		order:       order,
+		processes:   processes,
+		exits:       make(chan exitEvent, len(specs)*4),
+		commands:    make(chan string, 8),
 	}
 	if frontend, ok := processes[frontendName]; ok {
 		s.frontendURL = frontend.spec.URL
@@ -240,7 +248,7 @@ func (s *supervisor) run() error {
 			s.message(fmt.Sprintf("failed to start %s: %v", name, err))
 		}
 	}
-	s.message("commands: rs backend|b | rs frontend|f | rs all|a | o | status|st | help|h | quit")
+	s.message("commands: rs backend|b | rs frontend|f | rs all|a | o [frontend|f|backend|b] | status|st | help|h | quit")
 	go s.readCommands()
 
 	for {
@@ -434,15 +442,15 @@ func (s *supervisor) handle(line string) {
 			s.message(err.Error())
 		}
 	case "o", "open":
-		s.openFrontend()
+		s.openTarget(fields[1:])
 	case "status", "st":
 		s.printStatus()
 	case "help", "h":
-		s.message("commands: rs backend|b | rs frontend|f | rs all|a | o | status|st | help|h | quit")
+		s.message("commands: rs backend|b | rs frontend|f | rs all|a | o [frontend|f|backend|b] | status|st | help|h | quit")
 	case "q", "quit", "exit":
 		s.cancel()
 	default:
-		s.message("unknown command, use: rs backend|b | rs frontend|f | rs all|a | o | status|st | help|h | quit")
+		s.message("unknown command, use: rs backend|b | rs frontend|f | rs all|a | o [frontend|f|backend|b] | status|st | help|h | quit")
 	}
 }
 
@@ -454,24 +462,6 @@ func (s *supervisor) printStatus() {
 		}
 		s.message(fmt.Sprintf("%s: %s", name, state))
 	}
-}
-
-func (s *supervisor) openFrontend() {
-	proc, ok := s.processes[frontendName]
-	if !ok || proc.cmd == nil {
-		s.message("frontend is not running")
-		return
-	}
-	target := s.getFrontendURL()
-	if target == "" {
-		s.message("frontend url not detected yet")
-		return
-	}
-	if err := openBrowser(target); err != nil {
-		s.message(fmt.Sprintf("open %s: %v", target, err))
-		return
-	}
-	s.message(fmt.Sprintf("opened %s", target))
 }
 
 func (s *supervisor) stream(src io.Reader, dst io.Writer, name, color string) {

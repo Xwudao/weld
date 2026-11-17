@@ -121,8 +121,26 @@ weld help
 `weld dev` runs the project's backend and, when the web capability is
 installed, the frontend development server under one supervisor. Ctrl-C stops
 both; control commands on stdin restart or open either side
-(`rs backend|b`, `rs frontend|f`, `rs all|a`, `o`, `status|st`, `help|h`,
-`quit`).
+(`rs backend|b`, `rs frontend|f`, `rs all|a`, `o [frontend|f|backend|b]`,
+`status|st`, `help|h`, `quit`).
+
+`o` (or `open`) opens the frontend by default. Configure its default target in
+`weld.yml`; `o f` / `o b` override it for one command:
+
+```yaml
+dev:
+  open:
+    target: backend # frontend (default) | backend
+    # backend_url: https://127.0.0.1:8443/admin # optional explicit override
+```
+
+The frontend URL follows the Vite development server's detected address. The
+backend URL is inferred on each open from `config.yml`'s `http.addr`: for example,
+`:8080` or `0.0.0.0:8080` becomes `http://127.0.0.1:8080`. Missing or invalid
+configuration produces a diagnostic, not a guessed port. This inference does not
+apply application flags or environment overrides; set `dev.open.backend_url`
+when using a custom config path, `HTTP_ADDR`, `--addr`, or HTTPS. The selected
+process must be running. This does not automatically open a browser on startup.
 
 Opt into backend auto-restart in the user-owned `weld.yml`:
 
