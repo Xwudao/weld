@@ -41,6 +41,7 @@ func Apply(root string, operations []Operation) (err error) {
 	type backup struct {
 		existed bool
 		content []byte
+		mode    os.FileMode
 	}
 	backups := make(map[string]backup, len(operations))
 	defer func() {
@@ -50,7 +51,7 @@ func Apply(root string, operations []Operation) (err error) {
 		for path, previous := range backups {
 			absolute := filepath.Join(root, path)
 			if previous.existed {
-				_ = os.WriteFile(absolute, previous.content, 0o644)
+				_ = writeAtomicMode(absolute, previous.content, previous.mode)
 				continue
 			}
 			_ = os.Remove(absolute)
@@ -63,7 +64,11 @@ func Apply(root string, operations []Operation) (err error) {
 		switch {
 		case readErr == nil:
 			if _, seen := backups[operation.Path]; !seen {
-				backups[operation.Path] = backup{existed: true, content: existing}
+				info, err := os.Stat(absolute)
+				if err != nil {
+					return err
+				}
+				backups[operation.Path] = backup{existed: true, content: existing, mode: info.Mode().Perm()}
 			}
 			if !operation.Overwrite && !operation.Delete {
 				return &ConflictError{Path: operation.Path, Reason: "already exists"}
@@ -93,6 +98,10 @@ func Apply(root string, operations []Operation) (err error) {
 }
 
 func writeAtomic(path string, content []byte) error {
+	return writeAtomicMode(path, content, 0o644)
+}
+
+func writeAtomicMode(path string, content []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".weld-*")
 	if err != nil {
 		return err
@@ -107,7 +116,7 @@ func writeAtomic(path string, content []byte) error {
 		os.Remove(tmpName)
 		return err
 	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
+	if err := os.Chmod(tmpName, mode); err != nil {
 		os.Remove(tmpName)
 		return err
 	}

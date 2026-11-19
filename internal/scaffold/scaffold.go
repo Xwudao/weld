@@ -144,6 +144,10 @@ type Result struct {
 	// when Dir has appeared since planning, and removes Dir again when the plan
 	// fails, because nothing in it predates the plan.
 	NewDir bool
+	// Destructive plans recheck their inventory before taking a snapshot and
+	// prune empty source directories only after the file transaction succeeds.
+	preflight func() error
+	pruneDirs []string
 }
 
 // Apply writes the planned result. When the plan changes the dependency graph it
@@ -187,6 +191,11 @@ func (r *Result) Apply() (err error) {
 		}
 	}
 
+	if r.preflight != nil {
+		if err := r.preflight(); err != nil {
+			return err
+		}
+	}
 	paths := make([]string, 0, len(r.Operations)+3)
 	for _, operation := range r.Operations {
 		paths = append(paths, operation.Path)
@@ -260,6 +269,15 @@ func (r *Result) Apply() (err error) {
 	}
 	if err := project.RefreshManifest(r.Dir, generated...); err != nil {
 		return r.rollback(snapshot, fmt.Errorf("refresh manifest: %w", err))
+	}
+	for _, dir := range r.pruneDirs {
+		// Never remove a directory recursively: a new file may have appeared
+		// while the generators were running.
+		if info, err := removalStat(r.Dir, dir); err == nil && info.IsDir() {
+			if err := os.Remove(filepath.Join(r.Dir, dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				r.Notes = append(r.Notes, fmt.Sprintf("kept directory %s: %v", dir, err))
+			}
+		}
 	}
 	return nil
 }

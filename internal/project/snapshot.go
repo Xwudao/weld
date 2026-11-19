@@ -10,6 +10,7 @@ import (
 type fileState struct {
 	existed bool
 	content []byte
+	mode    os.FileMode
 }
 
 // Snapshot captures the content of paths so a failed post-apply step (such as a
@@ -26,10 +27,15 @@ func TakeSnapshot(root string, paths []string) (*Snapshot, error) {
 		if _, seen := snapshot.states[path]; seen {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(root, path))
+		absolute := filepath.Join(root, path)
+		content, err := os.ReadFile(absolute)
 		switch {
 		case err == nil:
-			snapshot.states[path] = fileState{existed: true, content: content}
+			info, err := os.Stat(absolute)
+			if err != nil {
+				return nil, err
+			}
+			snapshot.states[path] = fileState{existed: true, content: content, mode: info.Mode().Perm()}
 		case errors.Is(err, os.ErrNotExist):
 			snapshot.states[path] = fileState{}
 		default:
@@ -61,7 +67,7 @@ func (s *Snapshot) Restore(root string) error {
 			record(err)
 			continue
 		}
-		record(writeAtomic(absolute, state.content))
+		record(writeAtomicMode(absolute, state.content, state.mode))
 	}
 	return firstErr
 }

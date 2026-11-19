@@ -88,6 +88,7 @@ runtime. Template changes and the CLI are tested and released together.
 weld new <name> [--module path] [--with capability,...] [--dir dir] [--dry-run]
 weld add <capability> [capability...] [--dir dir] [--dry-run]
 weld add module <name> [--command] [--adopt] [--dir dir] [--dry-run]
+weld remove module <name> [--delete-source] [--dir dir] [--dry-run]
 weld add crud <name> [field:type...] [--with-dependencies] [--dir dir] [--dry-run]
 weld add command <name> [--dir dir] [--dry-run]
 weld add middleware <name> [--with-dependencies] [--dir dir] [--dry-run]
@@ -1251,6 +1252,27 @@ hand first, or the Loom generation fails on the duplicate and the add rolls
 back. Without `--adopt`, adding a module whose package already exists is a
 conflict that points at this flag, and `weld doctor` fails on any such
 unrecorded package, so a module cannot stay outside the graph unnoticed.
+
+## `weld remove module`
+
+```sh
+weld remove module items --delete-source --dry-run
+weld remove module items --delete-source
+```
+
+Removal unregisters the HTTP module and its optional module-backed CLI command.
+Without `--delete-source`, Weld refuses to delete edited, untracked, or
+unverified files. The flag explicitly authorizes removing all regular files
+under `internal/modules/<name>/` (including adopted or newly added files), plus
+the files Weld owns for the linked command. It does not delete untracked files
+outside the module directory. Symlinks, special files, nested Git metadata, and
+files tracked by another owner in the module directory block removal.
+
+Shared capabilities, database tables, migrations, and CRUD files outside the
+module source directory are kept. Weld regenerates the Loom wiring and runs
+`go build ./...`; if removal introduces a build error, for example because another
+module still imports it, Weld rolls back the changes. Remove those references
+before retrying. Preview the file plan with `--dry-run`, which writes nothing.
 
 ## `weld add crud`
 

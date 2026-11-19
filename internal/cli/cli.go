@@ -28,7 +28,7 @@ import (
 
 const (
 	progName = "weld"
-	version  = "0.5.2"
+	version  = "0.5.3"
 )
 
 // Run executes a weld invocation and returns a non-nil error on failure. It
@@ -78,6 +78,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(
 		newNewCommand(),
 		newAddCommand(),
+		newRemoveCommand(),
 		newUpgradeCommand(),
 		newGenCommand(),
 		newListCommand(),
