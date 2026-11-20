@@ -290,6 +290,26 @@ func CheckModuleContract(dir string) error {
 	return nil
 }
 
+// CheckModuleRegistration reports business module packages missing from
+// weld.json. It checks registration only, not ownership of individual files.
+func CheckModuleRegistration(root string, manifest *project.Manifest) error {
+	unregistered, err := UnregisteredModules(root, manifest)
+	if err != nil {
+		return fmt.Errorf("check module registration: %w", err)
+	}
+	if len(unregistered) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(unregistered))
+	commands := make([]string, 0, len(unregistered))
+	for _, name := range unregistered {
+		paths = append(paths, "internal/modules/"+name)
+		commands = append(commands, "weld add module "+name+" --adopt")
+	}
+	return fmt.Errorf("modules not registered in weld.json: %s; remove any hand-written route and provider wiring, then run from the project root: %s",
+		strings.Join(paths, ", "), strings.Join(commands, "; "))
+}
+
 // UnregisteredModules lists the packages under internal/modules that weld.json
 // does not record as modules, sorted. Their routes and providers are wired by
 // hand, outside the generated graph.

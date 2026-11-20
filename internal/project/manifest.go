@@ -191,11 +191,21 @@ func NewManifest(name, module, createdWith string) *Manifest {
 
 // Load reads the manifest from dir.
 func Load(dir string) (*Manifest, error) {
+	manifest, err := LoadOptional(dir)
+	if err == nil && manifest == nil {
+		return nil, fmt.Errorf("%s: not a weld project (run: weld new)", dir)
+	}
+	return manifest, err
+}
+
+// LoadOptional reads the manifest, returning nil without error when weld.json
+// is absent so drivers that also support plain Go projects can proceed.
+func LoadOptional(dir string) (*Manifest, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, ManifestName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%s: not a weld project (run: weld new)", dir)
-		}
 		return nil, err
 	}
 	manifest := &Manifest{}

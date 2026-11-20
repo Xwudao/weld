@@ -16,7 +16,8 @@ func newTestCommand() *cobra.Command {
 		Short: "run the project's Go tests, with the configured test database",
 		Long: `Run the project's Go tests, pointing the generated PostgreSQL integration
 tests at the test database configured in config.yml's database_test section (or
-PG_TEST_DSN). weld test never starts a database.
+PG_TEST_DSN). weld test never starts a database. In Weld projects, business
+modules under internal/modules must be registered in weld.json before testing.
 
   weld test                          go test ./...
   weld test --db=off                 ignore any configured test database
@@ -57,6 +58,10 @@ func runTest(cmd *cobra.Command, args []string) error {
 	}
 	dryRun, err := cmd.Flags().GetBool("dry-run")
 	if err != nil {
+		return err
+	}
+
+	if _, err := loadBuildTestManifest(dir); err != nil {
 		return err
 	}
 

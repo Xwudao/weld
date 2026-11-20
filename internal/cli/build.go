@@ -8,7 +8,6 @@ import (
 	"github.com/Xwudao/weld/internal/build"
 	"github.com/Xwudao/weld/internal/docker"
 	"github.com/Xwudao/weld/internal/hook"
-	"github.com/Xwudao/weld/internal/project"
 	"github.com/Xwudao/weld/internal/projectcfg"
 )
 
@@ -26,6 +25,9 @@ With --docker, build a local image using the user-owned Dockerfile created by
 weld docker init; frontend and Go compilation run inside Docker, not on the host.
 Docker settings use flags > build.docker in weld.yml > defaults (name:latest,
 Dockerfile, linux/amd64). This does not push or deploy the image.
+
+In Weld projects, business modules under internal/modules must be registered
+in weld.json before building.
 
 weld.yml is user-owned: weld never rewrites it and ` + "`weld add`" + ` never touches it.`,
 		Args: cobra.NoArgs,
@@ -56,7 +58,11 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	var name string
 	webInstalled := false
 	httpInstalled := false
-	if manifest, loadErr := project.Load(dir); loadErr == nil {
+	manifest, err := loadBuildTestManifest(dir)
+	if err != nil {
+		return err
+	}
+	if manifest != nil {
 		name = manifest.Name
 		webInstalled = manifest.HasCapability("web")
 		httpInstalled = manifest.HasCapability("http")

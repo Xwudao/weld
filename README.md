@@ -50,8 +50,15 @@ Create business modules with `weld add module <name>` before editing their
 services, DTOs and handlers. Likewise create commands, enums and seeders through
 their `weld add` commands first. A handwritten directory does not register a
 module: the server graph uses the `modules` record in `weld.json`, not a
-filesystem scan. Do not manually edit the manifest to adopt existing code;
-back it up and migrate it into a weld-created skeleton.
+filesystem scan. Use `weld add module <name> --adopt` to register an existing
+package rather than editing the manifest by hand.
+
+`weld build` (including `--docker`) and `weld test` stop before running build
+hooks or tools if a direct child of `internal/modules` contains Go files but
+isn't registered in a project's `weld.json`. Generated and adopted modules
+both pass, and you can add or edit files in either. Plain Go projects without
+`weld.json` are unaffected. Bare `go build` and `go test` don't run this check;
+CI can use `weld doctor` to enforce it separately.
 
 Never put business wiring in `internal/di/di.go`, `di_test.go` or `loom_gen.go`.
 Declare custom providers in the stable `providers.go`; with HTTP installed,
