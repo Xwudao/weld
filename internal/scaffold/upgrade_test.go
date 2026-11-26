@@ -941,3 +941,46 @@ func TestUpgradeWebAddsAssetCacheHeaders(t *testing.T) {
 		t.Skip("cannot resolve the generated project's dependencies (network/module cache unavailable)")
 	}
 }
+
+// TestApplyDoesNotRefreshUnchangedModuleFiles proves the manifest baseline for
+// the toolchain-owned go.mod and go.sum is refreshed only when this run rewrote
+// them. The verify step runs `go` with -mod=mod and may settle the module graph;
+// when it does not, recording the hash would absorb a project's own module edit
+// into the baseline `weld upgrade` trusts.
+func TestApplyDoesNotRefreshUnchangedModuleFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := create(t, root)
+
+	recorded := func() string {
+		t.Helper()
+		entry, ok := mustLoad(t, dir).FileEntry(goModPath)
+		if !ok {
+			t.Fatalf("%s is not recorded in the manifest", goModPath)
+		}
+		return entry.SHA256
+	}
+	before := recorded()
+
+	// The project appends its own note; weld's recorded baseline must stay behind.
+	goMod := filepath.Join(dir, goModPath)
+	raw, err := os.ReadFile(goMod)
+	if err != nil {
+		t.Fatalf("read %s: %v", goModPath, err)
+	}
+	if err := os.WriteFile(goMod, append(raw, []byte("\n// project note\n")...), 0o644); err != nil {
+		t.Fatalf("write %s: %v", goModPath, err)
+	}
+
+	result := &Result{
+		Dir:        dir,
+		Operations: []project.Operation{{Path: "notes.txt", Content: []byte("written\n")}},
+		Verify:     []string{"version"},
+	}
+	if err := result.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if after := recorded(); after != before {
+		t.Fatalf("the %s baseline was refreshed although the run did not rewrite it: %s -> %s", goModPath, before, after)
+	}
+}

@@ -226,6 +226,7 @@ func (r *Result) Apply() (err error) {
 			paths = append(paths, goModPath, goSumPath)
 		}
 	}
+	moduleBefore := captureModuleFileHashes(r.Dir)
 	snapshot, err := project.TakeSnapshot(r.Dir, paths)
 	if err != nil {
 		return err
@@ -250,10 +251,14 @@ func (r *Result) Apply() (err error) {
 	}
 	if r.GenerateLoom || len(r.Verify) > 0 {
 		// The generator and the check both run with -mod=mod, so they may rewrite
-		// the module files as they resolve the module graph. Record what they
-		// wrote — and only what they wrote, because the recorded hash is the
-		// baseline `weld upgrade` trusts.
-		generated = append(generated, goModPath, goSumPath)
+		// the module files as they resolve the module graph. Record only a file
+		// this run actually changed: refreshing a file weld did not write absorbs
+		// the project's own edit into the baseline `weld upgrade` trusts.
+		for _, name := range []string{goModPath, goSumPath} {
+			if moduleFileChanged(r.Dir, moduleBefore, name) {
+				generated = append(generated, name)
+			}
+		}
 	}
 	if len(r.Verify) > 0 {
 		output, err := goCheck(r.Dir, r.Verify)
@@ -280,6 +285,34 @@ func (r *Result) Apply() (err error) {
 		}
 	}
 	return nil
+}
+
+// captureModuleFileHashes records the content hash of the toolchain-owned module
+// files before an apply, so only a file this run actually rewrote is refreshed in
+// the manifest. An absent file records the empty string, which differs from any
+// real content hash.
+func captureModuleFileHashes(root string) map[string]string {
+	hashes := make(map[string]string, 2)
+	for _, name := range []string{goModPath, goSumPath} {
+		raw, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			hashes[name] = ""
+			continue
+		}
+		hashes[name] = project.HashContent(raw)
+	}
+	return hashes
+}
+
+// moduleFileChanged reports whether a module file's content differs from the
+// captured hash, so a no-op generator or verify never licenses overwriting a
+// project's own module edit.
+func moduleFileChanged(root string, before map[string]string, name string) bool {
+	raw, err := os.ReadFile(filepath.Join(root, name))
+	if err != nil {
+		return before[name] != ""
+	}
+	return project.HashContent(raw) != before[name]
 }
 
 // rollback restores the snapshot after a failed apply and reports the original
