@@ -390,7 +390,10 @@ Capabilities:
   `internal/di/seed_providers.go`.
 - `redis` (add) — an opt-in Redis client with typed connection configuration.
   Requires `loom` but not `http`; installing it never connects Redis to a
-  service.
+  service. `redis.prefix` defaults to `""` (no namespace). Set it in YAML or
+  override it with `REDIS_PREFIX` (an empty value clears the YAML prefix).
+  Build namespaced keys with `cfg.RedisKeys().Key("session", "42")`; the
+  client does not rewrite keys, and changing the prefix does not migrate data.
 - `events` (add) — an opt-in in-process event dispatcher: `events.On[E]`
   registers a listener keyed on the event's concrete Go type and `Publish` runs
   every listener for that type synchronously, in registration order, joining

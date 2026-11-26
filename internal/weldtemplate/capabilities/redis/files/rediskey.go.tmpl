@@ -1,0 +1,32 @@
+// Package rediskey joins logical Redis key parts within an optional namespace.
+package rediskey
+
+import (
+	"strings"
+	"unicode"
+)
+
+// Space is a key namespace. Its zero value produces unprefixed keys.
+type Space struct {
+	prefix string
+}
+
+// New returns a namespace with surrounding whitespace and trailing separators
+// removed. An empty prefix disables namespacing.
+func New(prefix string) Space {
+	return Space{prefix: strings.TrimRightFunc(strings.TrimSpace(prefix), func(r rune) bool {
+		return r == ':' || unicode.IsSpace(r)
+	})}
+}
+
+// Key joins key parts with colons and prepends the namespace if configured.
+func (s Space) Key(parts ...string) string {
+	if len(parts) == 0 {
+		return s.prefix
+	}
+	key := strings.Join(parts, ":")
+	if s.prefix == "" {
+		return key
+	}
+	return s.prefix + ":" + key
+}

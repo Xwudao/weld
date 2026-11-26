@@ -22,10 +22,22 @@ the work is done.
 
 The configuration lives in `internal/config` (`config.Redis`) and is read from
 `config.yml` (`redis:` section) and overridden by the environment
-(`REDIS_ADDR`, `REDIS_USERNAME`, `REDIS_PASSWORD`, `REDIS_DB`, `REDIS_TLS`).
+(`REDIS_ADDR`, `REDIS_USERNAME`, `REDIS_PASSWORD`, `REDIS_DB`, `REDIS_TLS`,
+`REDIS_PREFIX`).
 The username and password are `config.Secret`, which redacts itself in `fmt`,
 `logging`, JSON and YAML, so a credential cannot reach a log record by
 accident. The address defaults to `localhost:6379`; the credentials never do.
+
+## Key namespaces
+
+`redis.prefix` defaults to `""`, so `cfg.RedisKeys().Key("session", "42")`
+returns `session:42`. Set the prefix to `team` (or `team:`) to get
+`team:session:42`. An explicitly empty `REDIS_PREFIX` clears a prefix set in
+YAML. Use the helper when building keys; the client does not rewrite them.
+
+Older projects can omit `prefix` after upgrading or add it to their Redis
+section to opt in. Switching to a different prefix changes the keys your code
+addresses; it does not migrate data or fall back to the old keys.
 
 ## With Loom
 

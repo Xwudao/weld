@@ -72,6 +72,33 @@ func TestRedisDefaultsToLocalhost(t *testing.T) {
 	}
 }
 
+// TestRedisKeyPrefix covers the namespace default, YAML, and environment override.
+func TestRedisKeyPrefix(t *testing.T) {
+	const withPrefix = "redis:\n  prefix: ' team: '\n"
+	for _, tc := range []struct {
+		name string
+		yaml string
+		env  map[string]string
+		want string
+	}{
+		{name: "omitted", want: "session:42"},
+		{name: "empty YAML", yaml: "redis:\n  prefix: \"\"\n", want: "session:42"},
+		{name: "YAML", yaml: withPrefix, want: "team:session:42"},
+		{name: "environment", yaml: withPrefix, env: map[string]string{EnvRedisPrefix: "prod"}, want: "prod:session:42"},
+		{name: "empty override", yaml: withPrefix, env: map[string]string{EnvRedisPrefix: ""}, want: "session:42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := fakeLoader(map[string]string{DefaultPath: tc.yaml}, tc.env).Load("")
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.RedisKeys().Key("session", "42"); got != tc.want {
+				t.Errorf("key = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRedisLoadErrorDoesNotLeakSecret proves a Redis environment parse error
 // never echoes a credential: the error names the variable, not the password.
 func TestRedisLoadErrorDoesNotLeakSecret(t *testing.T) {

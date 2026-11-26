@@ -1,6 +1,6 @@
 package config
 
-// Redis configuration: the typed connection settings and the environment,
+// Redis configuration: the typed connection and key settings and the environment,
 // defaults and validation that back them.
 //
 // This file is written once by `weld add redis` and belongs to the config
@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"__module__/internal/rediskey"
 )
 
 // DefaultRedisAddr is the connection address used when neither the file nor the
@@ -29,9 +31,10 @@ const (
 	EnvRedisPassword = "REDIS_PASSWORD"
 	EnvRedisDB       = "REDIS_DB"
 	EnvRedisTLS      = "REDIS_TLS"
+	EnvRedisPrefix   = "REDIS_PREFIX"
 )
 
-// Redis holds the Redis connection settings.
+// Redis holds the Redis connection and key namespace settings.
 //
 // The address has a default; the username and password are optional and are
 // held as Secret so they never reach a log or a formatted dump. The connection
@@ -43,6 +46,13 @@ type Redis struct {
 	Password Secret `yaml:"password"`
 	DB       int    `yaml:"db"`
 	TLS      bool   `yaml:"tls"`
+	Prefix   string `yaml:"prefix"`
+}
+
+// RedisKeys returns the configured key namespace. An empty prefix leaves keys
+// unprefixed, and the Redis client itself never rewrites keys.
+func (c *Config) RedisKeys() rediskey.Space {
+	return rediskey.New(c.Redis.Prefix)
 }
 
 // applyRedisEnv overrides the Redis section with the environment. A variable
@@ -77,6 +87,9 @@ func (c *Config) applyRedisEnv(lookupEnv LookupEnvFunc) error {
 			return fmt.Errorf("config: %s is not a boolean", EnvRedisTLS)
 		}
 		c.Redis.TLS = tlsEnabled
+	}
+	if value, ok := lookupEnv(EnvRedisPrefix); ok {
+		c.Redis.Prefix = value
 	}
 	return nil
 }

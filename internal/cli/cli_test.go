@@ -162,7 +162,7 @@ func TestAddMultipleCapabilitiesInOneCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add redis mail: %v", err)
 	}
-	if !strings.Contains(out, "redis 0.1.0 is already installed") {
+	if !strings.Contains(out, "redis 0.2.0 is already installed") {
 		t.Fatalf("repeat capability note missing: %q", out)
 	}
 	if strings.Contains(out, "installing required capability \"redis\"") {

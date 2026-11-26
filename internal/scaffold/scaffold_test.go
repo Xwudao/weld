@@ -2235,6 +2235,7 @@ func TestAddRedisInstallsAlone(t *testing.T) {
 		"internal/config/config.go",
 		"internal/config/redis.go",
 		"internal/config/redis_test.go",
+		"internal/rediskey/rediskey.go",
 		"internal/redisclient/redisclient.go",
 		"internal/redisclient/redisclient_test.go",
 		"internal/redisclient/README.md",
@@ -2278,9 +2279,13 @@ func TestAddRedisInstallsAlone(t *testing.T) {
 		}
 	}
 
-	cfg := readFile(t, filepath.Join(dir, "config.yml"))
-	if !strings.Contains(cfg, "redis:") || !strings.Contains(cfg, "weld:redis:installed") {
-		t.Errorf("config.yml has no redis section:\n%s", cfg)
+	for _, path := range []string{"config.yml", "config.example.yml"} {
+		cfg := readFile(t, filepath.Join(dir, path))
+		for _, want := range []string{"redis:", "weld:redis:installed", `  prefix: ""`} {
+			if !strings.Contains(cfg, want) {
+				t.Errorf("%s is missing %q:\n%s", path, want, cfg)
+			}
+		}
 	}
 	goMod := readFile(t, filepath.Join(dir, "go.mod"))
 	for _, want := range []string{"github.com/redis/go-redis/v9", "github.com/alicebob/miniredis/v2", "weld:redis:installed"} {
@@ -2676,7 +2681,7 @@ func serveEnv() []string {
 	return append(envWithout(
 		"DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME",
 		"HTTP_ADDR", "CRON_TIMEZONE",
-		"REDIS_ADDR", "REDIS_USERNAME", "REDIS_PASSWORD", "REDIS_DB", "REDIS_TLS",
+		"REDIS_ADDR", "REDIS_USERNAME", "REDIS_PASSWORD", "REDIS_DB", "REDIS_TLS", "REDIS_PREFIX",
 		"MAIL_HOST", "MAIL_PORT", "MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_FROM", "MAIL_TLS", "MAIL_TIMEOUT_SECONDS",
 		"STORAGE_ENDPOINT", "STORAGE_REGION", "STORAGE_BUCKET", "STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY", "STORAGE_PATH_STYLE", "STORAGE_TLS",
 	), "GOWORK=off")

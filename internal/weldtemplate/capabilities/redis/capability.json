@@ -1,12 +1,20 @@
 {
   "name": "redis",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "changes": [
+    {
+      "version": "0.2.0",
+      "summary": "Optional Redis key namespace via redis.prefix and Config.RedisKeys; the empty default keeps existing keys unchanged.",
+      "actions": ["To opt in, set redis.prefix in config.yml or set REDIS_PREFIX, and build the affected keys with cfg.RedisKeys().Key(...). Changing the prefix does not migrate existing keys."]
+    }
+  ],
   "kind": "add",
   "summary": "Opt-in Redis client: typed connection configuration and a lazy go-redis client the caller owns. Installing the client never connects it to any service.",
   "requires": ["loom"],
   "files": [
     { "path": "internal/config/redis.go", "source": "files/redis_config.go.tmpl" },
     { "path": "internal/config/redis_test.go", "source": "files/redis_config_test.go.tmpl" },
+    { "path": "internal/rediskey/rediskey.go", "source": "files/rediskey.go.tmpl" },
     { "path": "internal/redisclient/redisclient.go", "source": "files/redisclient.go.tmpl" },
     { "path": "internal/redisclient/redisclient_test.go", "source": "files/redisclient_test.go.tmpl" },
     { "path": "internal/redisclient/README.md", "source": "files/README.md" },

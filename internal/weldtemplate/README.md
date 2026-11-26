@@ -161,7 +161,8 @@ capabilities/
     capability.json
     files/         internal/redisclient (lazy go-redis client, caller owns the
                    lifecycle), internal/config/redis.go (typed connection
-                   settings), internal/di/redis_provider.go (stable Loom seam),
+                   settings), internal/rediskey (optional key namespace),
+                   internal/di/redis_provider.go (stable Loom seam),
                    snippets that extend the shared config, README
   events/          kind: add    -> opt-in in-process event dispatcher, requires loom
     capability.json
